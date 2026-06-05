@@ -1,0 +1,32 @@
+{
+  "identifier" : "PGAGENT0-0000-0000-0000-000000000001",
+  "nonRenewingSubscriptions" : [],
+  "products" : [
+    {
+      "displayPrice" : "39.99",
+      "familyShareable" : false,
+      "internalID" : "PGAGENT0-0000-0000-0000-000000000010",
+      "localizations" : [
+        {
+          "description" : "Unlock the full database toolkit: unlimited saved queries and history, CSV/JSONL/Parquet export, visual EXPLAIN, the full object explorer, widgets and alerts, and unlimited connections.",
+          "displayName" : "pgAgent Pro",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.pgagent.mobile.pro.lifetime",
+      "referenceName" : "Pro Lifetime",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storeKitErrors" : [],
+    "_storefront" : "USA"
+  },
+  "subscriptionGroups" : [],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

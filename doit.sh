@@ -1,0 +1,2 @@
+export APPLE_DEVELOPMENT_TEAM=9QFT5JP875
+just mac-run-dev

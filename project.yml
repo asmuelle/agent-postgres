@@ -1,0 +1,465 @@
+# XcodeGen project manifest for Mc-Ssh macOS app.
+#
+# Generate the .xcodeproj:
+#   cd pgAgent && xcodegen generate
+#
+# Prerequisites: brew install xcodegen
+#
+# The Rust static library is built by the "Build Rust Library" build phase.
+
+name: "pgAgent"
+options:
+  bundleIdPrefix: com.pgagent
+  deploymentTarget:
+    macOS: "13.0"
+    iOS: "17.0"
+  xcodeVersion: "15.0"
+  postGenCommand: |
+    # After project generation, copy the Rust library to a known location
+    # that Xcode's linker can find without extra search paths.
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    DEVELOPMENT_TEAM: "9QFT5JP875"
+
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: 1.0.0
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.9.1
+
+targets:
+  PgAgentApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: PgAgentApp
+        type: group
+        createIntermediateGroups: true
+      # uniffi-generated Swift FFI bindings — depend on pg_agentFFI
+      # via the modulemap in bindings/, link the symbols from the universal
+      # static lib via OTHER_LDFLAGS=-lpg_agent. Lives in the app
+      # target because frameworks can't link the Rust static lib directly.
+      - path: bindings/pg_agent.swift
+        optional: true
+    dependencies:
+      - target: PgAgentWidgets
+      - target: PgAgentMacOS
+      - package: SwiftTerm
+        product: SwiftTerm
+      - package: Sparkle
+        product: Sparkle
+    # Declared inline so `xcodegen generate` regenerates the file
+    # deterministically. A bare `path:` (no `properties:`) would write an
+    # empty plist and silently break code signing — every regenerate would
+    # wipe out the disable-library-validation flag, then dyld rejects the
+    # ad-hoc-signed framework with "different Team IDs" at launch.
+    entitlements:
+      path: PgAgentApp/PgAgent.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.automation.apple-events: false
+        com.apple.security.cs.allow-unsigned-executable-memory: true
+        com.apple.security.cs.disable-library-validation: true
+        com.apple.security.cs.allow-dyld-environment-variables: true
+        com.apple.security.device.audio-input: false
+        com.apple.security.device.camera: false
+        com.apple.security.files.user-selected.read-write: true
+        com.apple.security.files.bookmarks.app-scope: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+        com.apple.security.application-groups:
+          - group.com.pgagent.pgagent
+        # `keychain-access-groups` requires a provisioning profile (Apple
+        # ties access groups to a Team ID), so it can't coexist with
+        # ad-hoc signing. Keychain APIs still work via the implicit
+        # per-bundle access group. Re-add this when switching to
+        # Developer ID for distribution.
+        # keychain-access-groups:
+        #   - $(AppIdentifierPrefix)com.pgagent.macos
+    settings:
+      base:
+        INFOPLIST_FILE: PgAgentApp/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos
+        PRODUCT_NAME: "pgAgent"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Auto-derived module name would be "pg_agent" (dash → underscore).
+        # Force a clean identifier so the test bundle's `@testable import
+        # PgAgentApp` resolves.
+        PRODUCT_MODULE_NAME: PgAgentApp
+        CODE_SIGN_ENTITLEMENTS: PgAgentApp/PgAgent.entitlements
+        ENABLE_HARDENED_RUNTIME: true
+        # Hardened runtime exceptions needed for the Rust bridge
+        COM_APPLE_SECURITY_CS_DISABLE_LIBRARY_VALIDATION: true
+        COM_APPLE_SECURITY_DEVICE_MICROPHONE: false
+        COM_APPLE_SECURITY_DEVICE_CAMERA: false
+        COM_APPLE_SECURITY_NETWORK_CLIENT: true
+        COM_APPLE_SECURITY_NETWORK_SERVER: true
+        LIBRARY_SEARCH_PATHS:
+          - $(PROJECT_DIR)/target/universal/release
+        # Make the FFI modulemap visible to the app target too — needed when
+        # SwiftPM/Xcode evaluates `#if canImport(pg_agentFFI)` during
+        # the app's own Swift compilation.
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/bindings
+        OTHER_LDFLAGS:
+          - $(inherited)
+          # Rust core static lib (universal: built by build_cargo.sh).
+          - -lpg_agent
+          - -lobjc
+          - -lresolv
+          - -framework
+          - Security
+          - -framework
+          - ServiceManagement
+          # Required by `rustls-native-certs` (Postgres driver) to read
+          # the macOS system trust store.
+          - -framework
+          - SystemConfiguration
+          # On-device AI (FoundationModels) ships in the macOS 26 SDK but the
+          # deployment target is macOS 13 — weak-link so the app still loads on
+          # older OSes. Every call site is gated by `@available(macOS 26, *)`
+          # plus `PgAIAvailabilityProbe`.
+          - -weak_framework
+          - FoundationModels
+          - -lxml2
+          - -lz
+    preBuildScripts:
+      - name: "Build Rust Library"
+        script: |
+          "${SRCROOT}/PgAgentApp/build_cargo.sh"
+        basedOnDependencyAnalysis: false
+        inputFiles: []
+        outputFiles: []
+    scheme:
+      testTargets:
+        - PgAgentAppTests
+
+  PgAgentMobile:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PgAgentMobile
+        type: group
+        createIntermediateGroups: true
+      - path: Sources/PgAgentMacOS
+        type: group
+      - path: bindings/pg_agent.swift
+        optional: true
+      - path: PgAgentApp/PostgresProfile.swift
+      - path: PgAgentApp/KeychainManager.swift
+      - path: PgAgentApp/PgSchemaStore.swift
+      - path: PgAgentApp/PostgresConnectionManager.swift
+      - path: PgAgentApp/PostgresPropertyInspectorView.swift
+      - path: PgAgentApp/PostgresConnectionStatusStore.swift
+      - path: PgAgentApp/PostgresQueryTab.swift
+      - path: PgAgentApp/PostgresColumnAffinity.swift
+      - path: PgAgentApp/PostgresColumnWidthStore.swift
+      - path: PgAgentApp/PostgresHistoryStore.swift
+      - path: PgAgentApp/PostgresSavedQueriesStore.swift
+      - path: PgAgentApp/BridgeManager.swift
+      - path: PgAgentApp/BridgeManager+Postgres.swift
+      - path: PgAgentApp/WriteBatcher.swift
+      - path: PgAgentApp/PgAgentEventCallback.swift
+      - path: PgAgentApp/PgAgentEventBus.swift
+    dependencies:
+      - target: PgAgentMobileWidgets
+    entitlements:
+      path: PgAgentMobile/PgAgentMobile.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.pgagent.mobile
+        com.apple.security.application-groups:
+          - group.com.pgagent.pgagent
+    settings:
+      base:
+        INFOPLIST_FILE: PgAgentMobile/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile
+        PRODUCT_NAME: "pgAgent"
+        PRODUCT_MODULE_NAME: PgAgentMobile
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: false
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/bindings
+        LIBRARY_SEARCH_PATHS:
+          - $(PROJECT_DIR)/target/ios/universal-ios/release
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lpg_agent
+          - -lobjc
+          - -lresolv
+          - -framework
+          - Security
+          - -framework
+          - LocalAuthentication
+          - -framework
+          - SystemConfiguration
+          - -lxml2
+          - -lz
+    scheme:
+      testTargets:
+        - PgAgentMobileTests
+
+  PgAgentFileProvider:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PgAgentFileProvider
+        type: group
+        createIntermediateGroups: true
+      - path: Sources/PgAgentMacOS/PgAgentMacOS.swift
+      - path: Sources/PgAgentMacOS/FileModels.swift
+      - path: Sources/PgAgentMacOS/SharedJSONFileStore.swift
+      - path: Sources/PgAgentMacOS/PlatformIntegrationModels.swift
+      - path: Sources/PgAgentMacOS/WidgetSnapshots.swift
+      - path: Sources/PgAgentMacOS/WidgetSnapshotPresentation.swift
+      - path: Sources/PgAgentMacOS/WidgetMonitoringPreferences.swift
+      - path: Sources/PgAgentMacOS/LiveActivityModels.swift
+      - path: Sources/PgAgentMacOS/WatchStatusModels.swift
+      - path: Sources/PgAgentMacOS/ShellIntegrationCommands.swift
+      - path: Sources/PgAgentMacOS/BackgroundSSHOperations.swift
+      - path: Sources/PgAgentMacOS/OfflineSFTPFileProviderModels.swift
+      - path: Sources/PgAgentMacOS/SharedUploadStagingStore.swift
+    entitlements:
+      path: PgAgentFileProvider/PgAgentFileProvider.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.pgagent.pgagent
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.pgagent.mobile
+    settings:
+      base:
+        INFOPLIST_FILE: PgAgentFileProvider/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile.fileprovider
+        PRODUCT_NAME: PgAgentFileProvider
+        PRODUCT_MODULE_NAME: PgAgentFileProvider
+        CODE_SIGN_ENTITLEMENTS: PgAgentFileProvider/PgAgentFileProvider.entitlements
+        APPLICATION_EXTENSION_API_ONLY: true
+        SKIP_INSTALL: YES
+    scheme: {}
+
+  PgAgentShareExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PgAgentShareExtension
+        type: group
+        createIntermediateGroups: true
+      - path: Sources/PgAgentMacOS/PgAgentMacOS.swift
+      - path: Sources/PgAgentMacOS/FileModels.swift
+      - path: Sources/PgAgentMacOS/SharedJSONFileStore.swift
+      - path: Sources/PgAgentMacOS/PlatformIntegrationModels.swift
+      - path: Sources/PgAgentMacOS/WidgetSnapshots.swift
+      - path: Sources/PgAgentMacOS/WidgetSnapshotPresentation.swift
+      - path: Sources/PgAgentMacOS/WidgetMonitoringPreferences.swift
+      - path: Sources/PgAgentMacOS/LiveActivityModels.swift
+      - path: Sources/PgAgentMacOS/WatchStatusModels.swift
+      - path: Sources/PgAgentMacOS/ShellIntegrationCommands.swift
+      - path: Sources/PgAgentMacOS/BackgroundSSHOperations.swift
+      - path: Sources/PgAgentMacOS/SharedUploadStagingStore.swift
+    entitlements:
+      path: PgAgentShareExtension/PgAgentShareExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.pgagent.pgagent
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.pgagent.mobile
+    settings:
+      base:
+        INFOPLIST_FILE: PgAgentShareExtension/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile.share
+        PRODUCT_NAME: PgAgentShareExtension
+        PRODUCT_MODULE_NAME: PgAgentShareExtension
+        CODE_SIGN_ENTITLEMENTS: PgAgentShareExtension/PgAgentShareExtension.entitlements
+        APPLICATION_EXTENSION_API_ONLY: true
+        SKIP_INSTALL: YES
+    scheme: {}
+
+  PgAgentShortcutsExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PgAgentShortcutsExtension
+        type: group
+        createIntermediateGroups: true
+      - path: Sources/PgAgentMacOS/PgAgentMacOS.swift
+      - path: Sources/PgAgentMacOS/FileModels.swift
+      - path: Sources/PgAgentMacOS/SharedJSONFileStore.swift
+      - path: Sources/PgAgentMacOS/PlatformIntegrationModels.swift
+      - path: Sources/PgAgentMacOS/WidgetSnapshots.swift
+      - path: Sources/PgAgentMacOS/WidgetSnapshotPresentation.swift
+      - path: Sources/PgAgentMacOS/WidgetMonitoringPreferences.swift
+      - path: Sources/PgAgentMacOS/LiveActivityModels.swift
+      - path: Sources/PgAgentMacOS/WatchStatusModels.swift
+      - path: Sources/PgAgentMacOS/ShellIntegrationCommands.swift
+      - path: Sources/PgAgentMacOS/BackgroundSSHOperations.swift
+      - path: Sources/PgAgentMacOS/OfflineSFTPFileProviderModels.swift
+      - path: Sources/PgAgentMacOS/SharedUploadStagingStore.swift
+    entitlements:
+      path: PgAgentShortcutsExtension/PgAgentShortcutsExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.pgagent.pgagent
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.pgagent.mobile
+    settings:
+      base:
+        INFOPLIST_FILE: PgAgentShortcutsExtension/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile.shortcuts
+        PRODUCT_NAME: PgAgentShortcutsExtension
+        PRODUCT_MODULE_NAME: PgAgentShortcutsExtension
+        CODE_SIGN_ENTITLEMENTS: PgAgentShortcutsExtension/PgAgentShortcutsExtension.entitlements
+        APPLICATION_EXTENSION_API_ONLY: true
+        SKIP_INSTALL: YES
+    scheme: {}
+
+  PgAgentMobileWidgets:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PgAgentMobileWidgets
+        type: group
+        createIntermediateGroups: true
+      - path: Sources/PgAgentMacOS/PgAgentMacOS.swift
+      - path: Sources/PgAgentMacOS/SharedJSONFileStore.swift
+      - path: Sources/PgAgentMacOS/PlatformIntegrationModels.swift
+      - path: Sources/PgAgentMacOS/BackgroundSSHOperations.swift
+      - path: Sources/PgAgentMacOS/WidgetSnapshots.swift
+      - path: Sources/PgAgentMacOS/WidgetSnapshotPresentation.swift
+      - path: Sources/PgAgentMacOS/WidgetMonitoringPreferences.swift
+      - path: Sources/PgAgentMacOS/LiveActivityModels.swift
+      - path: Sources/PgAgentMacOS/WatchStatusModels.swift
+      - path: Sources/PgAgentMacOS/ShellIntegrationCommands.swift
+    entitlements:
+      path: PgAgentMobileWidgets/PgAgentMobileWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.pgagent.pgagent
+    settings:
+      base:
+        INFOPLIST_FILE: PgAgentMobileWidgets/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile.widgets
+        PRODUCT_NAME: PgAgentMobileWidgets
+        PRODUCT_MODULE_NAME: PgAgentMobileWidgets
+        CODE_SIGN_ENTITLEMENTS: PgAgentMobileWidgets/PgAgentMobileWidgets.entitlements
+        APPLICATION_EXTENSION_API_ONLY: true
+        SKIP_INSTALL: YES
+    scheme: {}
+
+  PgAgentWidgets:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: PgAgentWidgets
+        type: group
+        createIntermediateGroups: true
+    dependencies:
+      - target: PgAgentMacOS
+    entitlements:
+      path: PgAgentWidgets/PgAgentWidgets.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.pgagent.pgagent
+    settings:
+      base:
+        INFOPLIST_FILE: PgAgentWidgets/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.widgets
+        PRODUCT_NAME: PgAgentWidgets
+        PRODUCT_MODULE_NAME: PgAgentWidgets
+        CODE_SIGN_ENTITLEMENTS: PgAgentWidgets/PgAgentWidgets.entitlements
+        APPLICATION_EXTENSION_API_ONLY: true
+        SKIP_INSTALL: YES
+    scheme: {}
+
+  PgAgentMacOS:
+    type: framework
+    platform: macOS
+    sources:
+      - path: Sources/PgAgentMacOS
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.lib
+        PRODUCT_NAME: PgAgentMacOS
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: YES
+    scheme:
+      testTargets:
+        - PgAgentMacOSTests
+
+  PgAgentMacOSTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/PgAgentMacOSTests
+        type: group
+    dependencies:
+      - target: PgAgentMacOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.tests
+        PRODUCT_NAME: PgAgentMacOSTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: ""
+
+  # FFI integration tests — runs inside the app's process so the linked
+  # Rust static library is reachable. Covers the uniffi-generated surface
+  # (rshellInit, rshellConnect, rshellKeychain*) which the framework's
+  # test bundle can't see.
+  PgAgentAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/PgAgentAppTests
+        type: group
+    dependencies:
+      - target: PgAgentApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.app-tests
+        PRODUCT_NAME: PgAgentAppTests
+        GENERATE_INFOPLIST_FILE: YES
+        # The app's PRODUCT_NAME is "pgAgent" (with a dash) which doesn't
+        # match the target name, so xcodegen can't infer the right
+        # TEST_HOST path. Set both explicitly.
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/pgAgent.app/Contents/MacOS/pgAgent
+        BUNDLE_LOADER: $(TEST_HOST)
+        # The test bundle re-compiles the bindings transitively when it
+        # @testable-imports PgAgentApp; needs the same module-map path.
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/bindings
+
+  # StoreKit product-config guard. A pure iOS logic test (no app host, no Rust
+  # link) that resolves every id in MobileEntitlementsStore.configuredProductIds
+  # against Products.storekit. Fails the build if an id is unsellable — the
+  # "empty paywall" failure mode. MobileEntitlementsStore.swift is compiled in
+  # directly so the ids under test are the same source of truth the app ships.
+  PgAgentMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests/PgAgentMobileTests
+        type: group
+        excludes:
+          - "Products.storekit"
+      - path: Tests/PgAgentMobileTests/Products.storekit
+        buildPhase: resources
+      - path: PgAgentMobile/MobileEntitlementsStore.swift
+    dependencies:
+      - sdk: StoreKitTest.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile.tests
+        PRODUCT_NAME: PgAgentMobileTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: ""

@@ -1,0 +1,38 @@
+[package]
+name = "pg-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Native macOS / iPadOS pgAgent app — Rust core used via FFI from Swift."
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+name = "pg_agent"
+
+# Bind generation entry point. Run via:
+#   cargo run --release --bin uniffi-bindgen -- \
+#       generate --library target/release/libpg_agent.dylib \
+#       --language swift --out-dir bindings
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+ssh-commander-core = "0.1.0"
+ssh-commander-pg-parquet = "0.1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+uniffi = { version = "0.28", features = ["cli"] }
+shell-escape = "0.1"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[dev-dependencies]
+tempfile = "3"

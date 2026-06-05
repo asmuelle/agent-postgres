@@ -1,0 +1,64 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "Bash(cargo check *)",
+      "Bash(just check *)",
+      "Bash(just lint *)",
+      "Bash(just mac-build *)",
+      "Bash(just mac-gen *)",
+      "Bash(just mac-bindings *)",
+      "Bash(just test *)",
+      "Bash(just test-rust *)",
+      "Bash(just mac-test *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/guard_agent.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [[ \"$CLAUDE_TOOL_INPUT_FILE_PATH\" == *.rs ]]; then rustfmt \"$CLAUDE_TOOL_INPUT_FILE_PATH\"; fi"
+          },
+          {
+            "type": "command",
+            "command": "if [[ \"$CLAUDE_TOOL_INPUT_FILE_PATH\" == *.swift ]]; then (swift-format format --in-place \"$CLAUDE_TOOL_INPUT_FILE_PATH\" || xcrun swift-format format --in-place \"$CLAUDE_TOOL_INPUT_FILE_PATH\") 2>/dev/null || true; fi"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/scripts/verify_stop.sh\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "osascript -e 'display notification \"Claude Code completed the task or needs your feedback!\" with title \"🤖 Claude Code Update\" sound name \"Glass\"'"
+          }
+        ]
+      }
+    ]
+  }
+}

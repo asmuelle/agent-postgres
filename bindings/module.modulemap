@@ -1,0 +1,4 @@
+module pg_agentFFI {
+    header "pg_agentFFI.h"
+    export *
+}
