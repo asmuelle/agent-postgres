@@ -4467,4 +4467,302 @@ mod tests {
             other => panic!("expected ConnectionNotFound, got {other:?}"),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Live-Postgres integration tier (opt-in).
+    //
+    // These exercise the real query/edit/export path end-to-end against a
+    // running Postgres. They are OFF by default: `it_config` returns `None`
+    // unless `PG_AGENT_IT=1` is set, so `cargo test` stays green on machines
+    // without a database. CI sets `PG_AGENT_IT=1` plus the standard `PG*`
+    // libpq env vars and runs them on a fresh server.
+    //
+    //   PG_AGENT_IT=1 PGUSER=postgres PGPASSWORD=postgres PGDATABASE=postgres \
+    //       cargo test --lib pg_it_ -- --test-threads=1 --nocapture
+    // -----------------------------------------------------------------------
+
+    /// Build a connection config for the live tier, or `None` to skip. Each
+    /// test passes a distinct `profile` so its manager connection id (and pool)
+    /// is isolated from the others even under parallel execution.
+    fn it_config(profile: &str) -> Option<FfiPgConfig> {
+        if std::env::var("PG_AGENT_IT").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let port = std::env::var("PGPORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(5432);
+        Some(FfiPgConfig {
+            host: std::env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".into()),
+            port,
+            database: std::env::var("PGDATABASE").unwrap_or_else(|_| "postgres".into()),
+            user: std::env::var("PGUSER").unwrap_or_else(|_| "postgres".into()),
+            auth: FfiPgAuthMethod::Password {
+                password: std::env::var("PGPASSWORD").unwrap_or_default(),
+            },
+            // Prefer (not Require) so the tier works against a plain test server
+            // with no TLS while still exercising the negotiation path.
+            tls: FfiPgTlsMode::Prefer,
+            application_name: Some("pg-agent-it".into()),
+            tunnel: None,
+            connect_timeout_secs: Some(10),
+            max_pool_size: None,
+            idle_timeout_secs: None,
+            min_idle_connections: None,
+            profile_id: Some(profile.into()),
+        })
+    }
+
+    #[test]
+    fn pg_it_connect_execute_cursor_roundtrip() {
+        let Some(cfg) = it_config("it-cursor") else {
+            return;
+        };
+        rshell_init();
+        let conn = rshell_pg_connect(cfg).expect("connect to live postgres");
+        let sid = "it-cursor".to_string();
+
+        // Fresh table with five rows.
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "DROP TABLE IF EXISTS pg_agent_it_cursor".into(),
+            1,
+        )
+        .expect("drop");
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "CREATE TABLE pg_agent_it_cursor (id int primary key, label text)".into(),
+            1,
+        )
+        .expect("create");
+        let ins = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "INSERT INTO pg_agent_it_cursor SELECT g, 'row-' || g FROM generate_series(1, 5) g"
+                .into(),
+            1,
+        )
+        .expect("insert");
+        assert_eq!(ins.rows_affected, Some(5));
+
+        // A page smaller than the result forces the server to open a cursor.
+        let first = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "SELECT id, label FROM pg_agent_it_cursor ORDER BY id".into(),
+            2,
+        )
+        .expect("select");
+        assert_eq!(first.columns.len(), 2);
+        assert_eq!(first.columns[0].name, "id");
+        assert_eq!(first.columns[1].name, "label");
+        assert_eq!(first.rows.len(), 2, "first page holds page_size rows");
+        assert_eq!(first.rows[0].cells[0].as_deref(), Some("1"));
+        let cursor = first
+            .cursor_id
+            .clone()
+            .expect("cursor opened for a result larger than the page");
+
+        // Drain across the cursor boundary.
+        let page2 = rshell_pg_fetch_page(conn.clone(), sid.clone(), cursor.clone(), 2)
+            .expect("fetch page 2");
+        assert_eq!(page2.rows.len(), 2);
+        assert!(page2.has_more, "a full page means more may remain");
+        let page3 = rshell_pg_fetch_page(conn.clone(), sid.clone(), cursor.clone(), 2)
+            .expect("fetch page 3");
+        assert_eq!(page3.rows.len(), 1, "final row");
+        assert!(!page3.has_more, "cursor exhausted");
+
+        let _ = rshell_pg_close_query(conn.clone(), sid.clone(), cursor);
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "DROP TABLE IF EXISTS pg_agent_it_cursor".into(),
+            1,
+        )
+        .expect("drop teardown");
+        let _ = rshell_pg_release_session(conn.clone(), sid);
+        let _ = rshell_pg_disconnect(conn);
+    }
+
+    #[test]
+    fn pg_it_dml_and_parquet_roundtrip() {
+        let Some(cfg) = it_config("it-dml") else {
+            return;
+        };
+        rshell_init();
+        let conn = rshell_pg_connect(cfg).expect("connect to live postgres");
+        let sid = "it-dml".to_string();
+
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "DROP TABLE IF EXISTS pg_agent_it_dml".into(),
+            1,
+        )
+        .expect("drop");
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "CREATE TABLE pg_agent_it_dml (id int primary key, label text)".into(),
+            1,
+        )
+        .expect("create");
+
+        // INSERT / UPDATE / DELETE through the execute path, asserting the
+        // server-reported rows_affected on each — the write surface a query
+        // tab actually uses.
+        let ins = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "INSERT INTO pg_agent_it_dml VALUES (1, 'orig'), (2, 'keep')".into(),
+            1,
+        )
+        .expect("insert");
+        assert_eq!(ins.rows_affected, Some(2));
+
+        let upd = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "UPDATE pg_agent_it_dml SET label = 'edited' WHERE id = 1".into(),
+            1,
+        )
+        .expect("update");
+        assert_eq!(upd.rows_affected, Some(1));
+
+        let sel = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "SELECT id, label FROM pg_agent_it_dml ORDER BY id".into(),
+            100,
+        )
+        .expect("select");
+        assert_eq!(sel.rows.len(), 2);
+        assert_eq!(sel.rows[0].cells[1].as_deref(), Some("edited"));
+        assert!(
+            sel.cursor_id.is_none(),
+            "a result that fits the page should not open a cursor"
+        );
+
+        // Parquet export round-trip of the full result set.
+        let path = std::env::temp_dir()
+            .join(format!("pg_agent_it_{}.parquet", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let writer = rshell_pg_parquet_open(path.clone(), vec!["id".into(), "label".into()])
+            .expect("parquet open");
+        rshell_pg_parquet_append(writer, sel.rows).expect("parquet append");
+        rshell_pg_parquet_close(writer).expect("parquet close");
+        assert!(
+            std::fs::metadata(&path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false),
+            "parquet file should be written and non-empty"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        let del = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "DELETE FROM pg_agent_it_dml WHERE id = 2".into(),
+            1,
+        )
+        .expect("delete");
+        assert_eq!(del.rows_affected, Some(1));
+
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "DROP TABLE IF EXISTS pg_agent_it_dml".into(),
+            1,
+        )
+        .expect("drop teardown");
+        let _ = rshell_pg_release_session(conn.clone(), sid);
+        let _ = rshell_pg_disconnect(conn);
+    }
+
+    // Characterization test: the integration tier surfaced a real limitation in
+    // ssh-commander-core 0.1.0. The editor FFI (`update_cell` / `insert_row`)
+    // binds values as `String` but builds `... = $N::<type>` (see the core's
+    // edit.rs — e.g. `WHERE ctid = $2::tid`). Postgres infers the parameter to
+    // BE that type, so tokio-postgres can't serialize the string for any
+    // non-text param (an int4 column, or the `tid` ctid), and the call fails
+    // with "error serializing parameter N". This pins that behavior so a core
+    // fix trips the test — at which point flip it (and add real
+    // insert/update/delete assertions) to require success.
+    #[test]
+    fn pg_it_ctid_cell_edit_is_known_core_limitation() {
+        let Some(cfg) = it_config("it-limit") else {
+            return;
+        };
+        rshell_init();
+        let conn = rshell_pg_connect(cfg).expect("connect to live postgres");
+        let sid = "it-limit".to_string();
+
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "DROP TABLE IF EXISTS pg_agent_it_limit".into(),
+            1,
+        )
+        .expect("drop");
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "CREATE TABLE pg_agent_it_limit (id int, label text)".into(),
+            1,
+        )
+        .expect("create");
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "INSERT INTO pg_agent_it_limit VALUES (1, 'orig')".into(),
+            1,
+        )
+        .expect("insert");
+        let row = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "SELECT ctid::text FROM pg_agent_it_limit WHERE id = 1".into(),
+            1,
+        )
+        .expect("select ctid");
+        let ctid = row.rows[0].cells[0].clone().expect("ctid");
+
+        match rshell_pg_update_cell(
+            conn.clone(),
+            sid.clone(),
+            "public".into(),
+            "pg_agent_it_limit".into(),
+            "label".into(),
+            "text".into(),
+            Some("edited".into()),
+            ctid,
+        ) {
+            Err(FfiPgError::Other { detail }) => {
+                assert!(
+                    detail.contains("serializ"),
+                    "expected a parameter-serialization error, got: {detail}"
+                );
+            }
+            Ok(_) => panic!(
+                "update_cell unexpectedly SUCCEEDED — ssh-commander-core may have fixed the \
+                 `$N::type` param-inference bug. Flip this test and add real \
+                 insert/update/delete assertions that require success."
+            ),
+            Err(other) => panic!("expected Other(serialize) error, got {other:?}"),
+        }
+
+        rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "DROP TABLE IF EXISTS pg_agent_it_limit".into(),
+            1,
+        )
+        .expect("drop teardown");
+        let _ = rshell_pg_release_session(conn.clone(), sid);
+        let _ = rshell_pg_disconnect(conn);
+    }
 }
