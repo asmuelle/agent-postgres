@@ -199,19 +199,20 @@ struct PostgresQueryTabView: View {
     @ViewBuilder
     private func sqlEditor(for tab: PostgresQueryTab) -> some View {
         ZStack(alignment: .topTrailing) {
-            TextEditor(text: Binding(
-                get: { tab.sql },
-                set: { store.setSQL($0, forTab: tab.id) }
-            ))
-            .font(.system(.body, design: .monospaced))
-            .focused($editorFocused)
-            .padding(8)
+            PostgresSQLEditor(
+                text: Binding(
+                    get: { tab.sql },
+                    set: { store.setSQL($0, forTab: tab.id) }
+                ),
+                identifiers: {
+                    PostgresConnectionManager.shared
+                        .schemaStores[profileId]?.completionIdentifiers ?? []
+                }
+            )
             .background(Color(NSColor.textBackgroundColor))
-            // Capture ⌘↵ to run, ⌘. to cancel. Using `.onSubmit`
-            // doesn't fire for multi-line TextEditors, so we attach
-            // hidden buttons with the keyboard shortcuts instead —
-            // SwiftUI walks them as part of the responder chain
-            // when the editor has focus.
+            // ⌘↵ runs, ⌘. cancels. These hidden buttons register as
+            // window-level key equivalents, so they fire regardless of editor
+            // focus and before the text view sees the keystroke (no double-run).
             .overlay(alignment: .top) {
                 HStack(spacing: 0) {
                     Button("Run", action: { run(tab: tab) })

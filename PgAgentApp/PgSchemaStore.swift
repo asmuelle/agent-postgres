@@ -328,6 +328,36 @@ final class PgSchemaStore: ObservableObject {
         self.connectionId = connectionId
     }
 
+    /// Identifier names currently known from loaded browser state — databases,
+    /// schemas, tables/views/sequences/routines, and any expanded columns.
+    /// Best-effort: only what the user has lazily loaded is present, so the
+    /// SQL editor's completion grows richer as they browse. Computed on demand.
+    var completionIdentifiers: [String] {
+        var names = Set<String>()
+        func collect(_ state: PgLoadState<[PgSchemaNode]>) {
+            if case .loaded(let nodes) = state {
+                for node in nodes { names.insert(node.name) }
+            }
+        }
+        // Skip metaState: key/constraint node names embed their definition
+        // ("pk (PRIMARY KEY (...))"), which is noise for completion.
+        collect(databasesState)
+        collect(rolesState)
+        collect(tablespacesState)
+        for state in schemasState.values { collect(state) }
+        for state in columnsState.values { collect(state) }
+        for state in languagesState.values { collect(state) }
+        for state in schemaContentsState.values {
+            if case .loaded(let bundle) = state {
+                names.insert(bundle.schema)
+                for category in PgCategoryKind.allCases {
+                    for node in bundle.nodes(for: category) { names.insert(node.name) }
+                }
+            }
+        }
+        return Array(names)
+    }
+
     // MARK: - Loaders
 
     func loadDatabases() async {
