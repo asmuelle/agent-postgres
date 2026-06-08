@@ -202,9 +202,8 @@ impl PortForwardRegistry {
             let mut guard = self.active.lock().await;
             let ids: Vec<String> = guard
                 .iter()
-                .filter_map(|(id, active)| {
-                    (active.config.connection_id == connection_id).then(|| id.clone())
-                })
+                .filter(|(_, active)| active.config.connection_id == connection_id)
+                .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter()
                 .filter_map(|id| guard.remove(&id))
