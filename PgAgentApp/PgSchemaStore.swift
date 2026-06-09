@@ -425,37 +425,33 @@ final class PgSchemaStore: ObservableObject {
     func loadMeta(database: String, schema: String, table: String) async {
         let key = "\(database).\(schema).\(table)"
         metaState[key] = .loading
+        let sessionId = "meta-loader-\(UUID().uuidString)"
+        let connId = connectionId
         do {
+            // Resolve the table to its OID once via to_regclass on the safely
+            // quoted, schema-qualified identifier, then anchor both catalog
+            // queries on that OID. This is injection-safe (the identifier is
+            // quoted, not string-matched into a WHERE clause) and also resolves
+            // mixed-case / reserved-word object names correctly.
+            let regclassArg = pgQuoteLiteral(pgQuoteIdent(schema) + "." + pgQuoteIdent(table))
+
             // 1. Fetch constraints and keys
             let constraintSql = """
             SELECT conname, pg_get_constraintdef(c.oid), contype
             FROM pg_constraint c
-            JOIN pg_namespace n ON n.oid = c.connamespace
-            JOIN pg_class r ON r.oid = c.conrelid
-            WHERE r.relname = '\(table.replacingOccurrences(of: "'", with: "''"))' 
-              AND n.nspname = '\(schema.replacingOccurrences(of: "'", with: "''"))';
+            WHERE c.conrelid = to_regclass(\(regclassArg));
             """
-            
+
             // 2. Fetch triggers
             let triggerSql = """
             SELECT tgname, pg_get_triggerdef(t.oid)
             FROM pg_trigger t
-            JOIN pg_class r ON r.oid = t.tgrelid
-            JOIN pg_namespace n ON n.oid = r.relnamespace
-            WHERE r.relname = '\(table.replacingOccurrences(of: "'", with: "''"))' 
-              AND n.nspname = '\(schema.replacingOccurrences(of: "'", with: "''"))' 
+            WHERE t.tgrelid = to_regclass(\(regclassArg))
               AND NOT tgisinternal;
             """
-            
+
             var nodes: [PgSchemaNode] = []
-            let sessionId = "meta-loader-\(UUID().uuidString)"
-            let connId = connectionId
-            defer {
-                Task {
-                    await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
-                }
-            }
-            
+
             // Execute constraints query
             do {
                 let res = try await BridgeManager.shared.pgExecute(
@@ -520,19 +516,18 @@ final class PgSchemaStore: ObservableObject {
         } catch {
             metaState[key] = .failed(error.localizedDescription)
         }
+        // Release the lease within this structured context — awaited on both
+        // the success and failure paths — rather than via `defer { Task { … } }`,
+        // whose unstructured task could race the next loader or be dropped.
+        await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
     }
 
     func loadLanguages(database: String) async {
         languagesState[database] = .loading
+        let sessionId = "languages-loader-\(UUID().uuidString)"
+        let connId = connectionId
         do {
             let sql = "SELECT lanname FROM pg_language ORDER BY lanname;"
-            let sessionId = "languages-loader-\(UUID().uuidString)"
-            let connId = connectionId
-            defer {
-                Task {
-                    await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
-                }
-            }
             let res = try await BridgeManager.shared.pgExecute(
                 connectionId: connId,
                 sessionId: sessionId,
@@ -553,19 +548,15 @@ final class PgSchemaStore: ObservableObject {
         } catch {
             languagesState[database] = .failed(error.localizedDescription)
         }
+        await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
     }
 
     func loadRoles() async {
         rolesState = .loading
+        let sessionId = "roles-loader-\(UUID().uuidString)"
+        let connId = connectionId
         do {
             let sql = "SELECT rolname FROM pg_roles ORDER BY rolname;"
-            let sessionId = "roles-loader-\(UUID().uuidString)"
-            let connId = connectionId
-            defer {
-                Task {
-                    await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
-                }
-            }
             let res = try await BridgeManager.shared.pgExecute(
                 connectionId: connId,
                 sessionId: sessionId,
@@ -586,19 +577,15 @@ final class PgSchemaStore: ObservableObject {
         } catch {
             rolesState = .failed(error.localizedDescription)
         }
+        await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
     }
 
     func loadTablespaces() async {
         tablespacesState = .loading
+        let sessionId = "tablespaces-loader-\(UUID().uuidString)"
+        let connId = connectionId
         do {
             let sql = "SELECT spcname FROM pg_tablespace ORDER BY spcname;"
-            let sessionId = "tablespaces-loader-\(UUID().uuidString)"
-            let connId = connectionId
-            defer {
-                Task {
-                    await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
-                }
-            }
             let res = try await BridgeManager.shared.pgExecute(
                 connectionId: connId,
                 sessionId: sessionId,
@@ -619,6 +606,7 @@ final class PgSchemaStore: ObservableObject {
         } catch {
             tablespacesState = .failed(error.localizedDescription)
         }
+        await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
     }
 
     /// Fetch the server version and installed extensions in one
@@ -628,11 +616,6 @@ final class PgSchemaStore: ObservableObject {
         serverInfoState = .loading
         let sessionId = "server-info-loader-\(UUID().uuidString)"
         let connId = connectionId
-        defer {
-            Task {
-                await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
-            }
-        }
         do {
             let versionRes = try await BridgeManager.shared.pgExecute(
                 connectionId: connId,
@@ -656,6 +639,7 @@ final class PgSchemaStore: ObservableObject {
         } catch {
             serverInfoState = .failed(error.localizedDescription)
         }
+        await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
     }
 
     func findNode(byId id: String) -> PgSchemaNode? {
