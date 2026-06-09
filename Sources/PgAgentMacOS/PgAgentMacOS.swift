@@ -4,7 +4,7 @@
 //
 // The Rust crate is built by Cargo as a universal static library and
 // linked into the **app** target (PgAgentApp). The uniffi-generated Swift
-// bindings live at `pgAgent/bindings/midnight_ssh.swift` and are
+// bindings live at `bindings/pg_agent.swift` and are
 // also compiled into the app target — frameworks cannot link the Rust
 // static lib directly, so the FFI surface lives where the symbols can
 // actually be resolved.

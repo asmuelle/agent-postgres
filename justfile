@@ -54,6 +54,7 @@ fmt:
 lint:
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
+    @command -v swift-format >/dev/null 2>&1 && (swift-format lint -r Sources Tests PgAgentApp PgAgentMobile PgAgentWidgets || xcrun swift-format lint -r Sources Tests PgAgentApp PgAgentMobile PgAgentWidgets) 2>/dev/null || echo "⚠️ swift-format not installed; skipping Swift lint"
 
 # Local equivalent of CI checks that don't need signing certs.
 ci-local: check test-rust mac-ci-build ios-ci-build

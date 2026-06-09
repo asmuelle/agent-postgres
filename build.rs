@@ -6,11 +6,10 @@
 /// mode. To generate bindings manually:
 ///
 /// ```sh
-/// cargo build -p pgAgent
-/// uniffi-bindgen generate \
-///     target/debug/lib_midnight_ssh.dylib \
-///     --language swift \
-///     --out-dir pgAgent/bindings
+/// cargo build --lib
+/// cargo run --release --bin uniffi-bindgen -- \
+///     generate --library target/release/libpg_agent.dylib \
+///     --language swift --out-dir bindings
 /// ```
 ///
 /// In Xcode, this runs as a build phase before the Swift compilation step.

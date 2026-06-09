@@ -6,7 +6,7 @@ Welcome to `pgAgent`! This repository is designed to be highly compatible with *
 
 ## 🗺️ Project Architecture at a Glance
 
-For full architectural details, always consult [AGENTS.md](file:///Users/andreasmuller/experiments/appstore/apps/agent-postgres/AGENTS.md) and [CLAUDE.md](file:///Users/andreasmuller/experiments/appstore/apps/agent-postgres/CLAUDE.md).
+For full architectural details, always consult [AGENTS.md](file:///Users/andreasmuller/projects/experiments/appstore/apps/agent-postgres/AGENTS.md) and [CLAUDE.md](file:///Users/andreasmuller/projects/experiments/appstore/apps/agent-postgres/CLAUDE.md).
 
 ```
 ┌──────────────────────────────────────┐
@@ -14,7 +14,7 @@ For full architectural details, always consult [AGENTS.md](file:///Users/andreas
 └──────────────────┬───────────────────┘
                    │ Swift FFI Facade
 ┌──────────────────▼───────────────────┐
-│     bindings/midnight_ssh.swift       │  ← GENERATED. DO NOT HAND-EDIT!
+│     bindings/pg_agent.swift           │  ← GENERATED. DO NOT HAND-EDIT!
 └──────────────────┬───────────────────┘
                    │ FFI Boundary (uniffi)
 ┌──────────────────▼───────────────────┐
@@ -56,12 +56,12 @@ Avoid running all operations inside a single, bloated conversation context. The 
   * **Purpose**: XcodeGen builds, UniFFI generation, and dependency wiring.
   * **Rules**: Ensure `just mac-bindings` is run immediately after changing any Rust FFI signatures.
 
-Pre-configured subagent blueprints are stored in [.antigravity/subagents/](file:///Users/andreasmuller/experiments/appstore/apps/agent-postgres/.antigravity/subagents/).
+Pre-configured subagent blueprints are stored in [.antigravity/subagents/](file:///Users/andreasmuller/projects/experiments/appstore/apps/agent-postgres/.antigravity/subagents/).
 
 ### 3. FFI Checksum Protection Rule (CRITICAL)
 UniFFI computes unique per-function checksums from Rust signatures and generates matching bindings in `bindings/midnight_ssh.swift`.
 > [!WARNING]
-> Hand-editing the generated `bindings/midnight_ssh.swift` is strictly forbidden. Any mismatch between Swift and Rust FFI symbols will cause an immediate crash at startup during `rshellInit()`.
+> Hand-editing the generated `bindings/pg_agent.swift` is strictly forbidden. Any mismatch between Swift and Rust FFI symbols will cause an immediate crash at startup during `rshellInit()`.
 > **To modify FFI signatures safely:**
 > 1. Edit the Rust signatures in `src/ffi.rs`.
 > 2. Run `just mac-bindings` to regenerate the Swift side.

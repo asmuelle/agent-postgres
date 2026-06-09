@@ -29,7 +29,7 @@ def guard_edit(file_path: str) -> None:
     #    the runtime per-function checksum -> rshellInit() _assertionFailure crash.
     if (
         re.search(r"/bindings/.+\.(swift|h|modulemap)$", path)
-        or re.search(r"midnight_ssh(FFI)?\.(swift|h)$", path)
+        or re.search(r"pg_agent(FFI)?\.(swift|h)$", path)
         or path.endswith("module.modulemap")
     ):
         block(

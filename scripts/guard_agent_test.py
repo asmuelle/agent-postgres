@@ -8,7 +8,7 @@ GUARD = "scripts/guard_agent.py"
 
 CASES = [
     # (tool, field, value, expected_exit)
-    ("Edit", "file_path", "bindings/midnight_ssh.swift", 2),
+    ("Edit", "file_path", "bindings/pg_agent.swift", 2),
     ("Edit", "file_path", "pgAgent.xcodeproj/project.pbxproj", 2),
     ("Edit", "file_path", "src/ffi.rs", 0),
     ("Edit", "file_path", "PgAgentApp/PgAgentApp.swift", 0),

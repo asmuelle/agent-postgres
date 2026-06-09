@@ -22,13 +22,14 @@
 //
 // After every FFI change:
 //
-//   cargo build -p pgAgent --release --target aarch64-apple-darwin
-//   uniffi-bindgen generate \
-//     target/aarch64-apple-darwin/release/libmidnight_ssh.dylib \
+//   cargo build --release --lib
+//   cargo run --release --bin uniffi-bindgen -- \
+//     generate \
+//     --library target/release/libpg_agent.dylib \
 //     --language swift \
 //     --out-dir bindings
 //
-// Then add the generated `midnight_sshFFI.h` and `midnight_sshFFI.modulemap`
+// Then add the generated `pg_agentFFI.h` and `pg_agentFFI.modulemap` (renamed to `module.modulemap`)
 // to the Xcode project's "Swift Compiler — General" > "Import Paths".
 
 import PackageDescription
