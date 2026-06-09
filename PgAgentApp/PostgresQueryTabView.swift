@@ -545,6 +545,9 @@ struct PostgresQueryTabView: View {
             result: result,
             filterText: resultFilter,
             onInspectCell: { inspectedCell = $0 },
+            onNavigateForeignKey: canEdit ? { column, value in
+                navigateForeignKey(tab: tab, column: column, value: value)
+            } : nil,
             editable: canEdit,
             pendingEdits: tab.pendingEdits,
             onCellEdit: canEdit ? { edit, complete in
@@ -859,6 +862,65 @@ struct PostgresQueryTabView: View {
 
     private static func batchMessage(for error: Error) -> String {
         (error as? PostgresBridgeError)?.errorDescription ?? error.localizedDescription
+    }
+
+    // MARK: - Foreign-key navigation
+
+    /// Resolve the FK target of `column` on the tab's table via a catalog
+    /// query, then open an editable tab at the referenced row. Shows a brief
+    /// note if the column isn't a foreign key. The clicked column is matched to
+    /// its position in the constraint key, so composite FKs resolve correctly.
+    private func navigateForeignKey(tab: PostgresQueryTab, column: String, value: String) {
+        guard let connectionId, let target = tab.editTarget else { return }
+        let sessionId = "fk-nav-\(UUID().uuidString)"
+        let sql = """
+        SELECT refns.nspname, refcl.relname, refatt.attname
+        FROM pg_constraint con
+        JOIN pg_class cl ON cl.oid = con.conrelid
+        JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+        JOIN pg_class refcl ON refcl.oid = con.confrelid
+        JOIN pg_namespace refns ON refns.oid = refcl.relnamespace
+        JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS lk(attnum, ord) ON true
+        JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS rk(attnum, ord) ON rk.ord = lk.ord
+        JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = lk.attnum
+        JOIN pg_attribute refatt ON refatt.attrelid = con.confrelid AND refatt.attnum = rk.attnum
+        WHERE con.contype = 'f'
+          AND ns.nspname = \(pgQuoteLiteral(target.schema))
+          AND cl.relname = \(pgQuoteLiteral(target.table))
+          AND att.attname = \(pgQuoteLiteral(column))
+        LIMIT 1;
+        """
+        Task { @MainActor in
+            do {
+                let res = try await BridgeManager.shared.pgExecute(
+                    connectionId: connectionId,
+                    sessionId: sessionId,
+                    sql: sql,
+                    pageSize: 1
+                )
+                await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
+                guard let row = res.rows.first, row.cells.count >= 3,
+                      let refSchema = row.cells[0],
+                      let refTable = row.cells[1],
+                      let refColumn = row.cells[2]
+                else {
+                    presentBatchAlert(
+                        title: "Not a foreign key",
+                        message: "“\(column)” doesn’t reference another table."
+                    )
+                    return
+                }
+                store.openForeignKeyTab(
+                    schema: refSchema, name: refTable, column: refColumn, value: value
+                )
+            } catch {
+                await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
+                presentBatchAlert(
+                    title: "Couldn’t resolve foreign key",
+                    message: Self.batchMessage(for: error)
+                )
+            }
+        }
     }
 
     /// Throw away all staged edits, restoring original values.

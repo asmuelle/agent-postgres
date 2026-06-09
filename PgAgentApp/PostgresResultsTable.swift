@@ -92,6 +92,10 @@ struct PostgresResultsTable: NSViewRepresentable {
     var filterText: String = ""
     /// Invoked when the user picks "Show value…" — the host presents a viewer.
     var onInspectCell: ((PostgresCellInspection) -> Void)? = nil
+    /// Invoked when the user picks "Go to referenced row" with `(columnName,
+    /// value)`. The host resolves the foreign key and opens a tab at the
+    /// referenced row. `nil` (non-relation tabs) hides the item.
+    var onNavigateForeignKey: ((String, String) -> Void)? = nil
     /// `true` when the host knows how to UPDATE rows (tab opened
     /// from the schema browser AND the result carries a `__pg_rowid__`
     /// column). When `false`, the grid is fully read-only — no
@@ -140,6 +144,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         )
         coord.pendingEdits = pendingEdits
         coord.onInspectCell = onInspectCell
+        coord.onNavigateForeignKey = onNavigateForeignKey
         coord.filterText = filterText
         coord.recomputeDisplayOrder()
         return coord
@@ -199,6 +204,11 @@ struct PostgresResultsTable: NSViewRepresentable {
             NSMenuItem(
                 title: "Show value…",
                 action: #selector(Coordinator.showClickedValue(_:)),
+                keyEquivalent: ""
+            ),
+            NSMenuItem(
+                title: "Go to referenced row",
+                action: #selector(Coordinator.navigateClickedForeignKey(_:)),
                 keyEquivalent: ""
             ),
             NSMenuItem(
@@ -312,6 +322,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         coord.onDeleteRows = onDeleteRows
         coord.onInsertRow = onInsertRow
         coord.onInspectCell = onInspectCell
+        coord.onNavigateForeignKey = onNavigateForeignKey
         coord.widthPersistKey = widthPersistKey
         // Set the filter before `update` so the recompute reflects it.
         coord.filterText = filterText
@@ -357,6 +368,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         var onDeleteRows: (([Int]) -> Void)?
         var onInsertRow: (() -> Void)?
         var onInspectCell: ((PostgresCellInspection) -> Void)?
+        var onNavigateForeignKey: ((String, String) -> Void)?
         var widthPersistKey: PostgresColumnWidthKey?
         var pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit] = [:]
         /// When true, NULLs render as empty strings in the clipboard
@@ -755,6 +767,24 @@ struct PostgresResultsTable: NSViewRepresentable {
                 typeName: result.columns[colIdx].typeName,
                 value: value
             ))
+        }
+
+        /// Right-click → "Go to referenced row". Bubbles the clicked
+        /// (column, value) to the host, which resolves the foreign key and
+        /// opens a tab at the referenced row. No-ops on a NULL cell.
+        @objc func navigateClickedForeignKey(_ sender: Any?) {
+            guard let onNavigateForeignKey, let table = lastTable,
+                  table.clickedRow >= 0, table.clickedColumn >= 0,
+                  table.clickedColumn < table.tableColumns.count,
+                  let dataRow = dataRow(table.clickedRow)
+            else { return }
+            let column = table.tableColumns[table.clickedColumn]
+            guard let colIdx = columnIndex(from: column.identifier),
+                  colIdx < result.columns.count
+            else { return }
+            let cells = result.rows[dataRow].cells
+            guard let value = colIdx < cells.count ? cells[colIdx] : nil else { return }
+            onNavigateForeignKey(result.columns[colIdx].name, value)
         }
 
         // MARK: - Copy
@@ -1527,6 +1557,12 @@ struct PostgresResultsTable: NSViewRepresentable {
                 case #selector(copyClickedCell(_:)),
                      #selector(showClickedValue(_:)):
                     item.isEnabled = (lastTable?.clickedRow ?? -1) >= 0
+                case #selector(navigateClickedForeignKey(_:)):
+                    // Only on relation tabs (host wired the callback); the host
+                    // reports "not a foreign key" if the column isn't one.
+                    item.isHidden = (onNavigateForeignKey == nil)
+                    item.isEnabled = onNavigateForeignKey != nil
+                        && (lastTable?.clickedRow ?? -1) >= 0
                 case #selector(copySelectedRows(_:)),
                      #selector(copySelectedRowsWithHeader(_:)):
                     item.isEnabled = hasSelection || !result.rows.isEmpty

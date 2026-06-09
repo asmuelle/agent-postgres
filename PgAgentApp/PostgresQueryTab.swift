@@ -260,6 +260,25 @@ final class PostgresQueryTabsStore: ObservableObject {
         return tab.id
     }
 
+    /// Open an editable tab at the rows of `schema.name` where `column` equals
+    /// `value` — the grid's "Go to referenced row" lands here after resolving a
+    /// foreign key. Mirrors `openRelationTab` (ctid + editTarget) but scoped by
+    /// the FK equality. Pre-filled; runs on ⌘↵ like other relation tabs.
+    @discardableResult
+    func openForeignKeyTab(schema: String, name: String, column: String, value: String) -> UUID {
+        let qualified = "\(quoteIdent(schema)).\(quoteIdent(name))"
+        let sql = "SELECT *, ctid AS \(POSTGRES_ROWID_COLUMN) FROM \(qualified) "
+            + "WHERE \(quoteIdent(column)) = \(pgQuoteLiteral(value)) LIMIT 500;"
+        let tab = PostgresQueryTab(
+            title: "\(name) [\(column)=\(value.prefix(16))]",
+            sql: sql,
+            editTarget: PostgresEditTarget(schema: schema, table: name)
+        )
+        tabs.append(tab)
+        activeTabId = tab.id
+        return tab.id
+    }
+
     @discardableResult
     func openRoutineTab(schema: String, name: String, signature: String) -> UUID {
         if let existing = tabs.first(where: {
