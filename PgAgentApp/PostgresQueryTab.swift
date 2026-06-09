@@ -20,6 +20,16 @@ enum PostgresQueryExecState: Sendable {
     case cancelled(elapsed: TimeInterval)
 }
 
+/// Whether the tab's session holds an open transaction. Tracked client-side —
+/// Postgres exposes no transaction status over this path — and driven by the
+/// explicit Begin/Commit/Rollback controls, a leading BEGIN/COMMIT/ROLLBACK in
+/// executed SQL, and SQLSTATE class 25 (an aborted transaction) on a query error.
+enum PgTransactionState: Sendable, Equatable {
+    case none
+    case open
+    case failed
+}
+
 /// Set on tabs opened from the schema browser (double-click a
 /// relation). Carries the (schema, table) so cell edits know what
 /// to UPDATE. Generic SQL tabs leave this `nil` and stay read-only.
@@ -100,6 +110,9 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     /// gated on this being non-empty.
     var pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit]
     var kind: TabKind
+    /// Client-side transaction state for this tab's session. See
+    /// `PgTransactionState`.
+    var transactionState: PgTransactionState
 
     init(
         id: UUID = UUID(),
@@ -112,7 +125,8 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
         editTarget: PostgresEditTarget? = nil,
         batchMode: Bool = false,
         pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit] = [:],
-        kind: TabKind = .query
+        kind: TabKind = .query,
+        transactionState: PgTransactionState = .none
     ) {
         self.id = id
         self.title = title
@@ -125,6 +139,24 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
         self.batchMode = batchMode
         self.pendingEdits = pendingEdits
         self.kind = kind
+        self.transactionState = transactionState
+    }
+
+    /// Uppercased first word of a SQL statement, skipping leading whitespace and
+    /// line/block comments. Cheap transaction-control detection, not a parser.
+    static func leadingKeyword(of sql: String) -> String {
+        var s = Substring(sql)
+        while true {
+            s = s.drop(while: { $0.isWhitespace })
+            if s.hasPrefix("--") {
+                if let nl = s.firstIndex(of: "\n") { s = s[s.index(after: nl)...] } else { return "" }
+            } else if s.hasPrefix("/*") {
+                if let end = s.range(of: "*/") { s = s[end.upperBound...] } else { return "" }
+            } else {
+                break
+            }
+        }
+        return s.prefix { $0.isLetter }.uppercased()
     }
 
     /// Convenience for the toolbar — Commit/Discard appear when
@@ -345,6 +377,33 @@ final class PostgresQueryTabsStore: ObservableObject {
 
     func setExecState(_ state: PostgresQueryExecState, forTab id: UUID) {
         mutate(id: id) { $0.execState = state }
+    }
+
+    func setTransactionState(_ state: PgTransactionState, forTab id: UUID) {
+        mutate(id: id) { $0.transactionState = state }
+    }
+
+    /// Update transaction state from an executed statement. The leading keyword
+    /// (BEGIN/COMMIT/ROLLBACK) drives the happy path; on a query error, SQLSTATE
+    /// class 25 — or any error while a transaction is already open — marks it
+    /// failed, since Postgres aborts the transaction on the first error.
+    func applyTransactionEffect(sql: String, error: PostgresBridgeError?, tabId id: UUID) {
+        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let current = tabs[idx].transactionState
+        if let error {
+            if error.serverError?.isInFailedTransaction == true || current == .open {
+                setTransactionState(.failed, forTab: id)
+            }
+            return
+        }
+        switch PostgresQueryTab.leadingKeyword(of: sql) {
+        case "BEGIN", "START":
+            setTransactionState(.open, forTab: id)
+        case "COMMIT", "ROLLBACK", "END", "ABORT":
+            setTransactionState(.none, forTab: id)
+        default:
+            break
+        }
     }
 
     func setResult(_ result: FfiPgExecutionResult?, forTab id: UUID) {

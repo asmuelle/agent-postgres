@@ -1,3 +1,10 @@
+// `FfiPgError` intentionally carries PostgreSQL's structured fields (SQLSTATE,
+// constraint, position, detail, hint, …), which pushes the enum past clippy's
+// large-Err threshold. UniFFI marshals errors across the FFI boundary by value
+// regardless, and these `block_on` FFI calls are not hot paths, so the
+// stack-size of `Result<_, FfiPgError>` is irrelevant here.
+#![allow(clippy::result_large_err)]
+
 use crate::bridge::MacOsBridge;
 use crate::doctor;
 use crate::security_patch;
@@ -1835,6 +1842,24 @@ pub enum FfiPgError {
     PoolExhausted { detail: String },
     #[error("postgres not connected: {detail}")]
     NotConnected { detail: String },
+    /// A server-side error carrying PostgreSQL's structured fields, so the UI
+    /// can show the SQLSTATE, the failing constraint, an editor position to
+    /// underline, and the server's detail/hint instead of one opaque string.
+    /// A `sqlstate` in class 25 (e.g. `25P02`) means the session's transaction
+    /// is aborted and needs ROLLBACK.
+    #[error("ERROR [{sqlstate}]: {message}")]
+    Database {
+        sqlstate: String,
+        message: String,
+        detail: Option<String>,
+        hint: Option<String>,
+        /// 1-based character offset into the submitted SQL, when reported.
+        position: Option<u32>,
+        constraint: Option<String>,
+        column: Option<String>,
+        table: Option<String>,
+        schema: Option<String>,
+    },
     #[error("{detail}")]
     Other { detail: String },
 }
@@ -1853,8 +1878,27 @@ impl From<ssh_commander_core::PgError> for FfiPgError {
             ssh_commander_core::PgError::PoolExhausted(used, max) => Self::PoolExhausted {
                 detail: format!("{used} of {max} connections leased"),
             },
-            ssh_commander_core::PgError::Driver(driver_err) => Self::Other {
-                detail: driver_err.to_string(),
+            ssh_commander_core::PgError::Driver(driver_err) => match driver_err.as_db_error() {
+                Some(db) => Self::Database {
+                    sqlstate: db.code().code().to_string(),
+                    message: db.message().to_string(),
+                    detail: db.detail().map(str::to_string),
+                    hint: db.hint().map(str::to_string),
+                    position: match db.position() {
+                        Some(tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p),
+                        Some(tokio_postgres::error::ErrorPosition::Internal {
+                            position, ..
+                        }) => Some(*position),
+                        None => None,
+                    },
+                    constraint: db.constraint().map(str::to_string),
+                    column: db.column().map(str::to_string),
+                    table: db.table().map(str::to_string),
+                    schema: db.schema().map(str::to_string),
+                },
+                None => Self::Other {
+                    detail: driver_err.to_string(),
+                },
             },
         }
     }
@@ -2186,6 +2230,46 @@ pub fn rshell_pg_close_query(
             value: None,
         },
     }
+}
+
+/// Begin an explicit transaction on the session's pinned connection. The
+/// session keeps its connection leased until `rshell_pg_commit` /
+/// `rshell_pg_rollback` (and a final `rshell_pg_release_session`); statements
+/// run on the same `session_id` in between share the transaction.
+#[uniffi::export]
+pub fn rshell_pg_begin(connection_id: String, session_id: String) -> Result<(), FfiPgError> {
+    pg_session_statement(connection_id, session_id, "BEGIN")
+}
+
+/// Commit the session's open transaction. Committing a transaction that has
+/// already failed (SQLSTATE class 25) rolls it back instead — standard
+/// Postgres behavior.
+#[uniffi::export]
+pub fn rshell_pg_commit(connection_id: String, session_id: String) -> Result<(), FfiPgError> {
+    pg_session_statement(connection_id, session_id, "COMMIT")
+}
+
+/// Roll back the session's open (or failed) transaction.
+#[uniffi::export]
+pub fn rshell_pg_rollback(connection_id: String, session_id: String) -> Result<(), FfiPgError> {
+    pg_session_statement(connection_id, session_id, "ROLLBACK")
+}
+
+/// Run a single fixed transaction-control statement on the session's pooled
+/// connection. Shares the lease/cursor machinery of `rshell_pg_execute`.
+fn pg_session_statement(
+    connection_id: String,
+    session_id: String,
+    sql: &str,
+) -> Result<(), FfiPgError> {
+    let bridge = MacOsBridge::global();
+    let sql = sql.to_string();
+    bridge.runtime.block_on(async move {
+        with_pg_pool(&connection_id, |pool| async move {
+            pool.execute(&session_id, &sql, 1).await.map(|_| ())
+        })
+        .await
+    })
 }
 
 /// Result of a single-cell UPDATE. Surfaced as a typed record so the

@@ -358,6 +358,11 @@ RustBuffer uniffi_pg_agent_fn_func_rshell_keychain_save(RustBuffer kind, RustBuf
 RustBuffer uniffi_pg_agent_fn_func_rshell_listening_ports(RustBuffer connection_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_BEGIN
+#define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_BEGIN
+void uniffi_pg_agent_fn_func_rshell_pg_begin(RustBuffer connection_id, RustBuffer session_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_CANCEL
 RustBuffer uniffi_pg_agent_fn_func_rshell_pg_cancel(RustBuffer connection_id, RustBuffer session_id, RustCallStatus *_Nonnull out_status
@@ -371,6 +376,11 @@ int8_t uniffi_pg_agent_fn_func_rshell_pg_cancel_backend(RustBuffer connection_id
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_CLOSE_QUERY
 #define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_CLOSE_QUERY
 RustBuffer uniffi_pg_agent_fn_func_rshell_pg_close_query(RustBuffer connection_id, RustBuffer session_id, RustBuffer cursor_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_COMMIT
+#define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_COMMIT
+void uniffi_pg_agent_fn_func_rshell_pg_commit(RustBuffer connection_id, RustBuffer session_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_CONNECT
@@ -456,6 +466,11 @@ uint64_t uniffi_pg_agent_fn_func_rshell_pg_parquet_open(RustBuffer path, RustBuf
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_RELEASE_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_RELEASE_SESSION
 RustBuffer uniffi_pg_agent_fn_func_rshell_pg_release_session(RustBuffer connection_id, RustBuffer session_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_ROLLBACK
+#define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_ROLLBACK
+void uniffi_pg_agent_fn_func_rshell_pg_rollback(RustBuffer connection_id, RustBuffer session_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_PG_TERMINATE_BACKEND
@@ -985,6 +1000,12 @@ uint16_t uniffi_pg_agent_checksum_func_rshell_listening_ports(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_BEGIN
+#define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_BEGIN
+uint16_t uniffi_pg_agent_checksum_func_rshell_pg_begin(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_CANCEL
 uint16_t uniffi_pg_agent_checksum_func_rshell_pg_cancel(void
@@ -1000,6 +1021,12 @@ uint16_t uniffi_pg_agent_checksum_func_rshell_pg_cancel_backend(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_CLOSE_QUERY
 #define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_CLOSE_QUERY
 uint16_t uniffi_pg_agent_checksum_func_rshell_pg_close_query(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_COMMIT
+#define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_COMMIT
+uint16_t uniffi_pg_agent_checksum_func_rshell_pg_commit(void
     
 );
 #endif
@@ -1102,6 +1129,12 @@ uint16_t uniffi_pg_agent_checksum_func_rshell_pg_parquet_open(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_RELEASE_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_RELEASE_SESSION
 uint16_t uniffi_pg_agent_checksum_func_rshell_pg_release_session(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_ROLLBACK
+#define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_PG_ROLLBACK
+uint16_t uniffi_pg_agent_checksum_func_rshell_pg_rollback(void
     
 );
 #endif

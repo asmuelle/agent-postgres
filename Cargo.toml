@@ -21,6 +21,10 @@ path = "uniffi-bindgen.rs"
 [dependencies]
 ssh-commander-core = "0.1.0"
 ssh-commander-pg-parquet = "0.1.0"
+# Already transitive via ssh-commander-core (PgError::Driver wraps a
+# tokio_postgres::Error); declared directly so the FFI can name
+# `tokio_postgres::error::ErrorPosition` when extracting structured DB errors.
+tokio-postgres = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
