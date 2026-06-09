@@ -341,11 +341,11 @@ fn validate_octal_mode(mode: &str) -> Result<String, SftpError> {
 pub fn rshell_connect(config: FfiConnectConfig) -> Result<String, ConnectError> {
     let bridge = MacOsBridge::global();
     let mut connection_id = format!("{}@{}:{}", config.username, config.host, config.port);
-    if let Some(sid) = config.session_id.as_ref() {
-        if !sid.is_empty() {
-            connection_id.push('#');
-            connection_id.push_str(sid);
-        }
+    if let Some(sid) = config.session_id.as_ref()
+        && !sid.is_empty()
+    {
+        connection_id.push('#');
+        connection_id.push_str(sid);
     }
 
     let auth_method = if config.use_agent {
@@ -2209,7 +2209,11 @@ impl From<ssh_commander_core::UpdateOutcome> for FfiPgUpdateResult {
 /// (`SET col = $1::<column_type>`). Identifiers are quoted defensively
 /// in the core layer — callers don't need to escape `schema` / `table`
 /// / `column`.
+// Flat argument lists are idiomatic for the UniFFI surface; bundling these
+// into a record would force a binding regen + every Swift call site to change
+// for no real readability gain, so the lint is allowed here deliberately.
 #[uniffi::export]
+#[allow(clippy::too_many_arguments)]
 pub fn rshell_pg_update_cell(
     connection_id: String,
     session_id: String,
@@ -2648,11 +2652,13 @@ pub struct FfiPgLockDetail {
 }
 
 #[uniffi::export]
-pub fn rshell_pg_list_sessions(connection_id: String) -> Result<Vec<FfiPgSessionDetail>, FfiPgError> {
+pub fn rshell_pg_list_sessions(
+    connection_id: String,
+) -> Result<Vec<FfiPgSessionDetail>, FfiPgError> {
     let bridge = MacOsBridge::global();
     bridge.runtime.block_on(async move {
         with_pg_pool(&connection_id, |pool| async move {
-            let session_id = "activity-monitor-session".to_string();
+            let session_id = "pg-activity-sessions".to_string();
             let sql = "
                 SELECT pid, datname, usename, client_addr::text, state, query, wait_event,
                        EXTRACT(epoch FROM query_start)::int8
@@ -2695,14 +2701,18 @@ pub fn rshell_pg_cancel_backend(connection_id: String, pid: i32) -> Result<bool,
     let bridge = MacOsBridge::global();
     bridge.runtime.block_on(async move {
         with_pg_pool(&connection_id, |pool| async move {
-            let session_id = "activity-triage-session".to_string();
-            let sql = format!("SELECT pg_cancel_backend({})", pid);
+            let session_id = "pg-triage-cancel".to_string();
+            // `pid` is a typed i32 sourced from pg_stat_activity; its decimal
+            // form cannot carry SQL metacharacters, so direct formatting is
+            // injection-safe. (The core pool exposes no bound-parameter execute;
+            // if that changes, prefer `pg_cancel_backend($1)`.)
+            let sql = format!("SELECT pg_cancel_backend({pid})");
             let outcome = pool.execute(&session_id, &sql, 1).await?;
             let mut success = false;
-            if let Some(row) = outcome.rows.first() {
-                if let Some(cell) = row.first() {
-                    success = cell.as_deref() == Some("t") || cell.as_deref() == Some("true");
-                }
+            if let Some(row) = outcome.rows.first()
+                && let Some(cell) = row.first()
+            {
+                success = cell.as_deref() == Some("t") || cell.as_deref() == Some("true");
             }
             Ok(success)
         })
@@ -2715,14 +2725,18 @@ pub fn rshell_pg_terminate_backend(connection_id: String, pid: i32) -> Result<bo
     let bridge = MacOsBridge::global();
     bridge.runtime.block_on(async move {
         with_pg_pool(&connection_id, |pool| async move {
-            let session_id = "activity-triage-session".to_string();
-            let sql = format!("SELECT pg_terminate_backend({})", pid);
+            let session_id = "pg-triage-terminate".to_string();
+            // `pid` is a typed i32 sourced from pg_stat_activity; its decimal
+            // form cannot carry SQL metacharacters, so direct formatting is
+            // injection-safe. (The core pool exposes no bound-parameter execute;
+            // if that changes, prefer `pg_terminate_backend($1)`.)
+            let sql = format!("SELECT pg_terminate_backend({pid})");
             let outcome = pool.execute(&session_id, &sql, 1).await?;
             let mut success = false;
-            if let Some(row) = outcome.rows.first() {
-                if let Some(cell) = row.first() {
-                    success = cell.as_deref() == Some("t") || cell.as_deref() == Some("true");
-                }
+            if let Some(row) = outcome.rows.first()
+                && let Some(cell) = row.first()
+            {
+                success = cell.as_deref() == Some("t") || cell.as_deref() == Some("true");
             }
             Ok(success)
         })
@@ -2735,9 +2749,9 @@ pub fn rshell_pg_list_locks(connection_id: String) -> Result<Vec<FfiPgLockDetail
     let bridge = MacOsBridge::global();
     bridge.runtime.block_on(async move {
         with_pg_pool(&connection_id, |pool| async move {
-            let session_id = "activity-monitor-session".to_string();
+            let session_id = "pg-activity-locks".to_string();
             let sql = "
-                SELECT 
+                SELECT
                     l.pid,
                     l.relation::regclass::text,
                     l.mode,

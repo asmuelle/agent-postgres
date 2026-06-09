@@ -276,9 +276,7 @@ pub mod linux {
     /// USER is right-padded to 32 chars by the `user:32` format spec
     /// so values containing spaces stay in one column.
     pub fn parse_processes(s: &str) -> Vec<super::ProcessRow> {
-        s.lines()
-            .filter_map(|line| super::parse_process_line(line))
-            .collect()
+        s.lines().filter_map(super::parse_process_line).collect()
     }
 }
 
@@ -471,9 +469,7 @@ pub mod darwin {
     pub const PROCESSES_COMMAND: &str = "ps -axo pid,user,pcpu,pmem,comm,args -r | tail -n +2";
 
     pub fn parse_processes(s: &str) -> Vec<super::ProcessRow> {
-        s.lines()
-            .filter_map(|line| super::parse_process_line(line))
-            .collect()
+        s.lines().filter_map(super::parse_process_line).collect()
     }
 }
 
