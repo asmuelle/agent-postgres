@@ -143,6 +143,13 @@ struct PostgresQueryTabView: View {
                     .fill(envColor)
                     .frame(height: 2)
             }
+            PostgresTransactionBar(
+                state: tab.transactionState,
+                isConnected: connectionId != nil,
+                onBegin: { beginTransaction(tab: tab) },
+                onCommit: { commitTransaction(tab: tab) },
+                onRollback: { rollbackTransaction(tab: tab) }
+            )
             VSplitView {
                 sqlEditor(for: tab)
                     .frame(minHeight: 100, idealHeight: 160)
@@ -920,6 +927,7 @@ struct PostgresQueryTabView: View {
                     .completed(elapsed: elapsed, atTime: Date()),
                     forTab: tabId
                 )
+                storeRef.applyTransactionEffect(sql: trimmed, error: nil, tabId: tabId)
                 // Record successful executions only — failures and
                 // cancellations don't represent something the user
                 // would want to re-run via the history panel.
@@ -936,6 +944,7 @@ struct PostgresQueryTabView: View {
                     .failed(message: err.errorDescription ?? "Query failed", elapsed: elapsed),
                     forTab: tabId
                 )
+                storeRef.applyTransactionEffect(sql: trimmed, error: err, tabId: tabId)
                 logger.error("query failed: \(err.localizedDescription, privacy: .public)")
             } catch {
                 let elapsed = Date().timeIntervalSince(started)
@@ -943,6 +952,63 @@ struct PostgresQueryTabView: View {
                     .failed(message: error.localizedDescription, elapsed: elapsed),
                     forTab: tabId
                 )
+                // Unreachable from pgExecute today (pgWrapping maps everything to
+                // PostgresBridgeError), but if a non-bridge error ever escapes,
+                // don't leave a tracked-open transaction silently stale —
+                // Postgres aborts the transaction on any statement error.
+                storeRef.applyTransactionEffect(
+                    sql: trimmed,
+                    error: .other(error.localizedDescription),
+                    tabId: tabId
+                )
+            }
+        }
+    }
+
+    // MARK: - Transaction control
+
+    private func beginTransaction(tab: PostgresQueryTab) {
+        guard let connectionId else { return }
+        let sessionId = tab.id.uuidString
+        let tabId = tab.id
+        Task { @MainActor in
+            do {
+                try await BridgeManager.shared.pgBegin(connectionId: connectionId, sessionId: sessionId)
+                store.setTransactionState(.open, forTab: tabId)
+            } catch {
+                logger.error("BEGIN failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func commitTransaction(tab: PostgresQueryTab) {
+        guard let connectionId else { return }
+        let sessionId = tab.id.uuidString
+        let tabId = tab.id
+        Task { @MainActor in
+            do {
+                try await BridgeManager.shared.pgCommit(connectionId: connectionId, sessionId: sessionId)
+                store.setTransactionState(.none, forTab: tabId)
+            } catch {
+                logger.error("COMMIT failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func rollbackTransaction(tab: PostgresQueryTab) {
+        guard let connectionId else { return }
+        let sessionId = tab.id.uuidString
+        let tabId = tab.id
+        Task { @MainActor in
+            do {
+                try await BridgeManager.shared.pgRollback(connectionId: connectionId, sessionId: sessionId)
+                store.setTransactionState(.none, forTab: tabId)
+            } catch {
+                // Rollback is the user's escape hatch — never leave the banner
+                // stuck. A failure here is almost always a dropped connection,
+                // which itself ends the server-side transaction, so clear it.
+                logger.error("ROLLBACK failed: \(error.localizedDescription, privacy: .public)")
+                store.setTransactionState(.none, forTab: tabId)
             }
         }
     }

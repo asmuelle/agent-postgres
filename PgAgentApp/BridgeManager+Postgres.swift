@@ -11,6 +11,27 @@ import PgAgentMacOS
 // schema can't block keystroke writes to a PTY.
 // =============================================================================
 
+/// PostgreSQL's structured server-error fields, surfaced from
+/// `FfiPgError.Database` so the UI can show the SQLSTATE, the failing
+/// constraint, an editor position, and the server's detail/hint.
+struct PostgresServerError: Sendable, Equatable {
+    let sqlstate: String
+    let message: String
+    let detail: String?
+    let hint: String?
+    /// 1-based character offset into the submitted SQL, when the server
+    /// reported one.
+    let position: UInt32?
+    let constraint: String?
+    let column: String?
+    let table: String?
+    let schema: String?
+
+    /// `true` when the session's transaction is aborted (SQLSTATE class 25,
+    /// e.g. `25P02`) and a ROLLBACK is required before further statements run.
+    var isInFailedTransaction: Bool { sqlstate.hasPrefix("25") }
+}
+
 /// Swift-side mirror of `FfiPgError` plus a few transport-level wrappers,
 /// so the rest of the UI can pattern-match without depending on the
 /// uniffi module.
@@ -30,6 +51,8 @@ enum PostgresBridgeError: Error, LocalizedError {
     /// "too many open queries — close a tab to continue".
     case poolExhausted(String)
     case notConnected(String)
+    /// A server-side error carrying PostgreSQL's structured fields.
+    case database(PostgresServerError)
     case other(String)
 
     var errorDescription: String? {
@@ -42,8 +65,20 @@ enum PostgresBridgeError: Error, LocalizedError {
         case .cursorExpired(let m):        return "Result no longer available: \(m)"
         case .poolExhausted(let m):        return "Too many open queries (\(m)). Close a tab to free up a connection."
         case .notConnected(let m):         return "Not connected: \(m)"
+        case .database(let e):
+            var lines = ["ERROR \(e.sqlstate): \(e.message)"]
+            if let c = e.constraint { lines.append("Constraint: \(c)") }
+            if let d = e.detail { lines.append("Detail: \(d)") }
+            if let h = e.hint { lines.append("Hint: \(h)") }
+            return lines.joined(separator: "\n")
         case .other(let m):                return m
         }
+    }
+
+    /// The structured server error, when this is a `.database` failure.
+    var serverError: PostgresServerError? {
+        if case .database(let e) = self { return e }
+        return nil
     }
 
     var isCursorExpired: Bool {
@@ -63,6 +98,12 @@ enum PostgresBridgeError: Error, LocalizedError {
         case .CursorExpired(let detail):        return .cursorExpired(detail)
         case .PoolExhausted(let detail):        return .poolExhausted(detail)
         case .NotConnected(let detail):         return .notConnected(detail)
+        case let .Database(sqlstate, message, detail, hint, position, constraint, column, table, schema):
+            return .database(PostgresServerError(
+                sqlstate: sqlstate, message: message, detail: detail, hint: hint,
+                position: position, constraint: constraint, column: column,
+                table: table, schema: schema
+            ))
         case .Other(let detail):                return .other(detail)
         }
     }
@@ -375,6 +416,27 @@ extension BridgeManager {
     func pgListLocks(connectionId: String) async throws -> [FfiPgLockDetail] {
         try await pgWrapping {
             try rshellPgListLocks(connectionId: connectionId)
+        }
+    }
+
+    /// Begin / commit / roll back a transaction on the tab's session. The
+    /// session pins its pooled connection across the transaction, so the same
+    /// `sessionId` must run the statements inside it.
+    func pgBegin(connectionId: String, sessionId: String) async throws {
+        try await pgWrapping {
+            try rshellPgBegin(connectionId: connectionId, sessionId: sessionId)
+        }
+    }
+
+    func pgCommit(connectionId: String, sessionId: String) async throws {
+        try await pgWrapping {
+            try rshellPgCommit(connectionId: connectionId, sessionId: sessionId)
+        }
+    }
+
+    func pgRollback(connectionId: String, sessionId: String) async throws {
+        try await pgWrapping {
+            try rshellPgRollback(connectionId: connectionId, sessionId: sessionId)
         }
     }
 
