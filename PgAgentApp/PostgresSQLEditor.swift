@@ -18,6 +18,9 @@ import SwiftUI
 struct PostgresSQLEditor: NSViewRepresentable {
     @Binding var text: String
     var isEditable: Bool = true
+    /// 0-based character offset (into `text`) to underline as the last query
+    /// error location, or `nil` for none. Mapped from the server's position.
+    var errorCharOffset: Int?
     /// Live identifier candidates (table / column / schema / function names).
     /// Evaluated lazily, only when the user triggers completion, so it always
     /// reflects whatever the browser has loaded so far. `@MainActor` because it
@@ -82,7 +85,20 @@ struct PostgresSQLEditor: NSViewRepresentable {
             textView.string = text
             let end = (text as NSString).length
             textView.setSelectedRange(NSRange(location: end, length: 0))
+            context.coordinator.errorCharOffset = errorCharOffset
             context.coordinator.applyHighlighting()
+            return
+        }
+
+        // Reconcile the error underline (without disturbing the caret) and
+        // scroll the offending token into view when it first appears.
+        if context.coordinator.errorCharOffset != errorCharOffset {
+            context.coordinator.errorCharOffset = errorCharOffset
+            context.coordinator.applyHighlighting()
+            if let offset = errorCharOffset,
+               let range = Coordinator.errorWordRange(in: textView.string, charOffset: offset) {
+                textView.scrollRangeToVisible(range)
+            }
         }
     }
 
@@ -101,6 +117,9 @@ struct PostgresSQLEditor: NSViewRepresentable {
         // rather than rescanning per keystroke.
         private var cachedIdentifiers: [String] = []
         private var lastIdentifierRefresh: Date = .distantPast
+        /// Last-applied error-underline offset, so `updateNSView` can detect
+        /// changes; cleared the moment the user edits.
+        var errorCharOffset: Int?
 
         init(_ parent: PostgresSQLEditor) {
             self.parent = parent
@@ -108,8 +127,11 @@ struct PostgresSQLEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
+            // Any edit invalidates the error underline; drop it before recoloring
+            // so a stale red marker never lingers on changed text.
+            errorCharOffset = nil
             // Push the edit back through the binding; the parent's setter
-            // also revokes AI provenance on the query tab.
+            // also revokes AI provenance and the error offset on the query tab.
             if parent.text != textView.string {
                 parent.text = textView.string
             }
@@ -151,6 +173,32 @@ struct PostgresSQLEditor: NSViewRepresentable {
         func applyHighlighting() {
             guard let textView, let storage = textView.textStorage else { return }
             PostgresSQLSyntax.highlight(storage, baseFont: textView.font ?? PostgresSQLEditor.editorFont)
+            if let offset = errorCharOffset,
+               let range = Self.errorWordRange(in: textView.string, charOffset: offset) {
+                storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue, range: range)
+                storage.addAttribute(.underlineColor, value: NSColor.systemRed, range: range)
+            }
+        }
+
+        /// UTF-16 range of the identifier-ish run starting at `charOffset`
+        /// (0-based, counted in Characters), guaranteed at least one character.
+        /// A position one past the end (e.g. `SELECT 1 +`) underlines the last
+        /// character rather than vanishing.
+        static func errorWordRange(in text: String, charOffset: Int) -> NSRange? {
+            guard !text.isEmpty, charOffset >= 0, charOffset <= text.count else { return nil }
+            let clampedOffset = min(charOffset, text.count - 1)
+            let start = text.index(text.startIndex, offsetBy: clampedOffset)
+            var end = start
+            while end < text.endIndex {
+                let c = text[end]
+                if c.isLetter || c.isNumber || c == "_" {
+                    end = text.index(after: end)
+                } else {
+                    break
+                }
+            }
+            if end == start { end = text.index(after: start) }
+            return NSRange(start..<end, in: text)
         }
     }
 }
