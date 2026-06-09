@@ -42,6 +42,11 @@ struct PostgresQueryTabView: View {
     @State private var insertSheet: InsertSheetContext? = nil
     @State private var isTransposed: Bool = false
     @State private var selectedTransposedRowIndex: Int = 0
+    /// Case-insensitive substring filter over the loaded result rows. Applied
+    /// client-side by the grid; reset when a new query runs.
+    @State private var resultFilter: String = ""
+    /// A cell the user asked to inspect (right-click → "Show value…").
+    @State private var inspectedCell: PostgresCellInspection? = nil
     /// A non-read-only statement the AI assistant generated, awaiting the
     /// user's explicit confirmation before it runs. `nil` when nothing is
     /// pending. Set by `run` when it refuses to silently execute AI-authored
@@ -91,6 +96,12 @@ struct PostgresQueryTabView: View {
             switch tab.kind {
             case .query:
                 content(for: tab)
+                    .onChange(of: tabId) { _ in
+                        // The host reuses one view across tabs (swaps tabId), so
+                        // reset per-tab grid affordances on switch.
+                        resultFilter = ""
+                        inspectedCell = nil
+                    }
             case .routine(let schema, let name, let signature):
                 PostgresRoutineVisualizerView(
                     connectionId: connectionId,
@@ -229,6 +240,9 @@ struct PostgresQueryTabView: View {
                 query: tab.sql
             )
             .frame(minWidth: 850, minHeight: 600)
+        }
+        .sheet(item: $inspectedCell) { cell in
+            PostgresCellInspectorView(inspection: cell)
         }
     }
 
@@ -529,6 +543,8 @@ struct PostgresQueryTabView: View {
         // checking the host wired a callback at all.
         PostgresResultsTable(
             result: result,
+            filterText: resultFilter,
+            onInspectCell: { inspectedCell = $0 },
             editable: canEdit,
             pendingEdits: tab.pendingEdits,
             onCellEdit: canEdit ? { edit, complete in
@@ -954,6 +970,7 @@ struct PostgresQueryTabView: View {
         let started = Date()
         store.setExecState(.running(startedAt: started), forTab: tabId)
         store.setErrorPosition(nil, forTab: tabId)
+        resultFilter = ""
 
         let storeRef = store
         let sessionId = tabId.uuidString
@@ -1836,6 +1853,25 @@ extension PostgresQueryTabView {
             }
 
             Spacer()
+
+            // Quick filter over the loaded rows (client-side substring match).
+            HStack(spacing: 3) {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .foregroundStyle(.secondary)
+                TextField("Filter", text: $resultFilter)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 150)
+                if !resultFilter.isEmpty {
+                    Button {
+                        resultFilter = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear filter")
+                }
+            }
+            .help("Filter the loaded rows (case-insensitive, across columns). Filtering and column sorting act on fetched rows, not the full server result; clear both to edit cells.")
 
             // Export Menu
             Menu {
