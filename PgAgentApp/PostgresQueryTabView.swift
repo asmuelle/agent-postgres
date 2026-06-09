@@ -42,7 +42,19 @@ struct PostgresQueryTabView: View {
     @State private var insertSheet: InsertSheetContext? = nil
     @State private var isTransposed: Bool = false
     @State private var selectedTransposedRowIndex: Int = 0
+    /// A non-read-only statement the AI assistant generated, awaiting the
+    /// user's explicit confirmation before it runs. `nil` when nothing is
+    /// pending. Set by `run` when it refuses to silently execute AI-authored
+    /// write SQL.
+    @State private var pendingAIWrite: PendingAIWrite? = nil
     @FocusState private var editorFocused: Bool
+
+    private struct PendingAIWrite: Identifiable {
+        let id = UUID()
+        let tabId: UUID
+        let connectionId: String
+        let sql: String
+    }
 
     /// Drives the on-device "Explain this error" sheet. Inert on OSes below
     /// macOS 26 — `aiAvailable` gates the entry point so the sheet never shows.
@@ -176,6 +188,25 @@ struct PostgresQueryTabView: View {
         } message: { summary in
             Text(summary.message)
         }
+        .alert(
+            "Run a statement that modifies data?",
+            isPresented: Binding(
+                get: { pendingAIWrite != nil },
+                set: { if !$0 { pendingAIWrite = nil } }
+            ),
+            presenting: pendingAIWrite
+        ) { pending in
+            Button("Run write", role: .destructive) {
+                // The user takes ownership: drop AI provenance so the same
+                // statement isn't re-challenged, then execute it directly.
+                store.mutate(id: pending.tabId) { $0.aiGeneratedSQL = nil }
+                execute(tabId: pending.tabId, connectionId: pending.connectionId, sql: pending.sql)
+                pendingAIWrite = nil
+            }
+            Button("Cancel", role: .cancel) { pendingAIWrite = nil }
+        } message: { pending in
+            Text("The AI assistant generated this statement and it is not a single read-only query. Review it before running:\n\n\(String(pending.sql.prefix(400)))")
+        }
         .sheet(item: $insertSheet) { ctx in
             PostgresInsertRowSheet(
                 target: ctx.target,
@@ -206,19 +237,20 @@ struct PostgresQueryTabView: View {
     @ViewBuilder
     private func sqlEditor(for tab: PostgresQueryTab) -> some View {
         ZStack(alignment: .topTrailing) {
-            TextEditor(text: Binding(
-                get: { tab.sql },
-                set: { store.setSQL($0, forTab: tab.id) }
-            ))
-            .font(.system(.body, design: .monospaced))
-            .focused($editorFocused)
-            .padding(8)
+            PostgresSQLEditor(
+                text: Binding(
+                    get: { tab.sql },
+                    set: { store.setSQL($0, forTab: tab.id) }
+                ),
+                identifiers: {
+                    PostgresConnectionManager.shared
+                        .schemaStores[profileId]?.completionIdentifiers ?? []
+                }
+            )
             .background(Color(NSColor.textBackgroundColor))
-            // Capture ⌘↵ to run, ⌘. to cancel. Using `.onSubmit`
-            // doesn't fire for multi-line TextEditors, so we attach
-            // hidden buttons with the keyboard shortcuts instead —
-            // SwiftUI walks them as part of the responder chain
-            // when the editor has focus.
+            // ⌘↵ runs, ⌘. cancels. These hidden buttons register as
+            // window-level key equivalents, so they fire regardless of editor
+            // focus and before the text view sees the keystroke (no double-run).
             .overlay(alignment: .top) {
                 HStack(spacing: 0) {
                     Button("Run", action: { run(tab: tab) })
@@ -324,7 +356,7 @@ struct PostgresQueryTabView: View {
                 connectionId: connectionId ?? "",
                 defaultSchema: "public"
             ) { generatedSql in
-                store.setSQL(generatedSql, forTab: tab.id)
+                store.setAIGeneratedSQL(generatedSql, forTab: tab.id)
             }
         }
     }
@@ -387,7 +419,7 @@ struct PostgresQueryTabView: View {
         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
         .sheet(isPresented: $aiErrorStore.isPresented) {
             PgAIErrorExplainView(store: aiErrorStore) { correctedSql in
-                store.setSQL(correctedSql, forTab: tab.id)
+                store.setAIGeneratedSQL(correctedSql, forTab: tab.id)
             }
         }
         .sheet(isPresented: $aiExplainStore.isPresented) {
@@ -847,13 +879,35 @@ struct PostgresQueryTabView: View {
         let trimmed = tab.sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        // Enforce the read-only guard for *unmodified* AI-generated SQL. The
+        // on-device model is told to emit read-only SQL, but instructions are
+        // not a boundary — this is. If the editor still holds verbatim AI
+        // output and it is not a single read-only statement, require explicit
+        // confirmation before it can reach pgExecute. SQL the user typed or
+        // edited carries no AI provenance and runs unimpeded.
+        if let aiSQL = tab.aiGeneratedSQL,
+           aiSQL.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed,
+           !PgReadOnlyGuard.isReadOnly(trimmed) {
+            pendingAIWrite = PendingAIWrite(
+                tabId: tab.id,
+                connectionId: connectionId,
+                sql: trimmed
+            )
+            return
+        }
+
+        execute(tabId: tab.id, connectionId: connectionId, sql: trimmed)
+    }
+
+    /// Submit `sql` to the engine. Split out from `run` so the AI-write
+    /// confirmation can call straight through once the user accepts.
+    private func execute(tabId: UUID, connectionId: String, sql trimmed: String) {
         runTask?.cancel()
         let started = Date()
-        store.setExecState(.running(startedAt: started), forTab: tab.id)
+        store.setExecState(.running(startedAt: started), forTab: tabId)
 
         let storeRef = store
-        let tabId = tab.id
-        let sessionId = tab.id.uuidString
+        let sessionId = tabId.uuidString
         let pageSize = store.pageSize
         runTask = Task { @MainActor in
             do {

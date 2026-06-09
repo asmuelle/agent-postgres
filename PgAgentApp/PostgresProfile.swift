@@ -21,6 +21,23 @@ enum PostgresAuthMethod: Codable, Hashable, Sendable {
     /// Password lives in the profile (in-memory only). Useful for tests and
     /// throwaway connections; never written to disk.
     case ephemeralPassword(String)
+
+    // The ephemeral password is a runtime-only secret. The default synthesized
+    // Codable conformance would serialize it as plaintext if an
+    // `.ephemeralPassword` profile were ever persisted (the store does not
+    // guard against this). Instead, encode *only* a discriminator and always
+    // decode to `.keychain`: the secret can never reach disk, and a persisted
+    // ephemeral profile degrades to keychain auth rather than leaking.
+    private enum CodingKeys: String, CodingKey { case kind }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode("keychain", forKey: .kind)
+    }
+
+    init(from decoder: Decoder) throws {
+        self = .keychain
+    }
 }
 
 enum PostgresTlsMode: String, Codable, Sendable, CaseIterable {
@@ -82,7 +99,12 @@ struct PostgresProfile: Codable, Identifiable, Hashable, Sendable {
         database: String,
         user: String,
         auth: PostgresAuthMethod = .keychain,
-        tls: PostgresTlsMode = .prefer,
+        // Default to `.require`, not `.prefer`: `.prefer` silently falls back to
+        // plaintext if the server doesn't offer TLS, which a network attacker
+        // can force by stripping the TLS negotiation. SSH-tunneled connections
+        // are already encrypted by the tunnel; users who genuinely need
+        // plaintext can still opt down in the connection editor.
+        tls: PostgresTlsMode = .require,
         applicationName: String? = "mc-ssh",
         tunnel: PostgresTunnel? = nil,
         connectTimeoutSecs: UInt64? = 10,

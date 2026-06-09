@@ -113,6 +113,11 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     /// Client-side transaction state for this tab's session. See
     /// `PgTransactionState`.
     var transactionState: PgTransactionState
+    /// Verbatim SQL the AI assistant placed into the editor, if any. Tracked
+    /// so `PgReadOnlyGuard` can be enforced at execution time for *unmodified*
+    /// AI output without interfering with SQL the user typed or edited. Set by
+    /// `setAIGeneratedSQL`; cleared the moment the editor text changes.
+    var aiGeneratedSQL: String?
 
     init(
         id: UUID = UUID(),
@@ -126,7 +131,8 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
         batchMode: Bool = false,
         pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit] = [:],
         kind: TabKind = .query,
-        transactionState: PgTransactionState = .none
+        transactionState: PgTransactionState = .none,
+        aiGeneratedSQL: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -140,6 +146,7 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
         self.pendingEdits = pendingEdits
         self.kind = kind
         self.transactionState = transactionState
+        self.aiGeneratedSQL = aiGeneratedSQL
     }
 
     /// Uppercased first word of a SQL statement, skipping leading whitespace and
@@ -372,7 +379,22 @@ final class PostgresQueryTabsStore: ObservableObject {
     }
 
     func setSQL(_ sql: String, forTab id: UUID) {
-        mutate(id: id) { $0.sql = sql }
+        mutate(id: id) {
+            $0.sql = sql
+            // Any explicit edit or non-AI insert revokes AI provenance: once
+            // the user owns the text, it runs on the normal (unguarded) path.
+            $0.aiGeneratedSQL = nil
+        }
+    }
+
+    /// Place AI-generated SQL into the editor and remember it verbatim, so
+    /// `run` can enforce `PgReadOnlyGuard` on unmodified AI output before it
+    /// reaches `pgExecute`.
+    func setAIGeneratedSQL(_ sql: String, forTab id: UUID) {
+        mutate(id: id) {
+            $0.sql = sql
+            $0.aiGeneratedSQL = sql
+        }
     }
 
     func setExecState(_ state: PostgresQueryExecState, forTab id: UUID) {
