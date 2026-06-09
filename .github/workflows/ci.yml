@@ -1,0 +1,99 @@
+name: CI
+
+# Gates every PR and push to main on a green baseline:
+#   * Rust lint (rustfmt + clippy -D warnings) — the gate the Stop hook's
+#     `cargo check` does NOT enforce, which is how clippy drifted red before.
+#   * Rust unit tests, plus an opt-in live-Postgres integration tier that
+#     exercises the real connect → execute → cursor paging → export path.
+#   * A compiler-only build of the macOS app (no signing).
+#
+# Everything runs on macOS: the Swift app needs the macOS 26 SDK
+# (FoundationModels is weak-linked behind @available), and the Rust crate is
+# the same toolchain developers use, so the build matches what's verified
+# locally. `just mac-test` (the signed XCTest target) is intentionally omitted
+# — it needs an Apple Developer Team ID + signing secrets; wire it as a
+# separate, secrets-gated job when those are available.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust — lint, unit, live-Postgres integration
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Lint (rustfmt --check + clippy -D warnings)
+        run: just lint
+
+      - name: Unit tests (the live-DB tier self-skips without PG_AGENT_IT)
+        run: just test-rust
+
+      - name: Start Postgres (Homebrew)
+        run: |
+          set -euo pipefail
+          brew install postgresql@16
+          PGBIN="$(brew --prefix postgresql@16)/bin"
+          echo "$PGBIN" >> "$GITHUB_PATH"
+          "$PGBIN/initdb" --username=postgres --auth=trust -D "$RUNNER_TEMP/pgdata"
+          "$PGBIN/pg_ctl" -D "$RUNNER_TEMP/pgdata" -l "$RUNNER_TEMP/pg.log" \
+            -o "-p 5432" -w start
+          for _ in $(seq 1 30); do
+            "$PGBIN/pg_isready" -h 127.0.0.1 -p 5432 -U postgres && break
+            sleep 1
+          done
+
+      - name: Live-Postgres integration tests
+        env:
+          PG_AGENT_IT: "1"
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: ""
+          PGDATABASE: postgres
+        run: cargo test --lib pg_it_ -- --test-threads=1 --nocapture
+
+  swift:
+    name: Swift — compile macOS app (no signing)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The app imports FoundationModels (weak-linked, gated on macOS 26), so
+      # it must build against the macOS 26 SDK — select the newest Xcode.
+      - name: Select latest Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install just + xcodegen
+        run: brew install just xcodegen
+
+      - name: Compile app (single-arch Debug, no signing)
+        run: just mac-ci-build
