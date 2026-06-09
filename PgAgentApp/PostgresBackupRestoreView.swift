@@ -291,12 +291,23 @@ struct PostgresBackupRestoreView: View {
         
         // Resolve postgres credentials
         let password = KeychainManager.shared.loadPassword(kind: .postgresPassword, account: profile.keychainAccount) ?? ""
-        let escapedPassword = password.replacingOccurrences(of: "'", with: "'\\''")
+        // POSIX-safe single quoting so host / user / database / path / password
+        // values cannot break out of their quotes into the remote shell — a
+        // field like `'; rm -rf ~ #` is rendered inert. Applied to *every*
+        // interpolated field (the port is a typed UInt16 and needs no quoting).
+        func shellSingleQuoted(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        let quotedPassword = shellSingleQuoted(password)
+        let quotedHost = shellSingleQuoted(profile.host)
+        let quotedUser = shellSingleQuoted(profile.user)
+        let quotedDatabase = shellSingleQuoted(profile.database)
+        let quotedPath = shellSingleQuoted(path)
         
         // Dynamically build cmd
         var cmd = ""
         if isBackup {
-            cmd = "PGPASSWORD='\(escapedPassword)' pg_dump -h '\(profile.host)' -p \(profile.port) -U '\(profile.user)'"
+            cmd = "PGPASSWORD=\(quotedPassword) pg_dump -h \(quotedHost) -p \(profile.port) -U \(quotedUser)"
             if backupDataOnly { cmd += " -a" }
             if backupSchemaOnly { cmd += " -s" }
             if backupClean { cmd += " -c" }
@@ -308,18 +319,18 @@ struct PostgresBackupRestoreView: View {
             default: break
             }
             
-            cmd += " -f '\(path)'"
-            cmd += " '\(profile.database)'"
+            cmd += " -f \(quotedPath)"
+            cmd += " \(quotedDatabase)"
         } else {
             // Is Restore. Check if plain SQL
             let isSql = path.lowercased().hasSuffix(".sql")
             if isSql {
-                cmd = "PGPASSWORD='\(escapedPassword)' psql -h '\(profile.host)' -p \(profile.port) -U '\(profile.user)' -d '\(profile.database)' -f '\(path)'"
+                cmd = "PGPASSWORD=\(quotedPassword) psql -h \(quotedHost) -p \(profile.port) -U \(quotedUser) -d \(quotedDatabase) -f \(quotedPath)"
             } else {
-                cmd = "PGPASSWORD='\(escapedPassword)' pg_restore -h '\(profile.host)' -p \(profile.port) -U '\(profile.user)' -d '\(profile.database)'"
+                cmd = "PGPASSWORD=\(quotedPassword) pg_restore -h \(quotedHost) -p \(profile.port) -U \(quotedUser) -d \(quotedDatabase)"
                 if restoreClean { cmd += " -c" }
                 if restoreSingleTransaction { cmd += " -1" }
-                cmd += " '\(path)'"
+                cmd += " \(quotedPath)"
             }
         }
         
@@ -327,7 +338,11 @@ struct PostgresBackupRestoreView: View {
         cmd += " 2>&1"
         
         consoleLogs += "[EXECUTION INITIATED] Running command on SSH host:\n"
-        let printableCmd = cmd.replacingOccurrences(of: escapedPassword, with: "********")
+        // Mask the quoted password substring so the secret never reaches the log.
+        var printableCmd = cmd
+        if !password.isEmpty {
+            printableCmd = printableCmd.replacingOccurrences(of: quotedPassword, with: "'********'")
+        }
         consoleLogs += "$ \(printableCmd)\n\n"
         
         Task {
