@@ -244,12 +244,16 @@ final class PostgresQueryTabsStore: ObservableObject {
     /// Postgres allows mixed-case and reserved-word identifiers, so
     /// an unquoted `Order` would silently target `order`.
     @discardableResult
-    func openRelationTab(schema: String, name: String) -> UUID {
+    func openRelationTab(schema: String, name: String, whereClause: String? = nil) -> UUID {
         let qualified = "\(quoteIdent(schema)).\(quoteIdent(name))"
         // `ctid AS __pg_rowid__` is the row-identity column the
         // editable-grid path keys on. The alias keeps it findable
         // by name (the grid scans column names, not OIDs).
-        let sql = "SELECT *, ctid AS \(POSTGRES_ROWID_COLUMN) FROM \(qualified) LIMIT 500;"
+        // `whereClause` (FK navigation) arrives pre-quoted by the
+        // caller and lands in the editor for review before running —
+        // same review-before-run convention as every generated tab.
+        let filter = whereClause.map { " WHERE \($0)" } ?? ""
+        let sql = "SELECT *, ctid AS \(POSTGRES_ROWID_COLUMN) FROM \(qualified)\(filter) LIMIT 500;"
         let tab = PostgresQueryTab(
             title: "\(schema).\(name)",
             sql: sql,

@@ -7814,6 +7814,17 @@ public func rshellInit() -> Bool {
     })
 }
 
+/**
+ * Query whether a connection exists.
+ */
+public func rshellIsConnected(connectionId: String) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_pg_agent_fn_func_rshell_is_connected(
+            FfiConverterString.lower(connectionId), $0
+        )
+    })
+}
+
 public func rshellKeychainDelete(kind: FfiCredentialKind, account: String) -> FfiResult {
     return try! FfiConverterTypeFfiResult.lift(try! rustCall {
         uniffi_pg_agent_fn_func_rshell_keychain_delete(
@@ -8584,6 +8595,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_pg_agent_checksum_func_rshell_init() != 46815 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_pg_agent_checksum_func_rshell_is_connected() != 23660 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_pg_agent_checksum_func_rshell_keychain_delete() != 48447 {

@@ -285,6 +285,107 @@ struct PgServerInfo: Sendable {
     let extensions: [PgExtensionInfo]
 }
 
+/// One FOREIGN KEY constraint, fully resolved to schema-qualified
+/// tables and ordered column lists. Multi-column keys keep their
+/// pg_constraint ordering so `fromColumns[i]` pairs with
+/// `toColumns[i]`.
+struct PgForeignKey: Hashable, Sendable {
+    let constraintName: String
+    /// The table that declares the constraint.
+    let fromSchema: String
+    let fromTable: String
+    let fromColumns: [String]
+    /// The table the constraint points at.
+    let toSchema: String
+    let toTable: String
+    let toColumns: [String]
+}
+
+/// Both directions of FK involvement for one table: constraints the
+/// table declares (outgoing) and constraints other tables declare
+/// against it (incoming). A self-referencing FK appears in both.
+struct PgTableForeignKeys: Sendable {
+    let outgoing: [PgForeignKey]
+    let incoming: [PgForeignKey]
+
+    var isEmpty: Bool { outgoing.isEmpty && incoming.isEmpty }
+}
+
+/// Parser for the one-row-per-column FK catalog query in
+/// `PgSchemaStore.loadForeignKeys`. Kept off the store so unit tests
+/// can exercise it without a connection.
+enum PgForeignKeyParser {
+    /// Expected cell layout per row:
+    /// `[conname, from_schema, from_table, from_column,
+    ///   to_schema, to_table, to_column, is_outgoing, is_incoming]`
+    /// where the two flags arrive as Postgres boolean text ("t"/"f").
+    /// Rows must be ordered by constraint then key position — the
+    /// query's `ORDER BY c.oid, k.ord` guarantees this, and the
+    /// parser folds consecutive rows of the same constraint into one
+    /// `PgForeignKey` with ordered column lists.
+    static func parse(rows: [[String?]]) -> PgTableForeignKeys {
+        var outgoing: [PgForeignKey] = []
+        var incoming: [PgForeignKey] = []
+        // (constraint, from, to) uniquely identifies a constraint —
+        // names are only unique per declaring table.
+        var lastKey: [String]? = nil
+        var pending: (fk: PgForeignKey, isOutgoing: Bool, isIncoming: Bool)?
+
+        func flush() {
+            guard let p = pending else { return }
+            if p.isOutgoing { outgoing.append(p.fk) }
+            if p.isIncoming { incoming.append(p.fk) }
+            pending = nil
+        }
+
+        for cells in rows {
+            guard cells.count >= 9,
+                  let conname = cells[0],
+                  let fromSchema = cells[1],
+                  let fromTable = cells[2],
+                  let fromColumn = cells[3],
+                  let toSchema = cells[4],
+                  let toTable = cells[5],
+                  let toColumn = cells[6]
+            else { continue }
+            let key = [conname, fromSchema, fromTable, toSchema, toTable]
+            if key == lastKey, let p = pending {
+                pending = (
+                    PgForeignKey(
+                        constraintName: conname,
+                        fromSchema: fromSchema,
+                        fromTable: fromTable,
+                        fromColumns: p.fk.fromColumns + [fromColumn],
+                        toSchema: toSchema,
+                        toTable: toTable,
+                        toColumns: p.fk.toColumns + [toColumn]
+                    ),
+                    p.isOutgoing,
+                    p.isIncoming
+                )
+            } else {
+                flush()
+                lastKey = key
+                pending = (
+                    PgForeignKey(
+                        constraintName: conname,
+                        fromSchema: fromSchema,
+                        fromTable: fromTable,
+                        fromColumns: [fromColumn],
+                        toSchema: toSchema,
+                        toTable: toTable,
+                        toColumns: [toColumn]
+                    ),
+                    cells[7] == "t",
+                    cells[8] == "t"
+                )
+            }
+        }
+        flush()
+        return PgTableForeignKeys(outgoing: outgoing, incoming: incoming)
+    }
+}
+
 @MainActor
 final class PgSchemaStore: ObservableObject {
     /// The connection this store is bound to. Held for the store's
@@ -307,6 +408,11 @@ final class PgSchemaStore: ObservableObject {
 
     /// Constraints, keys, and triggers per `"<database>.<schema>.<table_name>"` composite key.
     @Published private(set) var metaState: [String: PgLoadState<[PgSchemaNode]>] = [:]
+
+    /// Resolved FK constraints (both directions) per
+    /// `"<database>.<schema>.<table_name>"` composite key. Backs the
+    /// result grid's "Go to referenced row" navigation.
+    @Published private(set) var foreignKeysState: [String: PgLoadState<PgTableForeignKeys>] = [:]
 
     /// Languages per database name
     @Published private(set) var languagesState: [String: PgLoadState<[PgSchemaNode]>] = [:]
@@ -552,6 +658,78 @@ final class PgSchemaStore: ObservableObject {
         await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
     }
 
+    /// Load FK constraints touching `schema.table` — both those the
+    /// table declares and those declared against it. Returns the
+    /// cached value when already loaded (FK topology changes rarely;
+    /// `invalidate(database:schema:)` callers drop it with the rest).
+    /// Returns `nil` on failure — navigation simply doesn't light up.
+    @discardableResult
+    func loadForeignKeys(database: String, schema: String, table: String) async -> PgTableForeignKeys? {
+        let key = "\(database).\(schema).\(table)"
+        switch foreignKeysState[key] ?? .idle {
+        case .loaded(let cached):
+            return cached
+        case .loading:
+            // Another tab's load is in flight — the `await` below
+            // suspends off the main actor, so re-entry is real. Let
+            // the first request win rather than firing a duplicate.
+            return nil
+        default:
+            break
+        }
+        foreignKeysState[key] = .loading
+        let sessionId = "fk-loader-\(UUID().uuidString)"
+        let connId = connectionId
+        // Same injection-safe anchoring as `loadMeta`: resolve the
+        // quoted identifier to an OID once, then filter on it.
+        let regclassArg = pgQuoteLiteral(pgQuoteIdent(schema) + "." + pgQuoteIdent(table))
+        // One row per key column; the parser folds multi-column keys
+        // back together. Avoids parsing `{a,b}` array literals (which
+        // would break on identifiers containing commas or quotes).
+        // LIMIT matches `pageSize` below so the cap is explicit in
+        // SQL — past it (a pathological FK count) extra constraints
+        // silently don't get menu items, which is acceptable for a
+        // navigation affordance.
+        let sql = """
+        SELECT
+          c.conname,
+          fn.nspname, fc.relname, fa.attname,
+          tn.nspname, tc.relname, ta.attname,
+          (c.conrelid  = to_regclass(\(regclassArg))),
+          (c.confrelid = to_regclass(\(regclassArg)))
+        FROM pg_constraint c
+        CROSS JOIN LATERAL unnest(c.conkey, c.confkey)
+          WITH ORDINALITY AS k(con_attnum, conf_attnum, ord)
+        JOIN pg_class fc      ON fc.oid = c.conrelid
+        JOIN pg_namespace fn  ON fn.oid = fc.relnamespace
+        JOIN pg_attribute fa  ON fa.attrelid = c.conrelid  AND fa.attnum = k.con_attnum
+        JOIN pg_class tc      ON tc.oid = c.confrelid
+        JOIN pg_namespace tn  ON tn.oid = tc.relnamespace
+        JOIN pg_attribute ta  ON ta.attrelid = c.confrelid AND ta.attnum = k.conf_attnum
+        WHERE c.contype = 'f'
+          AND (c.conrelid = to_regclass(\(regclassArg))
+               OR c.confrelid = to_regclass(\(regclassArg)))
+        ORDER BY c.oid, k.ord
+        LIMIT 1000;
+        """
+        var loaded: PgTableForeignKeys?
+        do {
+            let res = try await BridgeManager.shared.pgExecute(
+                connectionId: connId,
+                sessionId: sessionId,
+                sql: sql,
+                pageSize: 1000
+            )
+            let fks = PgForeignKeyParser.parse(rows: res.rows.map { $0.cells })
+            foreignKeysState[key] = .loaded(fks)
+            loaded = fks
+        } catch {
+            foreignKeysState[key] = .failed(error.localizedDescription)
+        }
+        await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
+        return loaded
+    }
+
     func loadLanguages(database: String) async {
         languagesState[database] = .loading
         let sessionId = "languages-loader-\(UUID().uuidString)"
@@ -725,6 +903,8 @@ final class PgSchemaStore: ObservableObject {
     /// item without invalidating the entire database tree.
     func invalidate(database: String, schema: String) {
         schemaContentsState[relationKey(database: database, schema: schema)] = nil
+        let prefix = "\(database).\(schema)."
+        foreignKeysState = foreignKeysState.filter { !$0.key.hasPrefix(prefix) }
     }
 
     /// Drop cached children for one database, including all of its
@@ -733,6 +913,7 @@ final class PgSchemaStore: ObservableObject {
         schemasState[database] = nil
         let prefix = "\(database)."
         schemaContentsState = schemaContentsState.filter { !$0.key.hasPrefix(prefix) }
+        foreignKeysState = foreignKeysState.filter { !$0.key.hasPrefix(prefix) }
     }
 
     // MARK: - Private

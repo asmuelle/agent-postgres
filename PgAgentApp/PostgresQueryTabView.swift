@@ -47,6 +47,11 @@ struct PostgresQueryTabView: View {
     @State private var resultFilter: String = ""
     /// A cell the user asked to inspect (right-click → "Show value…").
     @State private var inspectedCell: PostgresCellInspection? = nil
+    /// FK constraints per `"<schema>.<table>"` for relation tabs,
+    /// mirrored out of `PgSchemaStore` (which this view doesn't
+    /// observe) so a load completion re-renders the grid with the
+    /// navigation menu items lit up.
+    @State private var foreignKeysBySourceTable: [String: PgTableForeignKeys] = [:]
     /// A non-read-only statement the AI assistant generated, awaiting the
     /// user's explicit confirmation before it runs. `nil` when nothing is
     /// pending. Set by `run` when it refuses to silently execute AI-authored
@@ -566,8 +571,20 @@ struct PostgresQueryTabView: View {
                     schema: target.schema,
                     table: target.table
                 )
+            },
+            // FK navigation lights up once the metadata load (kicked
+            // off below) lands. Generic SQL tabs have no source
+            // table, so no FK map and no menu items.
+            foreignKeys: tab.editTarget.flatMap {
+                foreignKeysBySourceTable["\($0.schema).\($0.table)"]
+            },
+            onNavigateFK: { navigation in
+                openFKNavigationTab(navigation)
             }
         )
+        .task(id: tab.editTarget.map { "\($0.schema).\($0.table)" }) {
+            await loadForeignKeysIfNeeded(target: tab.editTarget)
+        }
         .background(Color(NSColor.textBackgroundColor))
         .overlay(alignment: .top) {
             Rectangle()
@@ -584,6 +601,47 @@ struct PostgresQueryTabView: View {
                 .fill(Color(NSColor.gridColor))
                 .frame(height: 1)
         }
+    }
+
+    /// Load FK constraints for the tab's source table into local
+    /// state, via the schema store's cache. No-op for generic SQL
+    /// tabs and for tables already loaded this view's lifetime.
+    private func loadForeignKeysIfNeeded(target: PostgresEditTarget?) async {
+        guard let target else { return }
+        let key = "\(target.schema).\(target.table)"
+        guard foreignKeysBySourceTable[key] == nil,
+              let schemaStore = PostgresConnectionManager.shared.schemaStores[profileId],
+              let database = profile?.database
+        else { return }
+        if let fks = await schemaStore.loadForeignKeys(
+            database: database,
+            schema: target.schema,
+            table: target.table
+        ) {
+            foreignKeysBySourceTable[key] = fks
+        }
+    }
+
+    /// Open the FK target as a filtered relation tab, through the
+    /// same notification bus the sidebar uses. The generated WHERE
+    /// (quoted identifiers, quoted literals — the untyped literal
+    /// casts server-side to the column type) lands in the editor for
+    /// review; the user runs it, like every generated tab.
+    private func openFKNavigationTab(_ navigation: PostgresFKNavigation) {
+        let whereClause = navigation.filters
+            .map { "\(pgQuoteIdent($0.column)) = \(pgQuoteLiteral($0.value))" }
+            .joined(separator: " AND ")
+        NotificationCenter.default.post(
+            name: .openPostgresObjectTab,
+            object: nil,
+            userInfo: [
+                "profileId": profileId,
+                "kind": "relation",
+                "schema": navigation.schema,
+                "name": navigation.table,
+                "whereClause": whereClause,
+            ]
+        )
     }
 
     /// Confirm + run a bulk DELETE for the selected rows. Removes

@@ -404,6 +404,16 @@ pub fn rshell_connect(config: FfiConnectConfig) -> Result<String, ConnectError> 
         .map_err(|e| classify_connect_error(&e))
 }
 
+/// Query whether a connection exists.
+#[uniffi::export]
+pub fn rshell_is_connected(connection_id: String) -> bool {
+    let bridge = MacOsBridge::global();
+    let cm = bridge.connection_manager.clone();
+    bridge
+        .runtime
+        .block_on(async move { cm.get_connection(&connection_id).await.is_some() })
+}
+
 /// Disconnect an SSH connection and tear down any associated PTY session.
 #[uniffi::export]
 pub fn rshell_disconnect(connection_id: String) -> FfiResult {
