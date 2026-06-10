@@ -76,6 +76,16 @@ struct PostgresColumnWidthKey: Equatable {
     let table: String
 }
 
+/// Navigation request bubbled from the grid's FK menu items to the
+/// host, which opens the target relation in a new tab filtered to
+/// the given column/value pairs (ANDed; multi-column FKs produce
+/// multiple pairs). Values are raw cell text — the host quotes them.
+struct PostgresFKNavigation {
+    let schema: String
+    let table: String
+    let filters: [(column: String, value: String)]
+}
+
 struct PostgresResultsTable: NSViewRepresentable {
     let result: FfiPgExecutionResult
     /// `true` when the host knows how to UPDATE rows (tab opened
@@ -111,6 +121,14 @@ struct PostgresResultsTable: NSViewRepresentable {
     /// rebuild and persists changes after each manual resize.
     /// Generic SQL tabs leave these `nil` and use defaults.
     var widthPersistKey: PostgresColumnWidthKey? = nil
+    /// FK constraints for the tab's source table. Drives the
+    /// "Go to …" / "Show referencing rows …" context-menu items.
+    /// `nil` (generic SQL tabs, or metadata still loading) hides
+    /// FK navigation entirely.
+    var foreignKeys: PgTableForeignKeys? = nil
+    /// Invoked when the user picks an FK navigation item. The host
+    /// opens the filtered relation tab. `nil` hides the items.
+    var onNavigateFK: ((PostgresFKNavigation) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         let coord = Coordinator(
@@ -125,6 +143,8 @@ struct PostgresResultsTable: NSViewRepresentable {
             widthPersistKey: widthPersistKey
         )
         coord.pendingEdits = pendingEdits
+        coord.foreignKeys = foreignKeys
+        coord.onNavigateFK = onNavigateFK
         return coord
     }
 
@@ -291,6 +311,8 @@ struct PostgresResultsTable: NSViewRepresentable {
         coord.onDeleteRows = onDeleteRows
         coord.onInsertRow = onInsertRow
         coord.widthPersistKey = widthPersistKey
+        coord.foreignKeys = foreignKeys
+        coord.onNavigateFK = onNavigateFK
 
         let newIdentities = result.columns.map { ColumnSignature(name: $0.name, typeOid: $0.typeOid) }
         let columnsChanged = newIdentities != prevColumnIdentities
@@ -329,6 +351,15 @@ struct PostgresResultsTable: NSViewRepresentable {
         var onInsertRow: (() -> Void)?
         var widthPersistKey: PostgresColumnWidthKey?
         var pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit] = [:]
+        var foreignKeys: PgTableForeignKeys?
+        var onNavigateFK: ((PostgresFKNavigation) -> Void)?
+        /// Menu items added by the last `rebuildFKItems` pass, so the
+        /// next pass can strip them before rebuilding for the newly
+        /// clicked cell.
+        private var fkMenuItems: [NSMenuItem] = []
+        /// Navigation payloads behind `fkMenuItems`; each item's
+        /// `tag` indexes into this array.
+        private var fkNavigationTargets: [PostgresFKNavigation] = []
         /// When true, NULLs render as empty strings in the clipboard
         /// (still shown as "NULL" italic in the UI). Useful for
         /// pasting into spreadsheets that treat the literal "NULL" as
@@ -1348,6 +1379,10 @@ struct PostgresResultsTable: NSViewRepresentable {
         // MARK: - Menu validation
 
         func menuNeedsUpdate(_ menu: NSMenu) {
+            // FK navigation items are rebuilt per right-click — they
+            // depend on the clicked cell's value, unlike the static
+            // copy/export items below.
+            rebuildFKItems(in: menu)
             // `lastTable` is set in `makeNSView`; menu items consult
             // it for selection/clicked-cell state.
             let hasSelection = (lastTable?.selectedRowIndexes.isEmpty == false)
@@ -1396,6 +1431,138 @@ struct PostgresResultsTable: NSViewRepresentable {
                     item.isEnabled = true
                 }
             }
+        }
+
+        // MARK: - FK navigation menu
+
+        /// Strip the previous right-click's FK items, then add fresh
+        /// ones for the currently clicked cell: "Go to <target>" for
+        /// each outgoing FK on the clicked column, and "Show
+        /// referencing rows in <source>" for each incoming FK on the
+        /// clicked row. Items whose key values are NULL (or whose
+        /// columns aren't in the result) are omitted — a NULL key
+        /// references nothing, and a missing column can't be filtered.
+        private func rebuildFKItems(in menu: NSMenu) {
+            for item in fkMenuItems where menu.items.contains(item) {
+                menu.removeItem(item)
+            }
+            fkMenuItems.removeAll()
+            fkNavigationTargets.removeAll()
+
+            guard onNavigateFK != nil,
+                  let fks = foreignKeys, !fks.isEmpty,
+                  let table = lastTable,
+                  table.clickedRow >= 0,
+                  table.clickedRow < result.rows.count
+            else { return }
+
+            let rowCells = result.rows[table.clickedRow].cells
+            var columnIndexByName: [String: Int] = [:]
+            for (idx, col) in result.columns.enumerated() {
+                columnIndexByName[col.name] = idx
+            }
+
+            /// Resolve `sourceColumns`' values from the clicked row,
+            /// pairing them with `targetColumns` for the destination
+            /// filter. `nil` when any value is NULL or unavailable.
+            func filters(
+                sourceColumns: [String],
+                targetColumns: [String]
+            ) -> [(column: String, value: String)]? {
+                var pairs: [(column: String, value: String)] = []
+                for (source, target) in zip(sourceColumns, targetColumns) {
+                    guard let idx = columnIndexByName[source],
+                          idx < rowCells.count,
+                          let value = rowCells[idx]
+                    else { return nil }
+                    pairs.append((target, value))
+                }
+                return pairs.isEmpty ? nil : pairs
+            }
+
+            func preview(_ pairs: [(column: String, value: String)]) -> String {
+                pairs.map { pair in
+                    let v = pair.value.count > 20
+                        ? String(pair.value.prefix(20)) + "…"
+                        : pair.value
+                    return "\(pair.column) = \(v)"
+                }.joined(separator: ", ")
+            }
+
+            var newItems: [NSMenuItem] = []
+
+            func addItem(title: String, nav: PostgresFKNavigation) {
+                let item = NSMenuItem(
+                    title: title,
+                    action: #selector(navigateToFK(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.tag = fkNavigationTargets.count
+                fkNavigationTargets.append(nav)
+                newItems.append(item)
+            }
+
+            // Outgoing FKs: offered when the clicked column is part
+            // of the key, so "Go to" reads as acting on that cell.
+            let clickedColumnName: String? = {
+                guard table.clickedColumn >= 0,
+                      table.clickedColumn < table.tableColumns.count,
+                      let idx = columnIndex(from: table.tableColumns[table.clickedColumn].identifier),
+                      idx < result.columns.count
+                else { return nil }
+                return result.columns[idx].name
+            }()
+            if let clickedColumnName {
+                for fk in fks.outgoing where fk.fromColumns.contains(clickedColumnName) {
+                    guard let pairs = filters(
+                        sourceColumns: fk.fromColumns,
+                        targetColumns: fk.toColumns
+                    ) else { continue }
+                    addItem(
+                        title: "Go to \(fk.toSchema).\(fk.toTable) (\(preview(pairs)))",
+                        nav: PostgresFKNavigation(
+                            schema: fk.toSchema,
+                            table: fk.toTable,
+                            filters: pairs
+                        )
+                    )
+                }
+            }
+
+            // Incoming FKs: row-level — any cell in the row offers
+            // the reverse hop to the tables that point here.
+            for fk in fks.incoming {
+                guard let pairs = filters(
+                    sourceColumns: fk.toColumns,
+                    targetColumns: fk.fromColumns
+                ) else { continue }
+                addItem(
+                    title: "Show referencing rows in \(fk.fromSchema).\(fk.fromTable) (\(preview(pairs)))",
+                    nav: PostgresFKNavigation(
+                        schema: fk.fromSchema,
+                        table: fk.fromTable,
+                        filters: pairs
+                    )
+                )
+            }
+
+            guard !newItems.isEmpty else { return }
+            let separator = NSMenuItem.separator()
+            // Sentinel: never a valid index into fkNavigationTargets,
+            // so `navigateToFK`'s tag guard rejects it even if the
+            // separator somehow acquires an action.
+            separator.tag = -1
+            newItems.append(separator)
+            for (offset, item) in newItems.enumerated() {
+                menu.insertItem(item, at: offset)
+            }
+            fkMenuItems = newItems
+        }
+
+        @objc func navigateToFK(_ sender: NSMenuItem) {
+            guard sender.tag >= 0, sender.tag < fkNavigationTargets.count else { return }
+            onNavigateFK?(fkNavigationTargets[sender.tag])
         }
 
         /// Whether the cell under the right-click cursor can be

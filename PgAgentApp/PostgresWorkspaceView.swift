@@ -96,7 +96,10 @@ struct PostgresWorkspaceView: View {
         case "relation":
             if let schema = userInfo["schema"] as? String,
                let name = userInfo["name"] as? String {
-                queryStore.openRelationTab(schema: schema, name: name)
+                // FK navigation passes a pre-built filter; plain
+                // browses leave it absent.
+                let whereClause = userInfo["whereClause"] as? String
+                queryStore.openRelationTab(schema: schema, name: name, whereClause: whereClause)
             }
         case "routine":
             if let schema = userInfo["schema"] as? String,
