@@ -2290,19 +2290,153 @@ pub struct FfiPgUpdateResult {
     pub rows_affected: u64,
 }
 
-impl From<ssh_commander_core::UpdateOutcome> for FfiPgUpdateResult {
-    fn from(o: ssh_commander_core::UpdateOutcome) -> Self {
-        Self {
-            rows_affected: o.rows_affected,
-        }
+// ---------------------------------------------------------------------------
+// Grid DML — UPDATE / INSERT / DELETE built as SQL text.
+//
+// ssh-commander-core 0.1.0's editor API (`update_cell` / `insert_row` /
+// `delete_rows`) binds every parameter as `String` while writing
+// `$N::<type>` placeholders. Postgres infers the parameter to BE that
+// type, so tokio-postgres fails to serialize the text for any non-text
+// target — including the `tid` ctid every statement keys on, which
+// breaks all three calls unconditionally ("error serializing parameter").
+// Until a fixed core ships, these functions render the statement as SQL
+// text (quoted identifiers, safely-quoted literals, explicit casts) and
+// run it through the same `pool.execute` path query tabs use.
+// ---------------------------------------------------------------------------
+
+/// Magic alias the generated browse SELECT gives `ctid`; mirrored by
+/// `POSTGRES_ROWID_COLUMN` on the Swift side.
+const PG_ROWID_COLUMN: &str = "__pg_rowid__";
+
+/// Quote an identifier for direct embedding in SQL text.
+fn pg_quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Quote a text value as a SQL string literal. Values containing a
+/// backslash are emitted as an `E''` string with backslashes doubled,
+/// which is correct regardless of the server's
+/// `standard_conforming_strings` setting; plain values use `''`
+/// doubling only.
+fn pg_quote_literal(s: &str) -> String {
+    if s.contains('\\') {
+        format!("E'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+    } else {
+        format!("'{}'", s.replace('\'', "''"))
     }
 }
 
-/// Update a single cell. `new_value: None` means SET NULL; the type
-/// of a non-null value is bound as text and cast server-side
-/// (`SET col = $1::<column_type>`). Identifiers are quoted defensively
-/// in the core layer — callers don't need to escape `schema` / `table`
-/// / `column`.
+/// Render an optional cell value as a SQL expression: `NULL`, a cast
+/// literal when the column type is known, or a bare (untyped) literal
+/// otherwise — Postgres coerces an unknown literal to the target
+/// column's type on its own.
+fn pg_value_expr(value: Option<&str>, type_name: &str) -> String {
+    match value {
+        None => "NULL".to_string(),
+        Some(v) if type_name.is_empty() => pg_quote_literal(v),
+        Some(v) => format!(
+            "CAST({} AS {})",
+            pg_quote_literal(v),
+            pg_quote_ident(type_name)
+        ),
+    }
+}
+
+fn build_update_cell_sql(
+    schema: &str,
+    table: &str,
+    column: &str,
+    column_type: &str,
+    new_value: Option<&str>,
+    row_id: &str,
+) -> String {
+    format!(
+        "UPDATE {}.{} SET {} = {} WHERE ctid = {}::tid",
+        pg_quote_ident(schema),
+        pg_quote_ident(table),
+        pg_quote_ident(column),
+        pg_value_expr(new_value, column_type),
+        pg_quote_literal(row_id),
+    )
+}
+
+/// One RETURNING entry: the magic rowid alias maps back to `ctid`
+/// (as text, matching the browse SELECT's shape); everything else is
+/// the quoted column itself.
+fn pg_returning_expr(name: &str) -> String {
+    if name == PG_ROWID_COLUMN {
+        format!("ctid::text AS {}", pg_quote_ident(PG_ROWID_COLUMN))
+    } else {
+        pg_quote_ident(name)
+    }
+}
+
+fn build_insert_row_sql(
+    schema: &str,
+    table: &str,
+    inputs: &[FfiPgInsertColumn],
+    return_columns: &[String],
+) -> String {
+    let target = format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(table));
+    let body = if inputs.is_empty() {
+        format!("INSERT INTO {target} DEFAULT VALUES")
+    } else {
+        let columns: Vec<String> = inputs.iter().map(|c| pg_quote_ident(&c.name)).collect();
+        let values: Vec<String> = inputs
+            .iter()
+            .map(|c| pg_value_expr(c.value.as_deref(), &c.type_name))
+            .collect();
+        format!(
+            "INSERT INTO {target} ({}) VALUES ({})",
+            columns.join(", "),
+            values.join(", ")
+        )
+    };
+    if return_columns.is_empty() {
+        body
+    } else {
+        let returning: Vec<String> = return_columns
+            .iter()
+            .map(|c| pg_returning_expr(c))
+            .collect();
+        // The trailing `; --` suffix is load-bearing: core 0.1.0's
+        // execute path cursor-wraps any statement whose prepared form
+        // has result columns, and `DECLARE … CURSOR FOR INSERT` is a
+        // syntax error. A semicolon followed by only a comment makes
+        // core's `is_multi_statement` true while its statement
+        // splitter bails (comment-only main), routing the whole
+        // statement through the simple_query bulk path — which
+        // executes INSERT … RETURNING correctly and surfaces its
+        // rows. Pinned by the grid-DML integration test.
+        format!(
+            "{body} RETURNING {}; -- simple_query route",
+            returning.join(", ")
+        )
+    }
+}
+
+/// `None` when `row_ids` is empty — there is nothing to delete and
+/// `WHERE ctid IN ()` would be a syntax error.
+fn build_delete_rows_sql(schema: &str, table: &str, row_ids: &[String]) -> Option<String> {
+    if row_ids.is_empty() {
+        return None;
+    }
+    let ids: Vec<String> = row_ids
+        .iter()
+        .map(|id| format!("{}::tid", pg_quote_literal(id)))
+        .collect();
+    Some(format!(
+        "DELETE FROM {}.{} WHERE ctid IN ({})",
+        pg_quote_ident(schema),
+        pg_quote_ident(table),
+        ids.join(", ")
+    ))
+}
+
+/// Update a single cell. `new_value: None` means SET NULL; a non-null
+/// value is rendered as a quoted literal with an explicit cast to
+/// `column_type`. Identifiers are quoted here — callers don't need to
+/// escape `schema` / `table` / `column`.
 // Flat argument lists are idiomatic for the UniFFI surface; bundling these
 // into a record would force a binding regen + every Swift call site to change
 // for no real readability gain, so the lint is allowed here deliberately.
@@ -2319,21 +2453,22 @@ pub fn rshell_pg_update_cell(
     row_id: String,
 ) -> Result<FfiPgUpdateResult, FfiPgError> {
     let bridge = MacOsBridge::global();
+    let sql = build_update_cell_sql(
+        &schema,
+        &table,
+        &column,
+        &column_type,
+        new_value.as_deref(),
+        &row_id,
+    );
     bridge.runtime.block_on(async move {
         with_pg_pool(&connection_id, |pool| async move {
-            pool.update_cell(
-                &session_id,
-                &schema,
-                &table,
-                &column,
-                &column_type,
-                new_value.as_deref(),
-                &row_id,
-            )
-            .await
+            pool.execute(&session_id, &sql, 1).await
         })
         .await
-        .map(FfiPgUpdateResult::from)
+        .map(|outcome| FfiPgUpdateResult {
+            rows_affected: outcome.rows_affected.unwrap_or(0),
+        })
     })
 }
 
@@ -2584,12 +2719,6 @@ pub struct FfiPgInsertedRow {
     pub cells: Vec<Option<String>>,
 }
 
-impl From<ssh_commander_core::InsertedRow> for FfiPgInsertedRow {
-    fn from(r: ssh_commander_core::InsertedRow) -> Self {
-        Self { cells: r.cells }
-    }
-}
-
 /// Insert one row, returning the requested columns of the new row.
 /// `return_columns` should typically be the visible-column names
 /// from the existing result (including the magic `__pg_rowid__`)
@@ -2604,21 +2733,22 @@ pub fn rshell_pg_insert_row(
     return_columns: Vec<String>,
 ) -> Result<FfiPgInsertedRow, FfiPgError> {
     let bridge = MacOsBridge::global();
+    let sql = build_insert_row_sql(&schema, &table, &inputs, &return_columns);
+    let expects_row = !return_columns.is_empty();
     bridge.runtime.block_on(async move {
-        with_pg_pool(&connection_id, |pool| async move {
-            let core_inputs: Vec<ssh_commander_core::InsertColumnInput> = inputs
-                .into_iter()
-                .map(|c| ssh_commander_core::InsertColumnInput {
-                    name: c.name,
-                    type_name: c.type_name,
-                    value: c.value,
-                })
-                .collect();
-            pool.insert_row(&session_id, &schema, &table, &core_inputs, &return_columns)
-                .await
+        let outcome = with_pg_pool(&connection_id, |pool| async move {
+            // Page size covers the single RETURNING row; anything more
+            // means the statement wasn't the INSERT we built.
+            pool.execute(&session_id, &sql, 2).await
         })
-        .await
-        .map(FfiPgInsertedRow::from)
+        .await?;
+        match outcome.rows.into_iter().next() {
+            Some(cells) => Ok(FfiPgInsertedRow { cells }),
+            None if !expects_row => Ok(FfiPgInsertedRow { cells: Vec::new() }),
+            None => Err(FfiPgError::Other {
+                detail: "INSERT reported success but returned no row".into(),
+            }),
+        }
     })
 }
 
@@ -2634,13 +2764,17 @@ pub fn rshell_pg_delete_rows(
     row_ids: Vec<String>,
 ) -> Result<FfiPgUpdateResult, FfiPgError> {
     let bridge = MacOsBridge::global();
+    let Some(sql) = build_delete_rows_sql(&schema, &table, &row_ids) else {
+        return Ok(FfiPgUpdateResult { rows_affected: 0 });
+    };
     bridge.runtime.block_on(async move {
         with_pg_pool(&connection_id, |pool| async move {
-            pool.delete_rows(&session_id, &schema, &table, &row_ids)
-                .await
+            pool.execute(&session_id, &sql, 1).await
         })
         .await
-        .map(FfiPgUpdateResult::from)
+        .map(|outcome| FfiPgUpdateResult {
+            rows_affected: outcome.rows_affected.unwrap_or(0),
+        })
     })
 }
 
@@ -4433,6 +4567,89 @@ mod tests {
     }
 
     #[test]
+    fn pg_quote_literal_escapes_quotes_and_backslashes() {
+        assert_eq!(pg_quote_literal("plain"), "'plain'");
+        assert_eq!(pg_quote_literal("it's"), "'it''s'");
+        // Backslash forces the E-string form, safe under either
+        // standard_conforming_strings setting.
+        assert_eq!(pg_quote_literal("a\\b"), "E'a\\\\b'");
+        assert_eq!(pg_quote_literal("a\\'b"), "E'a\\\\''b'");
+    }
+
+    #[test]
+    fn pg_value_expr_renders_null_cast_and_bare_literal() {
+        assert_eq!(pg_value_expr(None, "int4"), "NULL");
+        assert_eq!(pg_value_expr(Some("5"), "int4"), "CAST('5' AS \"int4\")");
+        // Unknown type: bare literal, server coerces to the column type.
+        assert_eq!(pg_value_expr(Some("x"), ""), "'x'");
+    }
+
+    #[test]
+    fn build_update_cell_sql_casts_value_and_keys_on_ctid() {
+        assert_eq!(
+            build_update_cell_sql("public", "users", "age", "int4", Some("42"), "(0,1)"),
+            "UPDATE \"public\".\"users\" SET \"age\" = CAST('42' AS \"int4\") \
+             WHERE ctid = '(0,1)'::tid"
+        );
+        assert_eq!(
+            build_update_cell_sql("s", "t", "c", "text", None, "(0,2)"),
+            "UPDATE \"s\".\"t\" SET \"c\" = NULL WHERE ctid = '(0,2)'::tid"
+        );
+        // Hostile identifiers stay inert.
+        assert_eq!(
+            build_update_cell_sql("pu\"blic", "t", "c", "text", Some("v"), "(0,3)"),
+            "UPDATE \"pu\"\"blic\".\"t\" SET \"c\" = CAST('v' AS \"text\") \
+             WHERE ctid = '(0,3)'::tid"
+        );
+    }
+
+    #[test]
+    fn build_insert_row_sql_handles_values_defaults_and_rowid_alias() {
+        let inputs = vec![
+            FfiPgInsertColumn {
+                name: "id".into(),
+                type_name: "int4".into(),
+                value: Some("7".into()),
+            },
+            FfiPgInsertColumn {
+                name: "label".into(),
+                type_name: "text".into(),
+                value: None,
+            },
+        ];
+        assert_eq!(
+            build_insert_row_sql(
+                "public",
+                "t",
+                &inputs,
+                &["id".into(), "__pg_rowid__".into()]
+            ),
+            "INSERT INTO \"public\".\"t\" (\"id\", \"label\") \
+             VALUES (CAST('7' AS \"int4\"), NULL) \
+             RETURNING \"id\", ctid::text AS \"__pg_rowid__\"; -- simple_query route"
+        );
+        // No explicit inputs → all server defaults.
+        assert_eq!(
+            build_insert_row_sql("s", "t", &[], &["id".into()]),
+            "INSERT INTO \"s\".\"t\" DEFAULT VALUES RETURNING \"id\"; -- simple_query route"
+        );
+        // No RETURNING list at all.
+        assert_eq!(
+            build_insert_row_sql("s", "t", &[], &[]),
+            "INSERT INTO \"s\".\"t\" DEFAULT VALUES"
+        );
+    }
+
+    #[test]
+    fn build_delete_rows_sql_lists_ctids_and_rejects_empty() {
+        assert_eq!(
+            build_delete_rows_sql("s", "t", &["(0,1)".into(), "(0,2)".into()]),
+            Some("DELETE FROM \"s\".\"t\" WHERE ctid IN ('(0,1)'::tid, '(0,2)'::tid)".to_string())
+        );
+        assert_eq!(build_delete_rows_sql("s", "t", &[]), None);
+    }
+
+    #[test]
     fn pg_update_cell_on_unknown_id_returns_not_connected() {
         rshell_init();
         match rshell_pg_update_cell(
@@ -4777,82 +4994,173 @@ mod tests {
         let _ = rshell_pg_disconnect(conn);
     }
 
-    // Characterization test: the integration tier surfaced a real limitation in
-    // ssh-commander-core 0.1.0. The editor FFI (`update_cell` / `insert_row`)
-    // binds values as `String` but builds `... = $N::<type>` (see the core's
-    // edit.rs — e.g. `WHERE ctid = $2::tid`). Postgres infers the parameter to
-    // BE that type, so tokio-postgres can't serialize the string for any
-    // non-text param (an int4 column, or the `tid` ctid), and the call fails
-    // with "error serializing parameter N". This pins that behavior so a core
-    // fix trips the test — at which point flip it (and add real
-    // insert/update/delete assertions) to require success.
+    // Grid DML through the SQL-text path. Historically this test pinned the
+    // opposite behavior: ssh-commander-core 0.1.0's editor API binds every
+    // parameter as `String` against `$N::<type>` placeholders, which fails to
+    // serialize for any non-text target — including the `tid` ctid — so
+    // update_cell / insert_row / delete_rows were broken unconditionally. The
+    // FFI now renders those statements as SQL text instead of calling core,
+    // and this test requires the full edit cycle to succeed, non-text columns
+    // included.
     #[test]
-    fn pg_it_ctid_cell_edit_is_known_core_limitation() {
-        let Some(cfg) = it_config("it-limit") else {
+    fn pg_it_grid_dml_roundtrip_by_ctid() {
+        let Some(cfg) = it_config("it-grid-dml") else {
             return;
         };
         rshell_init();
         let conn = rshell_pg_connect(cfg).expect("connect to live postgres");
-        let sid = "it-limit".to_string();
+        let sid = "it-grid-dml".to_string();
 
         rshell_pg_execute(
             conn.clone(),
             sid.clone(),
-            "DROP TABLE IF EXISTS pg_agent_it_limit".into(),
+            "DROP TABLE IF EXISTS pg_agent_it_grid".into(),
             1,
         )
         .expect("drop");
         rshell_pg_execute(
             conn.clone(),
             sid.clone(),
-            "CREATE TABLE pg_agent_it_limit (id int, label text)".into(),
+            "CREATE TABLE pg_agent_it_grid (id int, label text, \"weird \"\"col\" int)".into(),
             1,
         )
         .expect("create");
         rshell_pg_execute(
             conn.clone(),
             sid.clone(),
-            "INSERT INTO pg_agent_it_limit VALUES (1, 'orig')".into(),
+            "INSERT INTO pg_agent_it_grid VALUES (1, 'orig', 10)".into(),
             1,
         )
-        .expect("insert");
-        let row = rshell_pg_execute(
-            conn.clone(),
-            sid.clone(),
-            "SELECT ctid::text FROM pg_agent_it_limit WHERE id = 1".into(),
-            1,
-        )
-        .expect("select ctid");
-        let ctid = row.rows[0].cells[0].clone().expect("ctid");
+        .expect("insert seed");
+        let ctid_of = |conn: &str, sid: &str| -> String {
+            rshell_pg_execute(
+                conn.to_string(),
+                sid.to_string(),
+                "SELECT ctid::text FROM pg_agent_it_grid WHERE id = 1".into(),
+                1,
+            )
+            .expect("select ctid")
+            .rows[0]
+                .cells[0]
+                .clone()
+                .expect("ctid")
+        };
 
-        match rshell_pg_update_cell(
+        // Text column — exercises the literal path plus the ctid key.
+        let upd = rshell_pg_update_cell(
             conn.clone(),
             sid.clone(),
             "public".into(),
-            "pg_agent_it_limit".into(),
+            "pg_agent_it_grid".into(),
             "label".into(),
             "text".into(),
-            Some("edited".into()),
-            ctid,
-        ) {
-            Err(FfiPgError::Other { detail }) => {
-                assert!(
-                    detail.contains("serializ"),
-                    "expected a parameter-serialization error, got: {detail}"
-                );
-            }
-            Ok(_) => panic!(
-                "update_cell unexpectedly SUCCEEDED — ssh-commander-core may have fixed the \
-                 `$N::type` param-inference bug. Flip this test and add real \
-                 insert/update/delete assertions that require success."
-            ),
-            Err(other) => panic!("expected Other(serialize) error, got {other:?}"),
-        }
+            Some("it's \\edited".into()),
+            ctid_of(&conn, &sid),
+        )
+        .expect("update text cell");
+        assert_eq!(upd.rows_affected, 1);
+        let sel = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "SELECT label FROM pg_agent_it_grid WHERE id = 1".into(),
+            1,
+        )
+        .expect("verify text");
+        assert_eq!(
+            sel.rows[0].cells[0].as_deref(),
+            Some("it's \\edited"),
+            "quote/backslash escaping must round-trip"
+        );
+
+        // Non-text column with a quoted identifier — the case the old
+        // core path could never serialize. ctid moves on UPDATE, so
+        // re-read it.
+        let upd = rshell_pg_update_cell(
+            conn.clone(),
+            sid.clone(),
+            "public".into(),
+            "pg_agent_it_grid".into(),
+            "weird \"col".into(),
+            "int4".into(),
+            Some("42".into()),
+            ctid_of(&conn, &sid),
+        )
+        .expect("update int cell");
+        assert_eq!(upd.rows_affected, 1);
+
+        // SET NULL.
+        let upd = rshell_pg_update_cell(
+            conn.clone(),
+            sid.clone(),
+            "public".into(),
+            "pg_agent_it_grid".into(),
+            "label".into(),
+            "text".into(),
+            None,
+            ctid_of(&conn, &sid),
+        )
+        .expect("update to NULL");
+        assert_eq!(upd.rows_affected, 1);
+
+        let sel = rshell_pg_execute(
+            conn.clone(),
+            sid.clone(),
+            "SELECT label, \"weird \"\"col\" FROM pg_agent_it_grid WHERE id = 1".into(),
+            1,
+        )
+        .expect("verify");
+        assert_eq!(sel.rows[0].cells[0], None, "label should be NULL");
+        assert_eq!(sel.rows[0].cells[1].as_deref(), Some("42"));
+
+        // INSERT with typed values + RETURNING, including the rowid alias.
+        let inserted = rshell_pg_insert_row(
+            conn.clone(),
+            sid.clone(),
+            "public".into(),
+            "pg_agent_it_grid".into(),
+            vec![
+                FfiPgInsertColumn {
+                    name: "id".into(),
+                    type_name: "int4".into(),
+                    value: Some("2".into()),
+                },
+                FfiPgInsertColumn {
+                    name: "label".into(),
+                    type_name: "text".into(),
+                    value: None,
+                },
+            ],
+            vec!["id".into(), "label".into(), "__pg_rowid__".into()],
+        )
+        .expect("insert row");
+        assert_eq!(inserted.cells[0].as_deref(), Some("2"));
+        assert_eq!(inserted.cells[1], None);
+        let new_ctid = inserted.cells[2].clone().expect("returned ctid");
+
+        // DELETE by the returned ctid; a stale id deletes nothing.
+        let del = rshell_pg_delete_rows(
+            conn.clone(),
+            sid.clone(),
+            "public".into(),
+            "pg_agent_it_grid".into(),
+            vec![new_ctid.clone()],
+        )
+        .expect("delete row");
+        assert_eq!(del.rows_affected, 1);
+        let del = rshell_pg_delete_rows(
+            conn.clone(),
+            sid.clone(),
+            "public".into(),
+            "pg_agent_it_grid".into(),
+            vec![new_ctid],
+        )
+        .expect("delete stale ctid");
+        assert_eq!(del.rows_affected, 0, "stale ctid should match nothing");
 
         rshell_pg_execute(
             conn.clone(),
             sid.clone(),
-            "DROP TABLE IF EXISTS pg_agent_it_limit".into(),
+            "DROP TABLE IF EXISTS pg_agent_it_grid".into(),
             1,
         )
         .expect("drop teardown");
