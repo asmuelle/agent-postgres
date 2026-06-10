@@ -42,6 +42,11 @@ struct PostgresQueryTabView: View {
     @State private var insertSheet: InsertSheetContext? = nil
     @State private var isTransposed: Bool = false
     @State private var selectedTransposedRowIndex: Int = 0
+    /// Case-insensitive substring filter over the loaded result rows. Applied
+    /// client-side by the grid; reset when a new query runs.
+    @State private var resultFilter: String = ""
+    /// A cell the user asked to inspect (right-click → "Show value…").
+    @State private var inspectedCell: PostgresCellInspection? = nil
     /// FK constraints per `"<schema>.<table>"` for relation tabs,
     /// mirrored out of `PgSchemaStore` (which this view doesn't
     /// observe) so a load completion re-renders the grid with the
@@ -96,6 +101,12 @@ struct PostgresQueryTabView: View {
             switch tab.kind {
             case .query:
                 content(for: tab)
+                    .onChange(of: tabId) { _ in
+                        // The host reuses one view across tabs (swaps tabId), so
+                        // reset per-tab grid affordances on switch.
+                        resultFilter = ""
+                        inspectedCell = nil
+                    }
             case .routine(let schema, let name, let signature):
                 PostgresRoutineVisualizerView(
                     connectionId: connectionId,
@@ -235,6 +246,9 @@ struct PostgresQueryTabView: View {
             )
             .frame(minWidth: 850, minHeight: 600)
         }
+        .sheet(item: $inspectedCell) { cell in
+            PostgresCellInspectorView(inspection: cell)
+        }
     }
 
     // MARK: - SQL editor
@@ -247,6 +261,7 @@ struct PostgresQueryTabView: View {
                     get: { tab.sql },
                     set: { store.setSQL($0, forTab: tab.id) }
                 ),
+                errorCharOffset: tab.errorCharOffset,
                 identifiers: {
                     PostgresConnectionManager.shared
                         .schemaStores[profileId]?.completionIdentifiers ?? []
@@ -533,6 +548,8 @@ struct PostgresQueryTabView: View {
         // checking the host wired a callback at all.
         PostgresResultsTable(
             result: result,
+            filterText: resultFilter,
+            onInspectCell: { inspectedCell = $0 },
             editable: canEdit,
             pendingEdits: tab.pendingEdits,
             onCellEdit: canEdit ? { edit, complete in
@@ -789,10 +806,13 @@ struct PostgresQueryTabView: View {
         }
     }
 
-    /// Replay all pending edits as live UPDATEs. Sequential per-row
-    /// UPDATEs reuse pgUpdateCell. First hard failure stops the run
-    /// with a partial-count summary; conflicts (zero rows affected
-    /// because ctid moved) revert that one cell and continue.
+    /// Apply all staged edits atomically. The batch is wrapped in its own
+    /// transaction (BEGIN … COMMIT, ROLLBACK on the first hard failure) so it is
+    /// all-or-nothing — unless the user already has an explicit transaction
+    /// open, in which case the edits join it and they control the outcome.
+    /// Conflicts (zero rows affected because the ctid moved) revert that one
+    /// cell and continue; the staged edits survive a rollback so the user can
+    /// fix the offending value and retry.
     private func commitPendingEdits(tab: PostgresQueryTab) {
         guard let connectionId, let target = tab.editTarget else { return }
         let pending = tab.pendingEdits
@@ -800,11 +820,27 @@ struct PostgresQueryTabView: View {
         let sessionId = tab.id.uuidString
         let storeRef = store
         let tabId = tab.id
+        // Deterministic order — the server applies edits top-to-bottom.
+        let edits = pending.sorted {
+            ($0.key.rowIndex, $0.key.columnIndex) < ($1.key.rowIndex, $1.key.columnIndex)
+        }
+        let ownTransaction = (tab.transactionState == .none)
 
         Task { @MainActor in
+            if ownTransaction {
+                do {
+                    try await BridgeManager.shared.pgBegin(connectionId: connectionId, sessionId: sessionId)
+                } catch {
+                    presentBatchAlert(title: "Apply failed", message: Self.batchMessage(for: error))
+                    return
+                }
+            }
             var succeeded = 0
-            var conflicts = 0
-            for (key, edit) in pending {
+            // Defer reverting conflicted cells until the batch actually commits,
+            // so a later rollback leaves the grid showing all staged values
+            // (consistent with the still-pending edits we keep for retry).
+            var conflictKeys: [PostgresPendingEditKey] = []
+            for (key, edit) in edits {
                 do {
                     let res = try await BridgeManager.shared.pgUpdateCell(
                         connectionId: connectionId,
@@ -817,42 +853,70 @@ struct PostgresQueryTabView: View {
                         rowId: edit.rowId
                     )
                     if res.rowsAffected == 0 {
-                        conflicts += 1
-                        storeRef.setCellValue(
-                            edit.originalValue,
-                            rowIndex: key.rowIndex,
-                            columnIndex: key.columnIndex,
-                            forTab: tabId
-                        )
+                        conflictKeys.append(key)  // ctid moved/deleted — skip
                     } else {
                         succeeded += 1
                     }
-                } catch let err as PostgresBridgeError {
-                    storeRef.clearPendingEdits(forTab: tabId)
-                    let alert = NSAlert()
-                    alert.messageText = "Commit failed after \(succeeded) row(s)"
-                    alert.informativeText = err.errorDescription ?? "Unknown error."
-                    alert.alertStyle = .warning
-                    alert.runModal()
-                    return
                 } catch {
-                    storeRef.clearPendingEdits(forTab: tabId)
-                    let alert = NSAlert()
-                    alert.messageText = "Commit failed after \(succeeded) row(s)"
-                    alert.informativeText = error.localizedDescription
-                    alert.alertStyle = .warning
-                    alert.runModal()
+                    // All-or-nothing: roll back so nothing is half-applied. The
+                    // staged edits (and their grid values) are kept untouched so
+                    // the user can fix the offending value and retry.
+                    if ownTransaction {
+                        try? await BridgeManager.shared.pgRollback(connectionId: connectionId, sessionId: sessionId)
+                    } else {
+                        // The user's explicit transaction is now aborted.
+                        storeRef.setTransactionState(.failed, forTab: tabId)
+                    }
+                    presentBatchAlert(
+                        title: "Apply rolled back",
+                        message: "No changes were applied; your staged edits were kept.\n\n\(Self.batchMessage(for: error))"
+                    )
                     return
                 }
             }
+            if ownTransaction {
+                do {
+                    try await BridgeManager.shared.pgCommit(connectionId: connectionId, sessionId: sessionId)
+                } catch {
+                    presentBatchAlert(
+                        title: "Commit failed",
+                        message: "The outcome is uncertain — re-run the query to check, then retry if needed.\n\n\(Self.batchMessage(for: error))"
+                    )
+                    return
+                }
+            }
+            // Committed. Revert the cells whose rows had moved/been deleted
+            // (their edits didn't apply), then clear the staged edits.
+            for key in conflictKeys {
+                if let edit = pending[key] {
+                    storeRef.setCellValue(
+                        edit.originalValue,
+                        rowIndex: key.rowIndex,
+                        columnIndex: key.columnIndex,
+                        forTab: tabId
+                    )
+                }
+            }
             storeRef.clearPendingEdits(forTab: tabId)
-            if conflicts > 0 {
-                let alert = NSAlert()
-                alert.messageText = "Committed \(succeeded), skipped \(conflicts)"
-                alert.informativeText = "Some rows had moved or been deleted by another session; their pending edits were reverted."
-                alert.runModal()
+            if !conflictKeys.isEmpty {
+                presentBatchAlert(
+                    title: "Applied \(succeeded), skipped \(conflictKeys.count)",
+                    message: "Some rows had moved or been deleted by another session; their pending edits were reverted."
+                )
             }
         }
+    }
+
+    private func presentBatchAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    private static func batchMessage(for error: Error) -> String {
+        (error as? PostgresBridgeError)?.errorDescription ?? error.localizedDescription
     }
 
     /// Throw away all staged edits, restoring original values.
@@ -963,6 +1027,8 @@ struct PostgresQueryTabView: View {
         runTask?.cancel()
         let started = Date()
         store.setExecState(.running(startedAt: started), forTab: tabId)
+        store.setErrorPosition(nil, forTab: tabId)
+        resultFilter = ""
 
         let storeRef = store
         let sessionId = tabId.uuidString
@@ -1003,6 +1069,9 @@ struct PostgresQueryTabView: View {
                     forTab: tabId
                 )
                 storeRef.applyTransactionEffect(sql: trimmed, error: err, tabId: tabId)
+                // Underline the offending token in the editor when the server
+                // reported an error position (syntax errors, type mismatches…).
+                storeRef.setErrorPosition(err.serverError?.position, forTab: tabId)
                 logger.error("query failed: \(err.localizedDescription, privacy: .public)")
             } catch {
                 let elapsed = Date().timeIntervalSince(started)
@@ -1779,33 +1848,33 @@ extension PostgresQueryTabView {
 
             Divider().frame(height: 14)
 
-            // Commit Button
+            // Apply staged edits — atomic (one transaction).
             Button {
                 commitPendingEdits(tab: tab)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark.circle")
-                    Text("Commit \(tab.pendingEdits.isEmpty ? "" : "(\(tab.pendingEdits.count))")")
+                    Text("Apply \(tab.pendingEdits.isEmpty ? "" : "(\(tab.pendingEdits.count))")")
                 }
                 .foregroundColor(tab.pendingEdits.isEmpty ? .secondary : .green)
             }
             .buttonStyle(.plain)
             .disabled(tab.pendingEdits.isEmpty)
-            .help("Commit all staged changes to the database.")
+            .help("Apply all staged edits atomically — they commit together or not at all.")
 
-            // Rollback Button
+            // Discard staged edits (in-memory; nothing was sent to the server).
             Button {
                 discardPendingEdits(tab: tab)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.counterclockwise")
-                    Text("Rollback")
+                    Text("Discard")
                 }
                 .foregroundColor(tab.pendingEdits.isEmpty ? .secondary : .red)
             }
             .buttonStyle(.plain)
             .disabled(tab.pendingEdits.isEmpty)
-            .help("Discard all staged changes.")
+            .help("Discard all staged edits.")
 
             Divider().frame(height: 14)
 
@@ -1842,6 +1911,25 @@ extension PostgresQueryTabView {
             }
 
             Spacer()
+
+            // Quick filter over the loaded rows (client-side substring match).
+            HStack(spacing: 3) {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .foregroundStyle(.secondary)
+                TextField("Filter", text: $resultFilter)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 150)
+                if !resultFilter.isEmpty {
+                    Button {
+                        resultFilter = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear filter")
+                }
+            }
+            .help("Filter the loaded rows (case-insensitive, across columns). Filtering and column sorting act on fetched rows, not the full server result; clear both to edit cells.")
 
             // Export Menu
             Menu {

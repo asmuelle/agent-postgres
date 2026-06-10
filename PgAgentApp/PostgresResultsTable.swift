@@ -76,6 +76,15 @@ struct PostgresColumnWidthKey: Equatable {
     let table: String
 }
 
+/// A cell the user asked to inspect (right-click → "Show value…"). The host
+/// presents a viewer; `typeName` lets it pretty-print JSON/JSONB.
+struct PostgresCellInspection: Identifiable {
+    let id = UUID()
+    let columnName: String
+    let typeName: String
+    let value: String?
+}
+
 /// Navigation request bubbled from the grid's FK menu items to the
 /// host, which opens the target relation in a new tab filtered to
 /// the given column/value pairs (ANDed; multi-column FKs produce
@@ -88,6 +97,11 @@ struct PostgresFKNavigation {
 
 struct PostgresResultsTable: NSViewRepresentable {
     let result: FfiPgExecutionResult
+    /// Case-insensitive substring filter across visible columns. Empty = no
+    /// filter. Driven by the host's filter field.
+    var filterText: String = ""
+    /// Invoked when the user picks "Show value…" — the host presents a viewer.
+    var onInspectCell: ((PostgresCellInspection) -> Void)? = nil
     /// `true` when the host knows how to UPDATE rows (tab opened
     /// from the schema browser AND the result carries a `__pg_rowid__`
     /// column). When `false`, the grid is fully read-only — no
@@ -143,8 +157,11 @@ struct PostgresResultsTable: NSViewRepresentable {
             widthPersistKey: widthPersistKey
         )
         coord.pendingEdits = pendingEdits
+        coord.onInspectCell = onInspectCell
+        coord.filterText = filterText
         coord.foreignKeys = foreignKeys
         coord.onNavigateFK = onNavigateFK
+        coord.recomputeDisplayOrder()
         return coord
     }
 
@@ -197,6 +214,11 @@ struct PostgresResultsTable: NSViewRepresentable {
             NSMenuItem(
                 title: "Copy cell",
                 action: #selector(Coordinator.copyClickedCell(_:)),
+                keyEquivalent: ""
+            ),
+            NSMenuItem(
+                title: "Show value…",
+                action: #selector(Coordinator.showClickedValue(_:)),
                 keyEquivalent: ""
             ),
             NSMenuItem(
@@ -299,9 +321,8 @@ struct PostgresResultsTable: NSViewRepresentable {
         // rebuild — the affinity-driven alignment / formatting
         // depends on the OID.
         let prevColumnIdentities = coord.result.columns.map { ColumnSignature(name: $0.name, typeOid: $0.typeOid) }
-        let prevRowCount = coord.result.rows.count
+        let prevDisplayOrder = coord.displayOrder
 
-        coord.update(result: result)
         coord.editable = editable
         coord.pendingEdits = pendingEdits
         coord.onCellEdit = onCellEdit
@@ -310,9 +331,13 @@ struct PostgresResultsTable: NSViewRepresentable {
         coord.onExportFullParquet = onExportFullParquet
         coord.onDeleteRows = onDeleteRows
         coord.onInsertRow = onInsertRow
+        coord.onInspectCell = onInspectCell
         coord.widthPersistKey = widthPersistKey
         coord.foreignKeys = foreignKeys
         coord.onNavigateFK = onNavigateFK
+        // Set the filter before `update` so the recompute reflects it.
+        coord.filterText = filterText
+        coord.update(result: result)
 
         let newIdentities = result.columns.map { ColumnSignature(name: $0.name, typeOid: $0.typeOid) }
         let columnsChanged = newIdentities != prevColumnIdentities
@@ -322,14 +347,18 @@ struct PostgresResultsTable: NSViewRepresentable {
             return
         }
 
-        let newRowCount = result.rows.count
-        if newRowCount > prevRowCount {
-            // Pagination append — keep scroll position stable for
-            // the user.
-            let appended = IndexSet(integersIn: prevRowCount..<newRowCount)
+        // Reconcile against the recomputed display order. A pure suffix-append
+        // (pagination, no sort/filter) keeps scroll position via insertRows;
+        // any other change (sort, filter, re-run) reloads.
+        let newDisplayOrder = coord.displayOrder
+        if newDisplayOrder == prevDisplayOrder {
+            return
+        }
+        if newDisplayOrder.count > prevDisplayOrder.count,
+           Array(newDisplayOrder.prefix(prevDisplayOrder.count)) == prevDisplayOrder {
+            let appended = IndexSet(integersIn: prevDisplayOrder.count..<newDisplayOrder.count)
             table.insertRows(at: appended, withAnimation: [])
-        } else if newRowCount != prevRowCount {
-            // Re-run with smaller / replaced result.
+        } else {
             table.reloadData()
         }
     }
@@ -349,6 +378,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         var onExportFullParquet: (() -> Void)?
         var onDeleteRows: (([Int]) -> Void)?
         var onInsertRow: (() -> Void)?
+        var onInspectCell: ((PostgresCellInspection) -> Void)?
         var widthPersistKey: PostgresColumnWidthKey?
         var pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit] = [:]
         var foreignKeys: PgTableForeignKeys?
@@ -373,6 +403,71 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// Cleared on `update(result:)` since a fresh result drops
         /// any meaningful row identity.
         private(set) var editedRows: Set<Int> = []
+
+        // MARK: - Sort + filter (display order)
+
+        /// Result-column index the grid is sorted by, or `nil` for none.
+        private var sortColumnIndex: Int?
+        private var sortAscending: Bool = true
+        /// Case-insensitive substring filter across visible columns. Set by the
+        /// host's filter field through `PostgresResultsTable`.
+        var filterText: String = ""
+        /// Data-row indices in display order (after filter + sort). Identity
+        /// (`0..<rows.count`) when not reordered, so the read paths stay uniform.
+        private(set) var displayOrder: [Int] = []
+
+        /// `true` when a sort or filter is active. Cell editing is disabled while
+        /// reordered: the destructive ctid edit/delete paths assume table row ==
+        /// data row, so a wrong display mapping there could corrupt the wrong
+        /// row. With editing gated, a mapping bug can only mis-render/mis-copy.
+        var isReordered: Bool {
+            sortColumnIndex != nil
+                || !filterText.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+
+        /// Map a table (display) row to its data-row index, or `nil` if invalid.
+        private func dataRow(_ displayRow: Int) -> Int? {
+            guard displayRow >= 0, displayRow < displayOrder.count else { return nil }
+            return displayOrder[displayRow]
+        }
+
+        /// Rebuild `displayOrder` from the current rows, applying the active
+        /// filter (case-insensitive substring across visible columns) then sort.
+        func recomputeDisplayOrder() {
+            let needle = filterText.trimmingCharacters(in: .whitespaces).lowercased()
+            let visibleCols = (0..<result.columns.count).filter { !isHiddenColumn($0) }
+            var indices: [Int]
+            if needle.isEmpty {
+                indices = Array(0..<result.rows.count)
+            } else {
+                indices = (0..<result.rows.count).filter { r in
+                    let cells = result.rows[r].cells
+                    return visibleCols.contains { ci in
+                        ci < cells.count && (cells[ci]?.lowercased().contains(needle) ?? false)
+                    }
+                }
+            }
+            if let sortColumn = sortColumnIndex, sortColumn < result.columns.count {
+                indices.sort { a, b in
+                    let va = sortColumn < result.rows[a].cells.count ? result.rows[a].cells[sortColumn] : nil
+                    let vb = sortColumn < result.rows[b].cells.count ? result.rows[b].cells[sortColumn] : nil
+                    let order = Self.compareCells(va, vb)
+                    return sortAscending ? (order == .orderedAscending) : (order == .orderedDescending)
+                }
+            }
+            displayOrder = indices
+        }
+
+        /// NULLs sort as largest (Postgres default); non-nulls use a locale- and
+        /// numeric-aware comparison so `img9` precedes `img10`.
+        static func compareCells(_ a: String?, _ b: String?) -> ComparisonResult {
+            switch (a, b) {
+            case (nil, nil): return .orderedSame
+            case (nil, _): return .orderedDescending
+            case (_, nil): return .orderedAscending
+            case let (.some(x), .some(y)): return x.localizedStandardCompare(y)
+            }
+        }
 
         /// Edit context captured before the field editor opens.
         /// Consumed in `controlTextDidEndEditing`.
@@ -406,6 +501,8 @@ struct PostgresResultsTable: NSViewRepresentable {
             self.onDeleteRows = onDeleteRows
             self.onInsertRow = onInsertRow
             self.widthPersistKey = widthPersistKey
+            super.init()
+            recomputeDisplayOrder()
         }
 
         func update(result: FfiPgExecutionResult) {
@@ -418,8 +515,11 @@ struct PostgresResultsTable: NSViewRepresentable {
                 || zip(result.columns, self.result.columns).contains { $0.name != $1.name }
             if columnsChanged {
                 editedRows.removeAll()
+                // A new shape invalidates the sort column index; drop the sort.
+                sortColumnIndex = nil
             }
             self.result = result
+            recomputeDisplayOrder()
         }
 
         // MARK: - Hidden columns
@@ -514,7 +614,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         // MARK: - NSTableViewDataSource
 
         func numberOfRows(in tableView: NSTableView) -> Int {
-            result.rows.count
+            displayOrder.count
         }
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -526,8 +626,9 @@ struct PostgresResultsTable: NSViewRepresentable {
                 view = PostgresEditedRowView()
                 view.identifier = id
             }
-            let hasStaged = pendingEdits.keys.contains { $0.rowIndex == row }
-            view.isEdited = editedRows.contains(row)
+            let dr = dataRow(row)
+            let hasStaged = dr.map { d in pendingEdits.keys.contains { $0.rowIndex == d } } ?? false
+            view.isEdited = dr.map { editedRows.contains($0) } ?? false
             view.isStaged = hasStaged
             return view
         }
@@ -541,11 +642,11 @@ struct PostgresResultsTable: NSViewRepresentable {
         ) -> NSView? {
             guard let column = tableColumn,
                   let colIdx = columnIndex(from: column.identifier),
-                  row < result.rows.count,
+                  let dataRow = dataRow(row),
                   colIdx < result.columns.count
             else { return nil }
 
-            let cells = result.rows[row].cells
+            let cells = result.rows[dataRow].cells
             let value = colIdx < cells.count ? cells[colIdx] : nil
             let affinity = PostgresColumnAffinity.from(column: result.columns[colIdx])
 
@@ -590,7 +691,7 @@ struct PostgresResultsTable: NSViewRepresentable {
             // across columns of different affinities.
             view.textField?.alignment = affinity.textAlignment
 
-            let cellKey = PostgresPendingEditKey(rowIndex: row, columnIndex: colIdx)
+            let cellKey = PostgresPendingEditKey(rowIndex: dataRow, columnIndex: colIdx)
             let isStaged = pendingEdits[cellKey] != nil
 
             if isStaged {
@@ -628,6 +729,65 @@ struct PostgresResultsTable: NSViewRepresentable {
             return view
         }
 
+        // MARK: - Sort
+
+        /// Header click → cycle the sort on that column: ascending →
+        /// descending → none. Client-side sort of the loaded rows (a note in
+        /// the UI explains it sorts what's fetched, not the full result).
+        func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
+            guard let colIdx = columnIndex(from: tableColumn.identifier),
+                  colIdx < result.columns.count
+            else { return }
+            if sortColumnIndex == colIdx {
+                if sortAscending { sortAscending = false } else { sortColumnIndex = nil }
+            } else {
+                sortColumnIndex = colIdx
+                sortAscending = true
+            }
+            updateSortIndicators(in: tableView)
+            recomputeDisplayOrder()
+            tableView.reloadData()
+        }
+
+        private func updateSortIndicators(in tableView: NSTableView) {
+            for col in tableView.tableColumns {
+                let sorted = sortColumnIndex != nil
+                    && columnIndex(from: col.identifier) == sortColumnIndex
+                let image = sorted
+                    ? NSImage(named: sortAscending
+                        ? "NSAscendingSortIndicator"
+                        : "NSDescendingSortIndicator")
+                    : nil
+                tableView.setIndicatorImage(image, in: col)
+            }
+            tableView.highlightedTableColumn = tableView.tableColumns.first {
+                sortColumnIndex != nil && columnIndex(from: $0.identifier) == sortColumnIndex
+            }
+        }
+
+        // MARK: - Inspect
+
+        /// Right-click → "Show value…". Bubbles the clicked cell up to the host,
+        /// which presents a value viewer (pretty-printed for JSON/JSONB).
+        @objc func showClickedValue(_ sender: Any?) {
+            guard let onInspectCell, let table = lastTable,
+                  table.clickedRow >= 0, table.clickedColumn >= 0,
+                  table.clickedColumn < table.tableColumns.count,
+                  let dataRow = dataRow(table.clickedRow)
+            else { return }
+            let column = table.tableColumns[table.clickedColumn]
+            guard let colIdx = columnIndex(from: column.identifier),
+                  colIdx < result.columns.count
+            else { return }
+            let cells = result.rows[dataRow].cells
+            let value = colIdx < cells.count ? cells[colIdx] : nil
+            onInspectCell(PostgresCellInspection(
+                columnName: result.columns[colIdx].name,
+                typeName: result.columns[colIdx].typeName,
+                value: value
+            ))
+        }
+
         // MARK: - Copy
 
         @objc func copySelectedRows(_ sender: Any?) {
@@ -642,7 +802,7 @@ struct PostgresResultsTable: NSViewRepresentable {
             guard let table = currentTable(from: sender),
                   table.clickedRow >= 0,
                   table.clickedColumn >= 0,
-                  table.clickedRow < result.rows.count
+                  let dataRow = dataRow(table.clickedRow)
             else { return }
             // The clicked column index is the visible (display)
             // index. Map it through the column identifier so we
@@ -650,7 +810,7 @@ struct PostgresResultsTable: NSViewRepresentable {
             // user reordering (NSTableView allows column drag).
             let column = table.tableColumns[table.clickedColumn]
             guard let colIdx = columnIndex(from: column.identifier) else { return }
-            let cells = result.rows[table.clickedRow].cells
+            let cells = result.rows[dataRow].cells
             let value = colIdx < cells.count ? cells[colIdx] : nil
             let text = value.map(escapeForClipboard) ?? (nullAsEmptyInCopy ? "" : "NULL")
             writeToPasteboard(text)
@@ -677,9 +837,8 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// hitting the 50K accumulated-rows cap, but is a v2
         /// optimization.
         @objc func exportCsv(_ sender: Any?) {
-            // Visible-rows export = all rows currently in the result.
-            // Shared writer with the selected-rows variant.
-            exportCsvWithRows(IndexSet(integersIn: 0..<result.rows.count))
+            // Visible-rows export = the current display order (filtered + sorted).
+            exportCsvWithRows(displayOrder, suggestedName: "results.csv")
         }
 
         /// Delegate to the host's full-export pipeline. Coordinator
@@ -710,7 +869,8 @@ struct PostgresResultsTable: NSViewRepresentable {
                 )
                 return
             }
-            exportCsvWithRows(selected)
+            // Map the selected display rows back to data-row indices.
+            exportCsvWithRows(selected.compactMap { dataRow($0) }, suggestedName: "results-selected.csv")
         }
 
         /// Right-click → "Insert row…". Pure delegation: host
@@ -731,21 +891,20 @@ struct PostgresResultsTable: NSViewRepresentable {
                 )
                 return
             }
-            onDeleteRows(Array(selected))
+            // ctid-based delete is order-independent; map display → data.
+            onDeleteRows(selected.compactMap { dataRow($0) })
         }
 
-        /// Shared CSV writer used by both `exportCsv` (all visible
-        /// rows) and `exportSelectedCsv` (selection).
-        private func exportCsvWithRows(_ rowIndexes: IndexSet) {
+        /// Shared CSV writer. `dataRowIndices` are result-row indices already in
+        /// the desired output order (display order, or the selection).
+        private func exportCsvWithRows(_ dataRowIndices: [Int], suggestedName: String) {
             guard let table = lastTable, !result.rows.isEmpty else {
                 presentAlert(title: "No rows to export", message: "")
                 return
             }
             let panel = NSSavePanel()
             panel.title = "Export rows as CSV"
-            panel.nameFieldStringValue = rowIndexes.count == result.rows.count
-                ? "results.csv"
-                : "results-selected.csv"
+            panel.nameFieldStringValue = suggestedName
             panel.allowedContentTypes = [.commaSeparatedText]
             panel.canCreateDirectories = true
             guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -765,9 +924,8 @@ struct PostgresResultsTable: NSViewRepresentable {
             var output = String()
             output.append(columnPlan.map { csvEscape($0.displayName) }.joined(separator: ","))
             output.append("\n")
-            // Iterate in row order (selected indices come back as a
-            // sorted IndexSet) so the CSV reads top-to-bottom.
-            for r in rowIndexes where r < result.rows.count {
+            // Already ordered by the caller (display order or selection).
+            for r in dataRowIndices where r < result.rows.count {
                 let row = result.rows[r]
                 let line = columnPlan.map { plan -> String in
                     guard plan.resultIdx < row.cells.count else { return "" }
@@ -807,12 +965,13 @@ struct PostgresResultsTable: NSViewRepresentable {
             let table = lastTable
             guard let table else { return }
             let selected = table.selectedRowIndexes
-            let rowIdxs: [Int] = selected.isEmpty
-                ? Array(0..<result.rows.count)
-                : Array(selected)
+            // Display rows → data rows (in display order). Empty selection =
+            // the whole visible result.
+            let dataRowIdxs: [Int] = (selected.isEmpty ? Array(0..<displayOrder.count) : Array(selected))
+                .compactMap { dataRow($0) }
 
             var lines: [String] = []
-            lines.reserveCapacity(rowIdxs.count + 1)
+            lines.reserveCapacity(dataRowIdxs.count + 1)
 
             // Use the visible column order (after any user reorder)
             // so the clipboard matches what the user sees.
@@ -827,7 +986,7 @@ struct PostgresResultsTable: NSViewRepresentable {
                 lines.append(header)
             }
 
-            for r in rowIdxs {
+            for r in dataRowIdxs {
                 guard r < result.rows.count else { continue }
                 let cells = result.rows[r].cells
                 let parts = orderedColumns.map { idx -> String in
@@ -865,7 +1024,9 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// clicked cell when the table is editable AND the row has
         /// a recoverable identity (a `__pg_rowid__` value).
         @objc func handleDoubleClick(_ sender: NSTableView) {
-            guard editable else { return }
+            // Editing assumes table row == data row; disabled while sorted /
+            // filtered (clear the sort/filter to edit). See `isReordered`.
+            guard editable, !isReordered else { return }
             let row = sender.clickedRow
             let col = sender.clickedColumn
             guard row >= 0, col >= 0, col < sender.tableColumns.count else { return }
@@ -899,7 +1060,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// commits a NULL write directly. Only enabled when the table
         /// is editable and the clicked cell is on a real column.
         @objc func setClickedCellToNull(_ sender: Any?) {
-            guard editable, let table = lastTable,
+            guard editable, !isReordered, let table = lastTable,
                   table.clickedRow >= 0, table.clickedColumn >= 0,
                   table.clickedRow < result.rows.count
             else { return }
@@ -1098,7 +1259,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// Resolve the currently-clicked column to a `(name, type, idx)`
         /// triple — or `nil` if no editable column was clicked.
         private func clickedColumnDescriptor() -> (resultIdx: Int, name: String, type: String)? {
-            guard editable,
+            guard editable, !isReordered,
                   let table = lastTable,
                   table.clickedColumn >= 0,
                   table.clickedColumn < table.tableColumns.count
@@ -1235,7 +1396,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         // MARK: - NSTextFieldDelegate
 
         func control(_ control: NSControl, textShouldBeginEditing fieldEditor: NSText) -> Bool {
-            guard editable,
+            guard editable, !isReordered,
                   let textField = control as? NSTextField,
                   let cellView = textField.superview as? NSTableCellView,
                   let table = lastTable
@@ -1268,6 +1429,14 @@ struct PostgresResultsTable: NSViewRepresentable {
             // single click on the same cell next time only selects.
             textField.isEditable = false
             textField.isSelectable = false
+            // Defensive: if a sort/filter became active while the editor was
+            // open, `pending.rowIndex` (a display index captured at open time)
+            // no longer maps to its data row — abandon the commit rather than
+            // risk writing the wrong row.
+            if isReordered {
+                textField.stringValue = pending.original
+                return
+            }
 
             let movement = (obj.userInfo?["NSTextMovement"] as? Int)
                 .flatMap(NSTextMovement.init(rawValue:))
@@ -1390,7 +1559,8 @@ struct PostgresResultsTable: NSViewRepresentable {
             for item in menu.items {
                 guard let action = item.action else { continue }
                 switch action {
-                case #selector(copyClickedCell(_:)):
+                case #selector(copyClickedCell(_:)),
+                     #selector(showClickedValue(_:)):
                     item.isEnabled = (lastTable?.clickedRow ?? -1) >= 0
                 case #selector(copySelectedRows(_:)),
                      #selector(copySelectedRowsWithHeader(_:)):
@@ -1452,11 +1622,13 @@ struct PostgresResultsTable: NSViewRepresentable {
             guard onNavigateFK != nil,
                   let fks = foreignKeys, !fks.isEmpty,
                   let table = lastTable,
-                  table.clickedRow >= 0,
-                  table.clickedRow < result.rows.count
+                  // Clicked row is a *display* row — map through the
+                  // active sort/filter order to the data row.
+                  let clickedDataRow = dataRow(table.clickedRow),
+                  clickedDataRow < result.rows.count
             else { return }
 
-            let rowCells = result.rows[table.clickedRow].cells
+            let rowCells = result.rows[clickedDataRow].cells
             var columnIndexByName: [String: Int] = [:]
             for (idx, col) in result.columns.enumerated() {
                 columnIndexByName[col.name] = idx
@@ -1568,7 +1740,7 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// Whether the cell under the right-click cursor can be
         /// written. Used by `Set to NULL`'s validate path.
         private func canEditClickedCell() -> Bool {
-            guard editable,
+            guard editable, !isReordered,
                   let table = lastTable,
                   table.clickedRow >= 0, table.clickedColumn >= 0,
                   table.clickedRow < result.rows.count,

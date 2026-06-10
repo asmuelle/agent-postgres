@@ -103,10 +103,10 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     var editTarget: PostgresEditTarget?
     /// Batch-edit mode toggle. When `false` (default), cell edits
     /// commit-on-blur as before. When `true`, edits stage as
-    /// pending until the user clicks Commit or Discard.
+    /// pending until the user clicks Apply or Discard.
     var batchMode: Bool
     /// Pending cell edits keyed by (rowIndex, columnIndex). Empty
-    /// in non-batch mode. Toolbar Commit / Discard buttons are
+    /// in non-batch mode. Toolbar Apply / Discard buttons are
     /// gated on this being non-empty.
     var pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit]
     var kind: TabKind
@@ -118,6 +118,11 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     /// AI output without interfering with SQL the user typed or edited. Set by
     /// `setAIGeneratedSQL`; cleared the moment the editor text changes.
     var aiGeneratedSQL: String?
+    /// 0-based character offset into `sql` to underline as the location of the
+    /// last query error, mapped from the server's 1-based error position.
+    /// `nil` when the last run succeeded or carried no position. Cleared on any
+    /// edit (the offset is meaningless against changed text).
+    var errorCharOffset: Int?
 
     init(
         id: UUID = UUID(),
@@ -132,7 +137,8 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
         pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit] = [:],
         kind: TabKind = .query,
         transactionState: PgTransactionState = .none,
-        aiGeneratedSQL: String? = nil
+        aiGeneratedSQL: String? = nil,
+        errorCharOffset: Int? = nil
     ) {
         self.id = id
         self.title = title
@@ -147,6 +153,7 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
         self.kind = kind
         self.transactionState = transactionState
         self.aiGeneratedSQL = aiGeneratedSQL
+        self.errorCharOffset = errorCharOffset
     }
 
     /// Uppercased first word of a SQL statement, skipping leading whitespace and
@@ -388,7 +395,31 @@ final class PostgresQueryTabsStore: ObservableObject {
             // Any explicit edit or non-AI insert revokes AI provenance: once
             // the user owns the text, it runs on the normal (unguarded) path.
             $0.aiGeneratedSQL = nil
+            // The error underline is anchored to the previous text; drop it.
+            $0.errorCharOffset = nil
         }
+    }
+
+    /// Map a 1-based Postgres error position (into the trimmed SQL that was
+    /// executed) onto a 0-based character offset in the tab's current editor
+    /// text, for the editor to underline. `nil` clears the underline.
+    func setErrorPosition(_ position: UInt32?, forTab id: UUID) {
+        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard let position, position >= 1 else {
+            if tabs[idx].errorCharOffset != nil {
+                mutate(id: id) { $0.errorCharOffset = nil }
+            }
+            return
+        }
+        // Postgres reports `position` in characters (not bytes), 1-based — which
+        // aligns with Swift Character offsets for ASCII/typical SQL. `trimmed`
+        // (what the server saw) drops leading whitespace from `sql`, so shift by
+        // the leading-whitespace length to land on the right editor character.
+        let sql = tabs[idx].sql
+        let leadingWhitespace = sql.prefix(while: { $0.isWhitespace }).count
+        let offset = leadingWhitespace + Int(position) - 1
+        let clamped = (offset >= 0 && offset <= sql.count) ? offset : nil
+        mutate(id: id) { $0.errorCharOffset = clamped }
     }
 
     /// Place AI-generated SQL into the editor and remember it verbatim, so
@@ -398,6 +429,7 @@ final class PostgresQueryTabsStore: ObservableObject {
         mutate(id: id) {
             $0.sql = sql
             $0.aiGeneratedSQL = sql
+            $0.errorCharOffset = nil
         }
     }
 
