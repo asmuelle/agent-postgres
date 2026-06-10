@@ -130,6 +130,10 @@ struct PostgresWorkspaceView: View {
                let sql = userInfo["sql"] as? String {
                 queryStore.openSqlTab(title: title, sql: sql)
             }
+        case "erd":
+            if let schema = userInfo["schema"] as? String {
+                queryStore.openERDTab(schema: schema)
+            }
         case "wizard":
             wizardDefaultSchema = (userInfo["schema"] as? String) ?? "public"
             isPresentingWizard = true
@@ -279,6 +283,8 @@ struct PostgresWorkspaceView: View {
             return "pulse.circle.fill"
         case .properties:
             return "info.circle"
+        case .erd:
+            return "point.3.connected.trianglepath.dotted"
         case .query:
             switch tab.execState {
             case .running:    return "circle.dotted"
@@ -302,6 +308,8 @@ struct PostgresWorkspaceView: View {
             return .pink
         case .properties:
             return .cyan
+        case .erd:
+            return .indigo
         case .query:
             switch tab.execState {
             case .running:    return .accentColor
