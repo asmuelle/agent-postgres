@@ -87,7 +87,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          # build_cargo.sh lipos a universal library, so both desktop
+          # targets must be installed — missing x86_64 fails the whole
+          # app build with E0463 (can't find crate for `core`).
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
