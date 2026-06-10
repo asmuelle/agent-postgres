@@ -327,6 +327,11 @@ int8_t uniffi_pg_agent_fn_func_rshell_init(RustCallStatus *_Nonnull out_status
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_IS_CONNECTED
+#define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_IS_CONNECTED
+int8_t uniffi_pg_agent_fn_func_rshell_is_connected(RustBuffer connection_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_KEYCHAIN_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_FN_FUNC_RSHELL_KEYCHAIN_DELETE
 RustBuffer uniffi_pg_agent_fn_func_rshell_keychain_delete(RustBuffer kind, RustBuffer account, RustCallStatus *_Nonnull out_status
@@ -961,6 +966,12 @@ uint16_t uniffi_pg_agent_checksum_func_rshell_git_status(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_INIT
 #define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_INIT
 uint16_t uniffi_pg_agent_checksum_func_rshell_init(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_IS_CONNECTED
+#define UNIFFI_FFIDEF_UNIFFI_PG_AGENT_CHECKSUM_FUNC_RSHELL_IS_CONNECTED
+uint16_t uniffi_pg_agent_checksum_func_rshell_is_connected(void
     
 );
 #endif
