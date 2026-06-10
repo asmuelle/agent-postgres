@@ -14,9 +14,10 @@ Welcome to the pgAgent codebase. This is a hybrid SwiftUI (AppKit/iOS) and Rust 
 ## ⚠️ Critical Gotchas & Architecture Rules
 
 1. **FFI Checksum Match**: DO NOT edit `bindings/pg_agent.swift` directly. UniFFI bakes in per-function checksums; any signature changes in Rust FFI must be regenerated using `just mac-bindings` and committed immediately, otherwise the app will crash at startup (`rshellInit` FFI checksum mismatch).
-2. **XcodeGen Configuration**: The Xcode project (`pgAgent.xcodeproj`) is fully generated from `project.yml`. Never edit Xcode project settings directly in Xcode; modify `project.yml` and run `just mac-gen`.
-3. **Rust Threading**: All FFI functions in `src/ffi.rs` hitting the network must use `RUNTIME.block_on(async { ... })` to resolve on the Tokio runtime thread pool.
-4. **Swift Styling & UI**: SwiftUI views and dedicated `*Store` / `*Manager` classes handle state. Apply `@MainActor` to any class or function modifying the UI.
+2. **XcodeGen Configuration**: The Xcode project (`pgAgent.xcodeproj`) is fully generated from `project.yml`. Never edit Xcode project settings directly in Xcode; modify `project.yml` and run `just mac-gen`. Also re-run `just mac-gen` after pulling commits that add/remove Swift files — a stale generated project fails with "cannot find <Type> in scope".
+3. **Check GitHub before building features**: Run `gh pr list` and `gh run list --limit 5` at session start. Open PRs from prior sessions may already implement the feature you're about to write, and CI health tells you whether main's gate is trustworthy.
+4. **Rust Threading**: All FFI functions in `src/ffi.rs` hitting the network must use `RUNTIME.block_on(async { ... })` to resolve on the Tokio runtime thread pool.
+5. **Swift Styling & UI**: SwiftUI views and dedicated `*Store` / `*Manager` classes handle state. Apply `@MainActor` to any class or function modifying the UI.
 
 ## 🔁 Verification Loop (run after edits)
 
