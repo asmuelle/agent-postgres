@@ -202,6 +202,18 @@ struct PostgresWorkspaceView: View {
             Spacer(minLength: 0)
             
             Button {
+                queryStore.openHealthTab()
+            } label: {
+                Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open Server Health dashboard")
+            .padding(.trailing, 4)
+
+            Button {
                 queryStore.openActivityTab()
             } label: {
                 Image(systemName: "pulse.circle")
@@ -308,6 +320,8 @@ struct PostgresWorkspaceView: View {
             return "info.circle"
         case .erd:
             return "point.3.connected.trianglepath.dotted"
+        case .health:
+            return "waveform.path.ecg"
         case .query:
             switch tab.execState {
             case .running:    return "circle.dotted"
@@ -333,6 +347,8 @@ struct PostgresWorkspaceView: View {
             return .cyan
         case .erd:
             return .indigo
+        case .health:
+            return .green
         case .query:
             switch tab.execState {
             case .running:    return .accentColor
