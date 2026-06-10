@@ -135,6 +135,8 @@ struct PostgresQueryTabView: View {
                     profileId: profileId,
                     schema: schema
                 )
+            case .health:
+                PostgresHealthDashboardView(connectionId: connectionId)
             case .properties(let node):
                 if let schemaStore = PostgresConnectionManager.shared.schemaStores[profileId] {
                     PostgresPropertyInspectorView(

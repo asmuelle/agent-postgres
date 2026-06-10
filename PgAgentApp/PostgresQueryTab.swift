@@ -71,6 +71,7 @@ enum TabKind: Hashable, Sendable {
     case activity
     case properties(node: PgSchemaNode)
     case erd(schema: String)
+    case health
 }
 
 struct PostgresQueryTab: Identifiable, @unchecked Sendable {
@@ -362,6 +363,22 @@ final class PostgresQueryTabsStore: ObservableObject {
             title: "Activity Monitor",
             kind: .activity
         )
+        tabs.append(tab)
+        activeTabId = tab.id
+        return tab.id
+    }
+
+    /// One health dashboard per workspace — reactivate if open.
+    @discardableResult
+    func openHealthTab() -> UUID {
+        if let existing = tabs.first(where: {
+            if case .health = $0.kind { return true }
+            return false
+        }) {
+            activeTabId = existing.id
+            return existing.id
+        }
+        let tab = PostgresQueryTab(title: "Server Health", kind: .health)
         tabs.append(tab)
         activeTabId = tab.id
         return tab.id
