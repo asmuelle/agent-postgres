@@ -8179,11 +8179,10 @@ public func rshellPgTerminateBackend(connectionId: String, pid: Int32) throws ->
 }
 
 /**
- * Update a single cell. `new_value: None` means SET NULL; the type
- * of a non-null value is bound as text and cast server-side
- * (`SET col = $1::<column_type>`). Identifiers are quoted defensively
- * in the core layer — callers don't need to escape `schema` / `table`
- * / `column`.
+ * Update a single cell. `new_value: None` means SET NULL; a non-null
+ * value is rendered as a quoted literal with an explicit cast to
+ * `column_type`. Identifiers are quoted here — callers don't need to
+ * escape `schema` / `table` / `column`.
  */
 public func rshellPgUpdateCell(connectionId: String, sessionId: String, schema: String, table: String, column: String, columnType: String, newValue: String?, rowId: String) throws -> FfiPgUpdateResult {
     return try FfiConverterTypeFfiPgUpdateResult.lift(rustCallWithError(FfiConverterTypeFfiPgError.lift) {
@@ -8690,7 +8689,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_pg_agent_checksum_func_rshell_pg_terminate_backend() != 41703 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_pg_agent_checksum_func_rshell_pg_update_cell() != 15474 {
+    if uniffi_pg_agent_checksum_func_rshell_pg_update_cell() != 61684 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_pg_agent_checksum_func_rshell_port_forward_list() != 27765 {
