@@ -134,6 +134,29 @@ struct PostgresWorkspaceView: View {
             if let schema = userInfo["schema"] as? String {
                 queryStore.openERDTab(schema: schema)
             }
+        case "tableDDL":
+            // Assembling the script needs catalog round-trips, so this
+            // one is async — the tab opens when generation finishes
+            // (sub-second on any sane catalog). Failures land in the
+            // tab as a comment instead of an alert, keeping the user
+            // in flow.
+            if let schema = userInfo["schema"] as? String,
+               let name = userInfo["name"] as? String,
+               let connId = connectionId {
+                let store = queryStore
+                Task { @MainActor in
+                    do {
+                        let ddl = try await PostgresTableDDL.generate(
+                            connectionId: connId, schema: schema, table: name)
+                        store.openSqlTab(title: "DDL: \(name)", sql: ddl)
+                    } catch {
+                        store.openSqlTab(
+                            title: "DDL: \(name)",
+                            sql: "-- Failed to generate DDL for \(schema).\(name):\n-- \(error.localizedDescription)"
+                        )
+                    }
+                }
+            }
         case "wizard":
             wizardDefaultSchema = (userInfo["schema"] as? String) ?? "public"
             isPresentingWizard = true

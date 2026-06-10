@@ -188,6 +188,16 @@ struct PostgresNodeContextMenu: View {
 
     @ViewBuilder
     private var tableActions: some View {
+        Button {
+            post([
+                "kind": "tableDDL",
+                "schema": schema ?? "public",
+                "name": objectName,
+            ])
+        } label: {
+            Label("Show CREATE Script", systemImage: "doc.text.magnifyingglass")
+        }
+        .disabled(!isConnectedDb)
         sqlButton(
             "Modify Schema…", systemImage: "slider.horizontal.3",
             tabTitle: "Alter \(objectName)",
