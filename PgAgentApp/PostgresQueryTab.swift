@@ -70,6 +70,7 @@ enum TabKind: Hashable, Sendable {
     case objectType(schema: String, name: String, typeKind: String)
     case activity
     case properties(node: PgSchemaNode)
+    case erd(schema: String)
 }
 
 struct PostgresQueryTab: Identifiable, @unchecked Sendable {
@@ -360,6 +361,25 @@ final class PostgresQueryTabsStore: ObservableObject {
         let tab = PostgresQueryTab(
             title: "Activity Monitor",
             kind: .activity
+        )
+        tabs.append(tab)
+        activeTabId = tab.id
+        return tab.id
+    }
+
+    /// One diagram per schema — reactivate if already open.
+    @discardableResult
+    func openERDTab(schema: String) -> UUID {
+        if let existing = tabs.first(where: {
+            if case .erd(let s) = $0.kind { return s == schema }
+            return false
+        }) {
+            activeTabId = existing.id
+            return existing.id
+        }
+        let tab = PostgresQueryTab(
+            title: "Diagram: \(schema)",
+            kind: .erd(schema: schema)
         )
         tabs.append(tab)
         activeTabId = tab.id

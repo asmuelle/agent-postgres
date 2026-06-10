@@ -129,6 +129,12 @@ struct PostgresQueryTabView: View {
                 )
             case .activity:
                 PostgresActivityMonitorView(connectionId: connectionId)
+            case .erd(let schema):
+                PostgresERDView(
+                    connectionId: connectionId,
+                    profileId: profileId,
+                    schema: schema
+                )
             case .properties(let node):
                 if let schemaStore = PostgresConnectionManager.shared.schemaStores[profileId] {
                     PostgresPropertyInspectorView(

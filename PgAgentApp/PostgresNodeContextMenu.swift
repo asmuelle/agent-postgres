@@ -135,6 +135,12 @@ struct PostgresNodeContextMenu: View {
     @ViewBuilder
     private var schemaMenu: some View {
         Button {
+            post(["kind": "erd", "schema": objectName])
+        } label: {
+            Label("Schema Diagram", systemImage: "point.3.connected.trianglepath.dotted")
+        }
+        .disabled(!isConnectedDb)
+        Button {
             post(["kind": "wizard", "schema": objectName])
         } label: {
             Label("Create Object Wizard…", systemImage: "wand.and.stars")
