@@ -472,10 +472,19 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// (`0..<rows.count`) when not reordered, so the read paths stay uniform.
         private(set) var displayOrder: [Int] = []
 
-        /// `true` when a sort or filter is active. Cell editing is disabled while
-        /// reordered: the destructive ctid edit/delete paths assume table row ==
-        /// data row, so a wrong display mapping there could corrupt the wrong
-        /// row. With editing gated, a mapping bug can only mis-render/mis-copy.
+        /// `true` when a *local* sort or filter is active. Cell editing is
+        /// disabled while reordered: the destructive ctid edit/delete paths
+        /// assume table row == data row, so a wrong display mapping there
+        /// could corrupt the wrong row. With editing gated, a mapping bug can
+        /// only mis-render/mis-copy.
+        ///
+        /// Server-side sort (`serverSort`/`onHeaderSort`, browse mode) is
+        /// deliberately NOT included: the host re-runs the SELECT with ORDER
+        /// BY, so the rows arrive already ordered, `displayOrder` stays
+        /// identity, and the table-row == data-row invariant holds. That is
+        /// what keeps editing available on sorted browse tabs. Any future
+        /// edit path doing positional arithmetic (rather than ctid lookup)
+        /// must preserve that invariant or extend this gate.
         var isReordered: Bool {
             sortColumnIndex != nil
                 || !filterText.trimmingCharacters(in: .whitespaces).isEmpty
