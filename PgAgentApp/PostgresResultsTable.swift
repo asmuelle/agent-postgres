@@ -76,6 +76,14 @@ struct PostgresColumnWidthKey: Equatable {
     let table: String
 }
 
+/// Active server-side sort, mirrored into the header indicators.
+/// Set by browse-mode hosts; the grid renders the arrows but never
+/// reorders rows itself — the host re-runs the SELECT with ORDER BY.
+struct PostgresServerSort: Equatable {
+    let columnName: String
+    let ascending: Bool
+}
+
 /// A cell the user asked to inspect (right-click → "Show value…"). The host
 /// presents a viewer; `typeName` lets it pretty-print JSON/JSONB.
 struct PostgresCellInspection: Identifiable {
@@ -100,6 +108,17 @@ struct PostgresResultsTable: NSViewRepresentable {
     /// Case-insensitive substring filter across visible columns. Empty = no
     /// filter. Driven by the host's filter field.
     var filterText: String = ""
+    /// Offset for the "#" gutter column — the first display row
+    /// renders as `rowNumberBase + 1`. Browse-mode hosts pass
+    /// `page * pageSize` so numbering is continuous across pages.
+    var rowNumberBase: Int = 0
+    /// Server-side sort to reflect in the header indicators. Only
+    /// meaningful alongside `onHeaderSort`.
+    var serverSort: PostgresServerSort? = nil
+    /// When set, a header click delegates sorting to the host (which
+    /// re-runs the SELECT with ORDER BY) instead of sorting the
+    /// fetched rows locally. Receives the clicked column's name.
+    var onHeaderSort: ((String) -> Void)? = nil
     /// Invoked when the user picks "Show value…" — the host presents a viewer.
     var onInspectCell: ((PostgresCellInspection) -> Void)? = nil
     /// `true` when the host knows how to UPDATE rows (tab opened
@@ -159,6 +178,9 @@ struct PostgresResultsTable: NSViewRepresentable {
         coord.pendingEdits = pendingEdits
         coord.onInspectCell = onInspectCell
         coord.filterText = filterText
+        coord.rowNumberBase = rowNumberBase
+        coord.serverSort = serverSort
+        coord.onHeaderSort = onHeaderSort
         coord.foreignKeys = foreignKeys
         coord.onNavigateFK = onNavigateFK
         coord.recomputeDisplayOrder()
@@ -322,7 +344,13 @@ struct PostgresResultsTable: NSViewRepresentable {
         // depends on the OID.
         let prevColumnIdentities = coord.result.columns.map { ColumnSignature(name: $0.name, typeOid: $0.typeOid) }
         let prevDisplayOrder = coord.displayOrder
+        let prevRows = coord.result.rows
+        let prevRowNumberBase = coord.rowNumberBase
+        let prevServerSort = coord.serverSort
 
+        coord.rowNumberBase = rowNumberBase
+        coord.serverSort = serverSort
+        coord.onHeaderSort = onHeaderSort
         coord.editable = editable
         coord.pendingEdits = pendingEdits
         coord.onCellEdit = onCellEdit
@@ -347,11 +375,29 @@ struct PostgresResultsTable: NSViewRepresentable {
             return
         }
 
+        if serverSort != prevServerSort {
+            coord.updateSortIndicators(in: table)
+        }
+        // A page move replaces all rows with a same-shaped result —
+        // `displayOrder` (pure indices) can't see that, so reload on
+        // the page-offset change instead.
+        if rowNumberBase != prevRowNumberBase {
+            table.reloadData()
+            return
+        }
+
         // Reconcile against the recomputed display order. A pure suffix-append
         // (pagination, no sort/filter) keeps scroll position via insertRows;
         // any other change (sort, filter, re-run) reloads.
         let newDisplayOrder = coord.displayOrder
         if newDisplayOrder == prevDisplayOrder {
+            // Same shape and order, but a re-run (server-side sort,
+            // refresh) can swap row *content* without moving any
+            // indices — `displayOrder` is blind to that, so compare
+            // the rows themselves.
+            if result.rows != prevRows {
+                table.reloadData()
+            }
             return
         }
         if newDisplayOrder.count > prevDisplayOrder.count,
@@ -409,6 +455,16 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// Result-column index the grid is sorted by, or `nil` for none.
         private var sortColumnIndex: Int?
         private var sortAscending: Bool = true
+        /// Offset added to the 1-based "#" gutter values (browse
+        /// paging passes `page * pageSize`).
+        var rowNumberBase: Int = 0
+        /// Server-side sort the host applied (browse mode). Display
+        /// only — drives header indicators, never `displayOrder`.
+        var serverSort: PostgresServerSort?
+        /// Set by browse-mode hosts: header clicks delegate here
+        /// (the host re-runs the SELECT with ORDER BY) instead of
+        /// sorting the fetched page locally.
+        var onHeaderSort: ((String) -> Void)?
         /// Case-insensitive substring filter across visible columns. Set by the
         /// host's filter field through `PostgresResultsTable`.
         var filterText: String = ""
@@ -416,10 +472,19 @@ struct PostgresResultsTable: NSViewRepresentable {
         /// (`0..<rows.count`) when not reordered, so the read paths stay uniform.
         private(set) var displayOrder: [Int] = []
 
-        /// `true` when a sort or filter is active. Cell editing is disabled while
-        /// reordered: the destructive ctid edit/delete paths assume table row ==
-        /// data row, so a wrong display mapping there could corrupt the wrong
-        /// row. With editing gated, a mapping bug can only mis-render/mis-copy.
+        /// `true` when a *local* sort or filter is active. Cell editing is
+        /// disabled while reordered: the destructive ctid edit/delete paths
+        /// assume table row == data row, so a wrong display mapping there
+        /// could corrupt the wrong row. With editing gated, a mapping bug can
+        /// only mis-render/mis-copy.
+        ///
+        /// Server-side sort (`serverSort`/`onHeaderSort`, browse mode) is
+        /// deliberately NOT included: the host re-runs the SELECT with ORDER
+        /// BY, so the rows arrive already ordered, `displayOrder` stays
+        /// identity, and the table-row == data-row invariant holds. That is
+        /// what keeps editing available on sorted browse tabs. Any future
+        /// edit path doing positional arithmetic (rather than ctid lookup)
+        /// must preserve that invariant or extend this gate.
         var isReordered: Bool {
             sortColumnIndex != nil
                 || !filterText.trimmingCharacters(in: .whitespaces).isEmpty
@@ -551,10 +616,24 @@ struct PostgresResultsTable: NSViewRepresentable {
 
         // MARK: - Columns
 
+        /// Identifier of the synthetic row-number gutter column. It
+        /// deliberately fails `columnIndex(from:)` (no numeric
+        /// suffix), so every data-mapping path — copy, export, edit,
+        /// sort, width persistence — skips it without special cases.
+        static let rowNumberColumnId = NSUserInterfaceItemIdentifier("rownum")
+
         func rebuildColumns(in table: NSTableView, from columns: [FfiPgColumn]) {
             for col in table.tableColumns {
                 table.removeTableColumn(col)
             }
+            let rowNum = NSTableColumn(identifier: Self.rowNumberColumnId)
+            rowNum.title = "#"
+            rowNum.headerCell.alignment = .right
+            rowNum.width = 52
+            rowNum.minWidth = 36
+            rowNum.maxWidth = 90
+            rowNum.resizingMask = [.userResizingMask]
+            table.addTableColumn(rowNum)
             for (idx, c) in columns.enumerated() {
                 // Skip internal columns (e.g. `__pg_rowid__` that
                 // carries ctid for cell-level UPDATEs). They stay in
@@ -591,6 +670,7 @@ struct PostgresResultsTable: NSViewRepresentable {
                 col.resizingMask = [.userResizingMask]
                 table.addTableColumn(col)
             }
+            updateSortIndicators(in: table)
         }
 
         // Triggered after the user drags a column edge. Persist when
@@ -640,6 +720,9 @@ struct PostgresResultsTable: NSViewRepresentable {
             viewFor tableColumn: NSTableColumn?,
             row: Int
         ) -> NSView? {
+            if tableColumn?.identifier == Self.rowNumberColumnId {
+                return rowNumberCell(in: tableView, row: row)
+            }
             guard let column = tableColumn,
                   let colIdx = columnIndex(from: column.identifier),
                   let dataRow = dataRow(row),
@@ -729,15 +812,57 @@ struct PostgresResultsTable: NSViewRepresentable {
             return view
         }
 
+        /// Gutter cell: 1-based display position offset by the host's
+        /// page base. Distinct reuse id keeps these out of the
+        /// editable-cell pool (no delegate, no result-column tag).
+        private func rowNumberCell(in tableView: NSTableView, row: Int) -> NSView {
+            let id = NSUserInterfaceItemIdentifier(rawValue: "pg-rownum")
+            let view: NSTableCellView
+            if let reused = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView {
+                view = reused
+            } else {
+                view = NSTableCellView()
+                view.identifier = id
+                let textField = NSTextField()
+                textField.isBordered = false
+                textField.isEditable = false
+                textField.isSelectable = false
+                textField.drawsBackground = false
+                textField.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+                textField.alignment = .right
+                textField.textColor = .tertiaryLabelColor
+                textField.lineBreakMode = .byClipping
+                textField.translatesAutoresizingMaskIntoConstraints = false
+                view.addSubview(textField)
+                view.textField = textField
+                NSLayoutConstraint.activate([
+                    textField.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
+                    textField.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
+                    textField.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+                ])
+            }
+            view.textField?.stringValue = String(rowNumberBase + row + 1)
+            return view
+        }
+
         // MARK: - Sort
 
         /// Header click → cycle the sort on that column: ascending →
-        /// descending → none. Client-side sort of the loaded rows (a note in
-        /// the UI explains it sorts what's fetched, not the full result).
+        /// descending → none. Browse-mode hosts take over via
+        /// `onHeaderSort` (server-side ORDER BY); otherwise this is a
+        /// client-side sort of the loaded rows (a note in the UI
+        /// explains it sorts what's fetched, not the full result).
         func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
             guard let colIdx = columnIndex(from: tableColumn.identifier),
                   colIdx < result.columns.count
             else { return }
+            if let onHeaderSort {
+                // Sorting one fetched page locally would lie about
+                // the relation's order — delegate to the host, which
+                // re-runs the SELECT with ORDER BY.
+                onHeaderSort(result.columns[colIdx].name)
+                return
+            }
             if sortColumnIndex == colIdx {
                 if sortAscending { sortAscending = false } else { sortColumnIndex = nil }
             } else {
@@ -749,20 +874,32 @@ struct PostgresResultsTable: NSViewRepresentable {
             tableView.reloadData()
         }
 
-        private func updateSortIndicators(in tableView: NSTableView) {
+        func updateSortIndicators(in tableView: NSTableView) {
+            // Server-side sort (browse mode) matches by column name;
+            // local sort by result-column index. Exactly one of the
+            // two is in play — `onHeaderSort` short-circuits the
+            // local path in `didClick`.
+            let isSorted: (NSTableColumn) -> Bool = { [self] col in
+                guard let idx = columnIndex(from: col.identifier),
+                      idx < result.columns.count
+                else { return false }
+                if onHeaderSort != nil {
+                    return serverSort?.columnName == result.columns[idx].name
+                }
+                return sortColumnIndex == idx
+            }
+            let ascending = onHeaderSort != nil
+                ? (serverSort?.ascending ?? true)
+                : sortAscending
             for col in tableView.tableColumns {
-                let sorted = sortColumnIndex != nil
-                    && columnIndex(from: col.identifier) == sortColumnIndex
-                let image = sorted
-                    ? NSImage(named: sortAscending
+                let image = isSorted(col)
+                    ? NSImage(named: ascending
                         ? "NSAscendingSortIndicator"
                         : "NSDescendingSortIndicator")
                     : nil
                 tableView.setIndicatorImage(image, in: col)
             }
-            tableView.highlightedTableColumn = tableView.tableColumns.first {
-                sortColumnIndex != nil && columnIndex(from: $0.identifier) == sortColumnIndex
-            }
+            tableView.highlightedTableColumn = tableView.tableColumns.first(where: isSorted)
         }
 
         // MARK: - Inspect

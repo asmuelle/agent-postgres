@@ -107,6 +107,16 @@ struct PostgresQueryTabView: View {
                         resultFilter = ""
                         inspectedCell = nil
                     }
+                    // Auto-run for sidebar double-click / "Open Data":
+                    // the id re-fires the task whenever the flag flips
+                    // on; `consumeAutoRun` clears it so re-renders
+                    // can't double-fire.
+                    .task(id: "\(tabId)-autorun-\(tab.pendingAutoRun)") {
+                        guard tab.pendingAutoRun,
+                              store.consumeAutoRun(forTab: tab.id)
+                        else { return }
+                        run(tab: tab)
+                    }
             case .routine(let schema, let name, let signature):
                 PostgresRoutineVisualizerView(
                     connectionId: connectionId,
@@ -512,7 +522,9 @@ struct PostgresQueryTabView: View {
                     } else {
                         resultsGrid(result: r, tab: tab)
                     }
-                    if tab.hasMore || tab.isLoadingMore {
+                    if let browse = tab.browse {
+                        browsePagerFooter(for: tab, browse: browse)
+                    } else if tab.hasMore || tab.isLoadingMore {
                         loadMoreFooter(for: tab)
                     }
                 }
@@ -557,6 +569,19 @@ struct PostgresQueryTabView: View {
         PostgresResultsTable(
             result: result,
             filterText: resultFilter,
+            // Continuous row numbering across browse pages; generic
+            // SQL tabs number from 1.
+            rowNumberBase: tab.browse.map { $0.page * $0.pageSize } ?? 0,
+            serverSort: tab.browse.flatMap { browse in
+                browse.sortColumn.map {
+                    PostgresServerSort(columnName: $0, ascending: browse.sortAscending)
+                }
+            },
+            // Browse tabs sort server-side (ORDER BY re-run); generic
+            // SQL tabs keep the local fetched-rows sort.
+            onHeaderSort: tab.browse != nil
+                ? { column in cycleBrowseSort(column: column, tab: tab) }
+                : nil,
             onInspectCell: { inspectedCell = $0 },
             editable: canEdit,
             pendingEdits: tab.pendingEdits,
@@ -981,6 +1006,88 @@ struct PostgresQueryTabView: View {
         }
     }
 
+    /// Pager for browse tabs: first / previous / next page, with the
+    /// current row range. Replaces the cursor-based "Load more"
+    /// footer — each page is a fresh LIMIT/OFFSET SELECT, so the grid
+    /// never accumulates unbounded rows.
+    @ViewBuilder
+    private func browsePagerFooter(for tab: PostgresQueryTab, browse: PostgresBrowseState) -> some View {
+        let rowCount = tab.fetchedRowCount
+        let first = browse.firstRowNumber
+        HStack(spacing: 8) {
+            Button {
+                goToBrowsePage(0, tab: tab)
+            } label: {
+                Image(systemName: "chevron.left.2")
+            }
+            .disabled(browse.page == 0 || isRunning(tab))
+            .help("First page")
+            Button {
+                goToBrowsePage(browse.page - 1, tab: tab)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .disabled(browse.page == 0 || isRunning(tab))
+            .help("Previous page")
+            Text(rowCount == 0
+                 ? "Page \(browse.page + 1) · no rows"
+                 : "Page \(browse.page + 1) · rows \(first)–\(first + rowCount - 1)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Button {
+                goToBrowsePage(browse.page + 1, tab: tab)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .disabled(!browse.hasNextPage || isRunning(tab))
+            .help("Next page")
+            if let sort = browse.sortColumn {
+                Divider().frame(height: 12)
+                Label("\(sort) \(browse.sortAscending ? "ascending" : "descending")",
+                      systemImage: "arrow.up.arrow.down")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Sorted server-side — click the column header to cycle")
+            }
+            Spacer()
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.7))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color(NSColor.separatorColor))
+                .frame(height: 1)
+        }
+    }
+
+    // MARK: - Browse (server-side sort + pagination)
+
+    /// Re-run the browse SELECT with new state (sort or page change).
+    /// The regenerated SQL replaces the editor text — same
+    /// see-what-runs convention as the original generated tab; the
+    /// re-run is immediate because the user asked for it through the
+    /// grid controls.
+    private func applyBrowse(_ newBrowse: PostgresBrowseState, tab: PostgresQueryTab) {
+        guard let connectionId else { return }
+        let sql = newBrowse.sql()
+        store.setBrowse(newBrowse, forTab: tab.id)
+        store.setSQL(sql, forTab: tab.id)
+        execute(tabId: tab.id, connectionId: connectionId, sql: sql)
+    }
+
+    private func goToBrowsePage(_ page: Int, tab: PostgresQueryTab) {
+        guard let browse = tab.browse else { return }
+        applyBrowse(browse.movingToPage(page), tab: tab)
+    }
+
+    private func cycleBrowseSort(column: String, tab: PostgresQueryTab) {
+        guard let browse = tab.browse else { return }
+        applyBrowse(browse.cyclingSort(by: column), tab: tab)
+    }
+
     // MARK: - Empty / placeholder
 
     private var placeholder: some View {
@@ -1008,6 +1115,15 @@ struct PostgresQueryTabView: View {
         }
         let trimmed = tab.sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+
+        // A browse tab whose editor no longer matches its generated
+        // SELECT has been taken over by hand-written SQL — drop the
+        // pager so the server-side sort/page controls can't re-run
+        // stale browse state over the user's own query.
+        if let browse = tab.browse,
+           trimmed != browse.sql().trimmingCharacters(in: .whitespacesAndNewlines) {
+            store.setBrowse(nil, forTab: tab.id)
+        }
 
         // Enforce the read-only guard for *unmodified* AI-generated SQL. The
         // on-device model is told to emit read-only SQL, but instructions are
@@ -1054,7 +1170,13 @@ struct PostgresQueryTabView: View {
                     storeRef.setExecState(.cancelled(elapsed: elapsed), forTab: tabId)
                     return
                 }
-                storeRef.setResult(result, forTab: tabId)
+                // Browse tabs derive `hasNextPage` from the page fill
+                // and never expose the cursor-based "Load more" path.
+                if storeRef.tabs.first(where: { $0.id == tabId })?.browse != nil {
+                    storeRef.setBrowseResult(result, forTab: tabId)
+                } else {
+                    storeRef.setResult(result, forTab: tabId)
+                }
                 storeRef.setExecState(
                     .completed(elapsed: elapsed, atTime: Date()),
                     forTab: tabId

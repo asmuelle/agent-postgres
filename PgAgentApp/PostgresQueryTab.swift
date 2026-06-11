@@ -38,6 +38,84 @@ struct PostgresEditTarget: Codable, Hashable, Sendable {
     let table: String
 }
 
+/// Server-side browse state for tabs opened from the schema browser.
+/// Sorting and pagination re-run the generated SELECT with ORDER BY /
+/// LIMIT / OFFSET instead of reordering the fetched rows locally, so
+/// the grid always reflects server-truthful order across the whole
+/// relation — not just the page that happens to be in memory.
+struct PostgresBrowseState: Hashable, Sendable {
+    var schema: String
+    var table: String
+    /// Pre-quoted filter from FK navigation, or `nil` for a plain browse.
+    var whereClause: String?
+    /// Column the browse is ordered by, or `nil` for storage order.
+    var sortColumn: String?
+    var sortAscending: Bool = true
+    /// 0-based page index into the relation at `pageSize` rows per page.
+    var page: Int = 0
+    var pageSize: Int = 500
+    /// `true` when the last fetch filled the page, so a next page
+    /// (almost certainly) exists. A relation whose row count is an
+    /// exact multiple of `pageSize` yields one trailing empty page —
+    /// acceptable, and far cheaper than a count(*) per browse.
+    var hasNextPage: Bool = false
+
+    /// First row number (1-based) shown on the current page.
+    var firstRowNumber: Int { page * pageSize + 1 }
+
+    /// The SELECT this state describes. Identifiers are quoted
+    /// defensively (mixed case, reserved words); `ctid AS
+    /// __pg_rowid__` gives the grid row identity for cell-level
+    /// UPDATEs (hidden from display). OFFSET is omitted on the first
+    /// page so the common case reads clean in the editor.
+    func sql() -> String {
+        var s = "SELECT *, ctid AS \(POSTGRES_ROWID_COLUMN) FROM \(Self.quoteIdent(schema)).\(Self.quoteIdent(table))"
+        if let whereClause {
+            s += " WHERE \(whereClause)"
+        }
+        if let sortColumn {
+            s += " ORDER BY \(Self.quoteIdent(sortColumn)) \(sortAscending ? "ASC" : "DESC")"
+        }
+        s += " LIMIT \(pageSize)"
+        if page > 0 {
+            s += " OFFSET \(page * pageSize)"
+        }
+        return s + ";"
+    }
+
+    /// Header-click cycle: unsorted → ascending → descending →
+    /// unsorted. Any sort change rewinds to the first page — the old
+    /// offset is meaningless under a new order.
+    func cyclingSort(by column: String) -> PostgresBrowseState {
+        var next = self
+        next.page = 0
+        if sortColumn == column {
+            if sortAscending {
+                next.sortAscending = false
+            } else {
+                next.sortColumn = nil
+                next.sortAscending = true
+            }
+        } else {
+            next.sortColumn = column
+            next.sortAscending = true
+        }
+        return next
+    }
+
+    func movingToPage(_ newPage: Int) -> PostgresBrowseState {
+        var next = self
+        next.page = max(0, newPage)
+        return next
+    }
+
+    /// Postgres double-quote escaping — embedded double quotes become
+    /// two double quotes, and the whole identifier is wrapped.
+    static func quoteIdent(_ s: String) -> String {
+        "\"\(s.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+}
+
 /// Magic column name the auto-generated SELECT aliases `ctid` to.
 /// The grid hides any column whose name starts with `__pg_`, so this
 /// stays out of the user's sight while still being available for
@@ -125,6 +203,14 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     /// `nil` when the last run succeeded or carried no position. Cleared on any
     /// edit (the offset is meaningless against changed text).
     var errorCharOffset: Int?
+    /// Server-side sort + pagination state for relation-browse tabs.
+    /// `nil` for generic SQL tabs (and for browse tabs the user took
+    /// over by hand-editing the SQL — see `run`'s detach logic).
+    var browse: PostgresBrowseState?
+    /// `true` when the tab should execute its SQL as soon as the view
+    /// shows it (double-click in the sidebar). Consumed exactly once
+    /// via `consumeAutoRun(forTab:)`.
+    var pendingAutoRun: Bool
 
     init(
         id: UUID = UUID(),
@@ -140,7 +226,9 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
         kind: TabKind = .query,
         transactionState: PgTransactionState = .none,
         aiGeneratedSQL: String? = nil,
-        errorCharOffset: Int? = nil
+        errorCharOffset: Int? = nil,
+        browse: PostgresBrowseState? = nil,
+        pendingAutoRun: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -156,6 +244,8 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
         self.transactionState = transactionState
         self.aiGeneratedSQL = aiGeneratedSQL
         self.errorCharOffset = errorCharOffset
+        self.browse = browse
+        self.pendingAutoRun = pendingAutoRun
     }
 
     /// Uppercased first word of a SQL statement, skipping leading whitespace and
@@ -239,27 +329,56 @@ final class PostgresQueryTabsStore: ObservableObject {
         return tab.id
     }
 
-    /// Open a tab pre-populated with `SELECT *, ctid AS __pg_rowid__
-    /// FROM <schema>.<table> LIMIT 200`. The hidden ctid column gives
-    /// the grid a row identifier for cell-level UPDATEs; the grid
-    /// hides it from display. Identifiers are quoted defensively —
-    /// Postgres allows mixed-case and reserved-word identifiers, so
-    /// an unquoted `Order` would silently target `order`.
+    /// Open (or reactivate) a browse tab for `<schema>.<table>`,
+    /// pre-populated with the generated SELECT from
+    /// `PostgresBrowseState.sql()`. The hidden `ctid AS __pg_rowid__`
+    /// column gives the grid a row identifier for cell-level UPDATEs.
+    ///
+    /// Tabs are deduped on (schema, table, whereClause): a sidebar
+    /// double-click lands here twice (the first click opens, the
+    /// second re-posts with `autoRun`), and reuse keeps that from
+    /// stacking duplicate tabs. FK navigations carry distinct WHERE
+    /// clauses, so each filter still gets its own tab.
+    ///
+    /// `autoRun` marks the tab to execute as soon as the view shows
+    /// it (double-click = "show me the data now"); plain clicks and
+    /// FK navigation keep the review-before-run convention.
     @discardableResult
-    func openRelationTab(schema: String, name: String, whereClause: String? = nil) -> UUID {
-        let qualified = "\(quoteIdent(schema)).\(quoteIdent(name))"
-        // `ctid AS __pg_rowid__` is the row-identity column the
-        // editable-grid path keys on. The alias keeps it findable
-        // by name (the grid scans column names, not OIDs).
-        // `whereClause` (FK navigation) arrives pre-quoted by the
-        // caller and lands in the editor for review before running —
-        // same review-before-run convention as every generated tab.
-        let filter = whereClause.map { " WHERE \($0)" } ?? ""
-        let sql = "SELECT *, ctid AS \(POSTGRES_ROWID_COLUMN) FROM \(qualified)\(filter) LIMIT 500;"
+    func openRelationTab(
+        schema: String,
+        name: String,
+        whereClause: String? = nil,
+        autoRun: Bool = false
+    ) -> UUID {
+        if let existing = tabs.first(where: {
+            $0.browse?.schema == schema
+                && $0.browse?.table == name
+                && $0.browse?.whereClause == whereClause
+        }) {
+            activeTabId = existing.id
+            if autoRun {
+                mutate(id: existing.id) { tab in
+                    // Re-sync the editor to the browse state so the
+                    // auto-run executes the generated SELECT, not a
+                    // half-typed draft left in the editor.
+                    if let browse = tab.browse { tab.sql = browse.sql() }
+                    tab.pendingAutoRun = true
+                }
+            }
+            return existing.id
+        }
+        let browse = PostgresBrowseState(
+            schema: schema,
+            table: name,
+            whereClause: whereClause,
+            pageSize: Int(pageSize)
+        )
         let tab = PostgresQueryTab(
             title: "\(schema).\(name)",
-            sql: sql,
-            editTarget: PostgresEditTarget(schema: schema, table: name)
+            sql: browse.sql(),
+            editTarget: PostgresEditTarget(schema: schema, table: name),
+            browse: browse,
+            pendingAutoRun: autoRun
         )
         tabs.append(tab)
         activeTabId = tab.id
@@ -509,6 +628,43 @@ final class PostgresQueryTabsStore: ObservableObject {
         }
     }
 
+    /// Replace or clear a tab's browse state (server-side sort /
+    /// pagination). Cleared when the user hand-edits the SQL and runs
+    /// it — the pager controls would otherwise re-run stale state
+    /// over the user's own query.
+    func setBrowse(_ browse: PostgresBrowseState?, forTab id: UUID) {
+        mutate(id: id) { $0.browse = browse }
+    }
+
+    /// Store a browse-mode result: derives `hasNextPage` from whether
+    /// the page came back full, and drops any cursor handle — browse
+    /// paging owns pagination, so the cursor-based "Load more"
+    /// affordance never applies to these tabs.
+    func setBrowseResult(_ result: FfiPgExecutionResult, forTab id: UUID) {
+        mutate(id: id) { tab in
+            var stored = result
+            stored.cursorId = nil
+            if var browse = tab.browse {
+                browse.hasNextPage = stored.rows.count >= browse.pageSize
+                tab.browse = browse
+            }
+            tab.lastResult = stored
+            tab.paginationError = nil
+            tab.isLoadingMore = false
+        }
+    }
+
+    /// Read-and-clear the auto-run flag. Returns `true` exactly once
+    /// per request so repeated view updates can't double-fire the
+    /// query.
+    func consumeAutoRun(forTab id: UUID) -> Bool {
+        guard let idx = tabs.firstIndex(where: { $0.id == id }),
+              tabs[idx].pendingAutoRun
+        else { return false }
+        mutate(id: id) { $0.pendingAutoRun = false }
+        return true
+    }
+
     func setLoadingMore(_ loading: Bool, forTab id: UUID) {
         mutate(id: id) { $0.isLoadingMore = loading }
     }
@@ -643,15 +799,5 @@ final class PostgresQueryTabsStore: ObservableObject {
                 tab.lastResult = result
             }
         }
-    }
-
-    // MARK: - Identifier quoting
-
-    /// Postgres double-quote escaping — embedded double quotes
-    /// become two double quotes, and the whole thing is wrapped.
-    /// Defensive against schema/table names with spaces, mixed case,
-    /// or reserved words.
-    private func quoteIdent(_ s: String) -> String {
-        "\"\(s.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 }

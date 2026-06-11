@@ -612,7 +612,9 @@ struct PostgresNodeContextMenu: View {
     private var openDataButton: some View {
         Button {
             guard let schema else { return }
-            post(["kind": "relation", "schema": schema, "name": objectName])
+            // "Open Data" means show the rows — run the generated
+            // SELECT immediately, same as a sidebar double-click.
+            post(["kind": "relation", "schema": schema, "name": objectName, "autoRun": true])
         } label: {
             Label("Open Data", systemImage: "tablecells")
         }
