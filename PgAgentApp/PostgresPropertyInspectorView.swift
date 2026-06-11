@@ -241,10 +241,14 @@ struct PostgresPropertyInspectorView: View {
     }
 
     private var generatedDDL: String {
-        guard let parsed = parseNodeId(node.id) else { return "-- Unknown ID format" }
+        guard let parsed = PostgresNodeDDL.target(for: node) else { return "-- Unknown ID format" }
         let sEsc = "\"\(parsed.schema)\""
         let tEsc = parsed.table != nil ? "\"\(parsed.table!)\"" : ""
-        let nEsc = "\"\(node.name)\""
+        // The bare object name from the node id — `node.name` is a
+        // DISPLAY string that for keys/constraints carries the
+        // definition suffix ("users_pkey (PRIMARY KEY (id))"), which
+        // would render an invalid identifier in RENAME statements.
+        let nEsc = "\"\(parsed.name)\""
         let newEsc = "\"\(editName)\""
 
         switch node.kind {
@@ -272,10 +276,11 @@ struct PostgresPropertyInspectorView: View {
             return "ALTER TABLE \(sEsc).\(tEsc) RENAME TRIGGER \(nEsc) TO \(newEsc);"
         case .sequence:
             return "ALTER SEQUENCE \(sEsc).\(nEsc) RENAME TO \(newEsc);"
-        case .routine(let rkind, _, _):
+        case .routine(let rkind, let signature, _):
             let typeKeyword = rkind == .procedure ? "PROCEDURE" : "FUNCTION"
-            let sig = extractSignature(from: node.id)
-            return "ALTER \(typeKeyword) \(sEsc).\"\(node.name)\"\(sig) RENAME TO \(newEsc);"
+            // The identity-argument signature pins the exact overload
+            // (it carries no parentheses of its own).
+            return "ALTER \(typeKeyword) \(sEsc).\"\(parsed.name)\"(\(signature)) RENAME TO \(newEsc);"
         case .objectType:
             return "ALTER TYPE \(sEsc).\(nEsc) RENAME TO \(newEsc);"
         default:
@@ -303,7 +308,7 @@ struct PostgresPropertyInspectorView: View {
             )
             
             // Success! Refresh tree section
-            if let parsed = parseNodeId(node.id) {
+            if let parsed = PostgresNodeDDL.target(for: node) {
                 switch node.kind {
                 case .column, .key, .constraint, .trigger:
                     if let table = parsed.table {
@@ -398,259 +403,24 @@ struct PostgresPropertyInspectorView: View {
     }
 
     private var pathLabel: String {
-        guard let parsed = parseNodeId(node.id) else { return "" }
+        guard let parsed = PostgresNodeDDL.target(for: node) else { return "" }
         if let table = parsed.table {
             return "\(parsed.database) / \(parsed.schema) / \(table)"
         }
         return "\(parsed.database) / \(parsed.schema)"
     }
 
-    private func extractSignature(from id: String) -> String {
-        if let start = id.firstIndex(of: "(") {
-            return String(id[start...])
-        }
-        return ""
-    }
-
-    struct ParsedNodeId {
-        let kind: String
-        let database: String
-        let schema: String
-        let table: String?
-        let name: String
-    }
-
-    private func parseNodeId(_ id: String) -> ParsedNodeId? {
-        let parts = id.split(separator: ":", maxSplits: 1)
-        guard parts.count == 2 else { return nil }
-        let kind = String(parts[0])
-        let rest = String(parts[1])
-        
-        if kind == "fn" {
-            let subParts = rest.split(separator: ".", maxSplits: 2)
-            guard subParts.count >= 3 else { return nil }
-            let db = String(subParts[0])
-            let schema = String(subParts[1])
-            let rest2 = String(subParts[2])
-            if let idx = rest2.firstIndex(of: "(") {
-                let name = String(rest2[..<idx])
-                return ParsedNodeId(kind: kind, database: db, schema: schema, table: nil, name: name)
-            } else {
-                return ParsedNodeId(kind: kind, database: db, schema: schema, table: nil, name: rest2)
-            }
-        }
-        
-        let subParts = rest.split(separator: ".")
-        if subParts.count == 4 {
-            return ParsedNodeId(
-                kind: kind,
-                database: String(subParts[0]),
-                schema: String(subParts[1]),
-                table: String(subParts[2]),
-                name: String(subParts[3])
-            )
-        } else if subParts.count == 3 {
-            return ParsedNodeId(
-                kind: kind,
-                database: String(subParts[0]),
-                schema: String(subParts[1]),
-                table: nil,
-                name: String(subParts[2])
-            )
-        }
-        return nil
-    }
-
     // MARK: - Reconstructive DDL Source Methods
+    /// Delegate to the kind-aware DDL engine. Every node kind the
+    /// tree can produce is covered there; failures come back as SQL
+    /// comments so this pane never shows a bare error state.
     private func loadReconstructedDDL() async {
-        guard let connectionId = connectionId,
-              let parsed = parseNodeId(node.id)
-        else {
-            reconstructedDDL = "-- DDL not available for this node"
+        guard let connectionId else {
+            reconstructedDDL = "-- Not connected — DDL source needs a live connection."
             return
         }
-        
-        let schema = parsed.schema
-        let name = parsed.name
-        let db = parsed.database
-        let table = parsed.table ?? name
-        
-        let sessionId = "ddl-loader-\(UUID().uuidString)"
-        defer {
-            Task {
-                await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
-            }
-        }
-        
-        switch node.kind {
-        case .relation(let displayKind):
-            if displayKind == .table || displayKind == .partitionedTable || displayKind == .foreignTable {
-                reconstructedDDL = "Loading columns and constraints..."
-                let key = "\(db).\(schema).\(table)"
-                
-                if case .loaded = store.columnsState[key], case .loaded = store.metaState[key] {
-                    buildTableDDL(schema: schema, table: table, key: key)
-                } else {
-                    await store.loadColumns(database: db, schema: schema, table: table)
-                    await store.loadMeta(database: db, schema: schema, table: table)
-                    buildTableDDL(schema: schema, table: table, key: key)
-                }
-            } else if displayKind == .view || displayKind == .materializedView {
-                let isMat = displayKind == .materializedView
-                let sql = """
-                SELECT pg_get_viewdef(c.oid)
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE c.relname = '\(table.replacingOccurrences(of: "'", with: "''"))'
-                  AND n.nspname = '\(schema.replacingOccurrences(of: "'", with: "''"))';
-                """
-                do {
-                    let res = try await BridgeManager.shared.pgExecute(
-                        connectionId: connectionId,
-                        sessionId: sessionId,
-                        sql: sql,
-                        pageSize: 10
-                    )
-                    if let row = res.rows.first, let viewdef = row.cells.first ?? "" {
-                        let createKeyword = isMat ? "CREATE MATERIALIZED VIEW" : "CREATE VIEW"
-                        reconstructedDDL = "\(createKeyword) \"\(schema)\".\"\(table)\" AS\n\(viewdef.trimmingCharacters(in: .whitespacesAndNewlines));"
-                    } else {
-                        reconstructedDDL = "-- View definition not found"
-                    }
-                } catch {
-                    reconstructedDDL = "-- Failed to fetch view DDL: \(error.localizedDescription)"
-                }
-            }
-        case .routine(let rkind, _, _):
-            let typeKeyword = rkind == .procedure ? "PROCEDURE" : "FUNCTION"
-            let sql = """
-            SELECT pg_get_functiondef(p.oid)
-            FROM pg_proc p
-            JOIN pg_namespace n ON n.oid = p.pronamespace
-            WHERE p.proname = '\(name.replacingOccurrences(of: "'", with: "''"))'
-              AND n.nspname = '\(schema.replacingOccurrences(of: "'", with: "''"))';
-            """
-            do {
-                let res = try await BridgeManager.shared.pgExecute(
-                    connectionId: connectionId,
-                    sessionId: sessionId,
-                    sql: sql,
-                    pageSize: 10
-                )
-                if let row = res.rows.first, let funcdef = row.cells.first ?? "" {
-                    reconstructedDDL = funcdef
-                } else {
-                    reconstructedDDL = "-- Routine definition not found"
-                }
-            } catch {
-                reconstructedDDL = "-- Failed to fetch routine DDL: \(error.localizedDescription)"
-            }
-        case .trigger:
-            let sql = """
-            SELECT pg_get_triggerdef(t.oid)
-            FROM pg_trigger t
-            JOIN pg_class r ON r.oid = t.tgrelid
-            JOIN pg_namespace n ON n.oid = r.relnamespace
-            WHERE t.tgname = '\(name.replacingOccurrences(of: "'", with: "''"))'
-              AND r.relname = '\(table.replacingOccurrences(of: "'", with: "''"))'
-              AND n.nspname = '\(schema.replacingOccurrences(of: "'", with: "''"))';
-            """
-            do {
-                let res = try await BridgeManager.shared.pgExecute(
-                    connectionId: connectionId,
-                    sessionId: sessionId,
-                    sql: sql,
-                    pageSize: 10
-                )
-                if let row = res.rows.first, let trigdef = row.cells.first ?? "" {
-                    reconstructedDDL = "\(trigdef);"
-                } else {
-                    reconstructedDDL = "-- Trigger definition not found"
-                }
-            } catch {
-                reconstructedDDL = "-- Failed to fetch trigger DDL: \(error.localizedDescription)"
-            }
-        case .sequence:
-            reconstructedDDL = "CREATE SEQUENCE \"\(schema)\".\"\(name)\";"
-        case .objectType(let okind):
-            if okind == .enum {
-                let sql = """
-                SELECT enumlabel
-                FROM pg_enum e
-                JOIN pg_type t ON t.oid = e.enumtypid
-                JOIN pg_namespace n ON n.oid = t.typnamespace
-                WHERE t.typname = '\(name.replacingOccurrences(of: "'", with: "''"))'
-                  AND n.nspname = '\(schema.replacingOccurrences(of: "'", with: "''"))'
-                ORDER BY enumsortorder;
-                """
-                do {
-                    let res = try await BridgeManager.shared.pgExecute(
-                        connectionId: connectionId,
-                        sessionId: sessionId,
-                        sql: sql,
-                        pageSize: 100
-                    )
-                    let labels = res.rows.compactMap { $0.cells.first ?? "" }.map { "'\($0)'" }.joined(separator: ", ")
-                    reconstructedDDL = "CREATE TYPE \"\(schema)\".\"\(name)\" AS ENUM (\n    \(labels)\n);"
-                } catch {
-                    reconstructedDDL = "-- Failed to fetch enum labels: \(error.localizedDescription)"
-                }
-            } else {
-                reconstructedDDL = "CREATE TYPE \"\(schema)\".\"\(name)\" AS ...;"
-            }
-        default:
-            reconstructedDDL = "-- DDL reconstruction not supported for \(node.name)"
-        }
-    }
-
-    private func buildTableDDL(schema: String, table: String, key: String) {
-        guard case .loaded(let cols) = store.columnsState[key] else {
-            reconstructedDDL = "-- Failed to load table columns"
-            return
-        }
-        
-        var ddlParts: [String] = []
-        
-        for col in cols {
-            if case .column(let typeName, let notNull) = col.kind {
-                let nullStr = notNull ? " NOT NULL" : ""
-                ddlParts.append("    \"\(col.name)\" \(typeName)\(nullStr)")
-            }
-        }
-        
-        if case .loaded(let metas) = store.metaState[key] {
-            for meta in metas {
-                if case .key(let type) = meta.kind {
-                    let parts = meta.name.split(separator: " ", maxSplits: 1)
-                    if parts.count == 2 {
-                        let cName = String(parts[0])
-                        let cDef = String(parts[1]).trimmingCharacters(in: CharacterSet(charactersIn: "()"))
-                        ddlParts.append("    CONSTRAINT \"\(cName)\" \(cDef)")
-                    }
-                } else if case .constraint(_, let definition) = meta.kind {
-                    let parts = meta.name.split(separator: " ", maxSplits: 1)
-                    if parts.count == 2 {
-                        let cName = String(parts[0])
-                        ddlParts.append("    CONSTRAINT \"\(cName)\" \(definition)")
-                    }
-                }
-            }
-        }
-        
-        let body = ddlParts.joined(separator: ",\n")
-        var sql = "CREATE TABLE \"\(schema)\".\"\(table)\" (\n\(body)\n);"
-        
-        if case .loaded(let metas) = store.metaState[key] {
-            let triggers = metas.filter { if case .trigger = $0.kind { return true }; return false }
-            if !triggers.isEmpty {
-                sql.append("\n\n-- Triggers\n")
-                for trig in triggers {
-                    sql.append("-- Trigger \(trig.name) DDL can be inspected in trigger node properties.\n")
-                }
-            }
-        }
-        
-        reconstructedDDL = sql
+        reconstructedDDL = "Loading DDL…"
+        reconstructedDDL = await PostgresNodeDDL.reconstruct(node: node, connectionId: connectionId)
     }
 }
 #endif
