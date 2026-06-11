@@ -140,7 +140,7 @@ struct PostgresConnectionEditView: View {
                         TextField("Remote port", text: $tunnelRemotePort)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 100)
-                        Text("The Postgres server hostname/port reachable from the SSH host. Sprint 2 wires the actual forwarding.")
+                        Text("The Postgres server hostname/port as reachable from the SSH host (often 127.0.0.1:5432). The SSH connection opens automatically using its stored credentials when you connect.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

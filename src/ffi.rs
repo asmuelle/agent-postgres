@@ -4499,6 +4499,59 @@ mod tests {
         }
     }
 
+    // Live tunnel tier: SSH to localhost, then Postgres through the
+    // tunnel. Opt-in via PG_AGENT_IT_SSH_KEY (path to a passphrase-less
+    // private key authorized for the current user on localhost) on top
+    // of the usual PG_AGENT_IT=1. Exercises the exact path the app
+    // uses: rshell_connect → rshell_pg_connect with the *returned*
+    // connection id in the tunnel ref — the id contract the Swift
+    // layer historically violated by passing its profile UUID instead.
+    #[test]
+    fn pg_it_connect_through_ssh_tunnel() {
+        let Some(mut cfg) = it_config("it-tunnel") else {
+            return;
+        };
+        let Ok(key_path) = std::env::var("PG_AGENT_IT_SSH_KEY") else {
+            return;
+        };
+        rshell_init();
+
+        let ssh_user = std::env::var("USER").unwrap_or_default();
+        let ssh_id = rshell_connect(FfiConnectConfig {
+            host: "127.0.0.1".into(),
+            port: 22,
+            username: ssh_user,
+            password: None,
+            key_path: Some(key_path),
+            passphrase: None,
+            use_agent: false,
+            agent_identity_hint: None,
+            session_id: Some("it-tunnel".into()),
+        })
+        .expect("ssh connect to localhost");
+
+        // Tunnel to the Postgres the plain tier already targets. The
+        // direct host/port are deliberately bogus — everything must
+        // flow through the forward.
+        let pg_port = cfg.port;
+        cfg.tunnel = Some(FfiPgTunnel {
+            ssh_connection_id: ssh_id.clone(),
+            remote_host: "127.0.0.1".into(),
+            remote_port: pg_port,
+        });
+        cfg.host = "tunnel-required.invalid".into();
+        cfg.port = 1;
+
+        let conn = rshell_pg_connect(cfg).expect("pg connect through tunnel");
+        let res = rshell_pg_execute(conn.clone(), "it-tunnel".into(), "SELECT 41 + 1".into(), 1)
+            .expect("query through tunnel");
+        assert_eq!(res.rows[0].cells[0].as_deref(), Some("42"));
+
+        let _ = rshell_pg_release_session(conn.clone(), "it-tunnel".into());
+        let _ = rshell_pg_disconnect(conn);
+        let _ = rshell_disconnect(ssh_id);
+    }
+
     #[test]
     fn pg_list_schemas_on_unknown_id_returns_not_connected() {
         rshell_init();

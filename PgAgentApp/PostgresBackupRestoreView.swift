@@ -347,8 +347,14 @@ struct PostgresBackupRestoreView: View {
         
         Task {
             do {
-                let output = try await BridgeManager.shared.executeCommand(connectionId: sshId, command: cmd)
-                
+                // `sshId` is the saved SSH *profile* id — resolve it to a
+                // live connection (opening one with stored credentials if
+                // needed) before running anything on it.
+                let liveSshId = try await SSHTunnelResolver.liveConnectionId(
+                    forSSHProfileReference: sshId
+                )
+                let output = try await BridgeManager.shared.executeCommand(connectionId: liveSshId, command: cmd)
+
                 await MainActor.run {
                     isExecuting = false
                     executionSuccess = true
