@@ -244,7 +244,11 @@ struct PostgresPropertyInspectorView: View {
         guard let parsed = PostgresNodeDDL.target(for: node) else { return "-- Unknown ID format" }
         let sEsc = "\"\(parsed.schema)\""
         let tEsc = parsed.table != nil ? "\"\(parsed.table!)\"" : ""
-        let nEsc = "\"\(node.name)\""
+        // The bare object name from the node id — `node.name` is a
+        // DISPLAY string that for keys/constraints carries the
+        // definition suffix ("users_pkey (PRIMARY KEY (id))"), which
+        // would render an invalid identifier in RENAME statements.
+        let nEsc = "\"\(parsed.name)\""
         let newEsc = "\"\(editName)\""
 
         switch node.kind {

@@ -86,12 +86,20 @@ enum PostgresNodeDDL {
             return "-- DDL not available: unrecognized node id '\(node.id)'."
         }
         let sessionId = "ddl-loader-\(UUID().uuidString)"
-        defer {
-            Task {
-                await BridgeManager.shared.pgReleaseSession(
-                    connectionId: connectionId, sessionId: sessionId)
-            }
-        }
+        let ddl = await fetch(
+            node: node, target: target, connectionId: connectionId, sessionId: sessionId)
+        // Release within this structured context — awaited on every
+        // path — rather than via `defer { Task { … } }`, whose
+        // unstructured task could lag behind rapid node switching and
+        // pile up leased sessions. (Same rationale as PgSchemaStore.)
+        await BridgeManager.shared.pgReleaseSession(
+            connectionId: connectionId, sessionId: sessionId)
+        return ddl
+    }
+
+    private static func fetch(
+        node: PgSchemaNode, target: Target, connectionId: String, sessionId: String
+    ) async -> String {
         func run(_ sql: String, pageSize: UInt32 = 500) async throws -> [[String?]] {
             try await BridgeManager.shared.pgExecute(
                 connectionId: connectionId,
