@@ -114,7 +114,30 @@ extension BridgeManager {
     /// profile uses `.keychain` auth and no entry is found — the caller is
     /// responsible for prompting the user and saving before retrying.
     func pgConnect(profile: PostgresProfile) async throws -> String {
-        let config = profile.toFfiConfig()
+        var config = profile.toFfiConfig()
+
+        // The profile stores the *SSH profile id* the user picked; the
+        // FFI needs the *live connection id* the Rust manager holds.
+        // Resolve (auto-opening the SSH connection with stored
+        // credentials if needed) and substitute before connecting.
+        if let tunnel = profile.tunnel {
+            let liveId: String
+            do {
+                liveId = try await SSHTunnelResolver.liveConnectionId(
+                    forSSHProfileReference: tunnel.sshConnectionId
+                )
+            } catch {
+                throw PostgresBridgeError.tunnel(
+                    (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription
+                )
+            }
+            config.tunnel = FfiPgTunnel(
+                sshConnectionId: liveId,
+                remoteHost: tunnel.remoteHost,
+                remotePort: tunnel.remotePort
+            )
+        }
 
         do {
             let connectionId: String = try await runOnUtilityQueuePg {
