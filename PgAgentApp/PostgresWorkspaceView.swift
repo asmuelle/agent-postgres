@@ -97,9 +97,17 @@ struct PostgresWorkspaceView: View {
             if let schema = userInfo["schema"] as? String,
                let name = userInfo["name"] as? String {
                 // FK navigation passes a pre-built filter; plain
-                // browses leave it absent.
+                // browses leave it absent. `autoRun` (sidebar
+                // double-click) executes the generated SELECT
+                // immediately instead of waiting for ⌘↵.
                 let whereClause = userInfo["whereClause"] as? String
-                queryStore.openRelationTab(schema: schema, name: name, whereClause: whereClause)
+                let autoRun = userInfo["autoRun"] as? Bool ?? false
+                queryStore.openRelationTab(
+                    schema: schema,
+                    name: name,
+                    whereClause: whereClause,
+                    autoRun: autoRun
+                )
             }
         case "routine":
             if let schema = userInfo["schema"] as? String,

@@ -946,8 +946,26 @@ struct SidebarView: View {
                     presentForeignDatabaseAlert(profile: profile, database: parsed.database)
                 }
             }
+            .onTapGesture(count: 2) {
+                // Double-click = "show me the data now": the single-tap
+                // already opened (or reactivated) the browse tab; this
+                // re-posts with `autoRun` so the generated SELECT
+                // executes immediately. The store dedupes on
+                // (schema, table), so no duplicate tab appears.
+                guard let parsed = parsed, isConnectedDb else { return }
+                postOpenTabNotification(
+                    profile: profile,
+                    node: rel,
+                    details: [
+                        "kind": "relation",
+                        "schema": parsed.schema,
+                        "name": parsed.name,
+                        "autoRun": true,
+                    ]
+                )
+            }
             .help(isConnectedDb
-                  ? "Click to open a query tab"
+                  ? "Click to open a query tab; double-click to run the SELECT immediately"
                   : "Database '\(parsed?.database ?? "?")' isn't connected through this profile.")
             .contextMenu {
                 PostgresNodeContextMenu(
