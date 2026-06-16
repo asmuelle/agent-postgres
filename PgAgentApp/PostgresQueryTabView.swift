@@ -118,8 +118,9 @@ struct PostgresQueryTabView: View {
                         run(tab: tab)
                     }
             case .routine(let schema, let name, let signature):
-                PostgresRoutineVisualizerView(
+                PostgresRoutineEditorView(
                     connectionId: connectionId,
+                    profileId: profileId,
                     schema: schema,
                     name: name,
                     signature: signature
