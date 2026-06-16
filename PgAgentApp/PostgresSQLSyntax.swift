@@ -33,6 +33,16 @@ enum PostgresSQLSyntax {
         "LOOP", "CALL", "DO", "LANGUAGE", "POLICY", "ENABLE", "DISABLE", "ROW",
         "LEVEL", "SECURITY", "REFRESH", "CONCURRENTLY", "GENERATED", "ALWAYS",
         "IDENTITY", "INTERVAL", "AT", "ZONE", "CAST", "COLLATE",
+        // PL/pgSQL & routine-definition vocabulary — so function bodies in the
+        // routine editor (and dollar-quoted bodies in query tabs) highlight.
+        "RETURN", "RETURNS", "RAISE", "EXCEPTION", "NOTICE", "WARNING", "DEBUG",
+        "INFO", "LOG", "PERFORM", "EXECUTE", "ELSIF", "ELSEIF", "WHILE",
+        "FOREACH", "EXIT", "CONTINUE", "GET", "DIAGNOSTICS", "STACKED", "FOUND",
+        "ROWTYPE", "CONSTANT", "ALIAS", "OUT", "INOUT", "VARIADIC", "STRICT",
+        "VOLATILE", "STABLE", "IMMUTABLE", "PARALLEL", "SAFE", "RESTRICTED",
+        "UNSAFE", "LEAKPROOF", "COST", "SUPPORT", "DEFINER", "INVOKER",
+        "EXTERNAL", "SETOF", "INSTEAD", "ASSERT", "REPLACE", "SLICE", "REVERSE",
+        "QUERY", "CALLED", "INPUT", "OF",
     ]
 
     /// Common built-in types offered in completion (not separately colored).
@@ -80,6 +90,12 @@ enum PostgresSQLSyntax {
     private static let stringRegex = try! NSRegularExpression(pattern: "'(?:[^']|'')*'")
     private static let lineCommentRegex = try! NSRegularExpression(pattern: "--[^\\n]*")
     private static let blockCommentRegex = try! NSRegularExpression(pattern: "/\\*[\\s\\S]*?\\*/")
+    // Dollar-quote *delimiters* only ($$ or $tag$), not the body between them —
+    // a function body is plpgsql we want highlighted as code, so we mark just
+    // the boundary tokens (secondary color) rather than painting the whole
+    // body as one string. Tags follow identifier rules; `$1` (a positional
+    // parameter) has no closing `$` so it never matches.
+    private static let dollarTagRegex = try! NSRegularExpression(pattern: "\\$([A-Za-z_][A-Za-z0-9_]*)?\\$")
 
     static func highlight(_ storage: NSTextStorage, baseFont: NSFont) {
         let text = storage.string
@@ -102,9 +118,13 @@ enum PostgresSQLSyntax {
             }
         }
 
-        // Numbers, then strings, then comments (later passes win).
+        // Numbers, then strings, dollar-quote delimiters, then comments (later
+        // passes win). Dollar delimiters go after keywords/numbers so a tag like
+        // `$body$` reads as a boundary token, but before comments so a `--`
+        // inside a body still greys correctly.
         apply(numberRegex, NSColor.systemOrange, storage, text, full)
         apply(stringRegex, NSColor.systemRed, storage, text, full)
+        apply(dollarTagRegex, NSColor.secondaryLabelColor, storage, text, full)
         apply(lineCommentRegex, NSColor.systemGray, storage, text, full)
         apply(blockCommentRegex, NSColor.systemGray, storage, text, full)
 
