@@ -151,6 +151,18 @@ enum PostgresRoutineCall {
         return "\(verb)(\(argList));"
     }
 
+    /// Whether the call will use named `name => value` notation. Named notation
+    /// requires every input parameter to be named and none to be VARIADIC; it's
+    /// the only way to omit a non-trailing defaulted argument (Postgres rejects
+    /// the `DEFAULT` keyword inside a call argument list, so omission is the
+    /// only mechanism, and positional omission only reaches the trailing tail).
+    /// The runner uses this to decide whether to offer a "Use DEFAULT" toggle.
+    static func usesNamedNotation(_ info: RoutineCallInfo) -> Bool {
+        !info.params.isEmpty
+            && info.params.allSatisfy { !$0.name.isEmpty }
+            && !info.params.contains { $0.isVariadic }
+    }
+
     /// The comma-joined argument fragments (no surrounding parens).
     private static func buildArgList(
         info: RoutineCallInfo, values: [Int: RoutineParamValue]
@@ -158,11 +170,7 @@ enum PostgresRoutineCall {
         let params = info.params
         guard !params.isEmpty else { return "" }
 
-        let allNamed = params.allSatisfy { !$0.name.isEmpty }
-        let hasVariadic = params.contains { $0.isVariadic }
-        let useNamed = allNamed && !hasVariadic
-
-        if useNamed {
+        if usesNamedNotation(info) {
             // Named notation: omit any param the user set to DEFAULT; order is
             // irrelevant, so this cleanly handles middle defaults too.
             return params.compactMap { p -> String? in

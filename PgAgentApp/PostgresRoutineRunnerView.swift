@@ -59,6 +59,13 @@ struct PostgresRoutineRunnerView: View {
             schema: schema, name: name, info: info, values: values)
     }
 
+    /// Named notation is the only form that can omit an argument, so the
+    /// "Use DEFAULT" affordance is offered only then. Positional/variadic
+    /// routines require an explicit value (or NULL) for every argument.
+    private var usesNamed: Bool {
+        info.map(PostgresRoutineCall.usesNamedNotation) ?? false
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -226,7 +233,7 @@ struct PostgresRoutineRunnerView: View {
 
                 HStack(spacing: 16) {
                     Toggle("NULL", isOn: bindingNull(param.ordinal))
-                    if param.hasDefault {
+                    if param.hasDefault && usesNamed {
                         Toggle("Use DEFAULT", isOn: bindingDefault(param.ordinal))
                             .help("Omit this argument so the routine's DEFAULT applies")
                     }
@@ -252,7 +259,7 @@ struct PostgresRoutineRunnerView: View {
 
     private var sqlPreview: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("CALL")
+            Text(info?.isProcedure == true ? "CALL" : "QUERY")
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.secondary)
             Text(generatedSQL)
@@ -388,10 +395,15 @@ struct PostgresRoutineRunnerView: View {
                 return
             }
             info = parsed
-            // Seed defaults: params that declare a DEFAULT start omitted.
+            // Seed defaults: in named mode, params that declare a DEFAULT start
+            // omitted. In positional/variadic mode there's no way to omit a
+            // non-trailing arg, so we don't pre-set Use DEFAULT there (the user
+            // supplies values).
             var seed: [Int: RoutineParamValue] = [:]
-            for p in parsed.params where p.hasDefault {
-                seed[p.ordinal] = RoutineParamValue(useDefault: true)
+            if PostgresRoutineCall.usesNamedNotation(parsed) {
+                for p in parsed.params where p.hasDefault {
+                    seed[p.ordinal] = RoutineParamValue(useDefault: true)
+                }
             }
             values = seed
             phase = .ready
@@ -429,11 +441,16 @@ struct PostgresRoutineRunnerView: View {
     private func load(_ fixture: PostgresRoutineFixture) {
         guard let info else { return }
         var next: [Int: RoutineParamValue] = [:]
+        let named = PostgresRoutineCall.usesNamedNotation(info)
         for p in info.params {
             if let saved = fixture.values[p.label] {
+                // Drop a stale Use DEFAULT if the routine changed so this param
+                // no longer has a default (or it's no longer named-mode) — else
+                // the field would be locked with no toggle to clear it.
+                let useDefault = saved.useDefault && p.hasDefault && named
                 next[p.ordinal] = RoutineParamValue(
-                    text: saved.text, isNull: saved.isNull, useDefault: saved.useDefault)
-            } else if p.hasDefault {
+                    text: saved.text, isNull: saved.isNull, useDefault: useDefault)
+            } else if p.hasDefault && named {
                 next[p.ordinal] = RoutineParamValue(useDefault: true)
             }
         }

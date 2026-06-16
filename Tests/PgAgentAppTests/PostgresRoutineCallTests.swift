@@ -150,4 +150,18 @@ final class PostgresRoutineCallBuildTests: XCTestCase {
         let expr = PostgresRoutineCall.valueExpr(.init(text: "O'Brien"), type: "text")
         XCTAssertEqual(expr, "'O''Brien'::text")
     }
+
+    func testUsesNamedNotation() {
+        // All named, no variadic → named.
+        XCTAssertTrue(PostgresRoutineCall.usesNamedNotation(
+            info(false, [p(1, "a", "integer"), p(2, "b", "text")])))
+        // An unnamed arg → positional.
+        XCTAssertFalse(PostgresRoutineCall.usesNamedNotation(
+            info(false, [p(1, "a", "integer"), p(2, "", "text")])))
+        // Variadic present → positional even if named.
+        XCTAssertFalse(PostgresRoutineCall.usesNamedNotation(
+            info(false, [p(1, "nums", "integer[]", "v")])))
+        // No params → not named (nothing to name).
+        XCTAssertFalse(PostgresRoutineCall.usesNamedNotation(info(false, [])))
+    }
 }
