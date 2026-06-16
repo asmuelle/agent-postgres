@@ -117,10 +117,19 @@ struct PostgresRoutineEditorView: View {
     @State private var meta: Meta?
     @State private var isApplying = false
     @State private var applyError: String?
+    /// Non-error notice shown after an apply that ran but did NOT replace the
+    /// bound routine in place (the user changed its name/arguments, creating a
+    /// new routine). Orange, persistent until the next edit/apply.
+    @State private var applyNotice: String?
     /// 0-based offset to underline after a failed apply (mapped from the
     /// server's 1-based position into the submitted statement).
     @State private var errorOffset: Int?
     @State private var applied = false
+    /// Bumped every time the bound routine identity changes (tab switch) or a
+    /// manual reload starts. An in-flight `load`/`apply` captures the value and
+    /// discards its results once a newer generation has begun — so a slow apply
+    /// can't write the old routine's text (or flash success) onto a new tab.
+    @State private var generation = 0
 
     private var schemaStore: PgSchemaStore? {
         PostgresConnectionManager.shared.schemaStores[profileId]
@@ -145,7 +154,7 @@ struct PostgresRoutineEditorView: View {
         }
         .background(MidnightMacDesign.ColorToken.windowBackground)
         .task(id: routineKey) {
-            await load(initial: true)
+            await reload()
         }
     }
 
@@ -212,7 +221,7 @@ struct PostgresRoutineEditorView: View {
             }
 
             Button {
-                Task { await load(initial: true) }
+                Task { await reload() }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -250,7 +259,7 @@ struct PostgresRoutineEditorView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 360)
-                Button("Retry") { Task { await load(initial: true) } }
+                Button("Retry") { Task { await reload() } }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -281,9 +290,10 @@ struct PostgresRoutineEditorView: View {
                     set: { newValue in
                         editorText = newValue
                         // Any edit invalidates the stale error underline and the
-                        // last apply error (mirrors the query tab's setSQL).
+                        // last apply error/notice (mirrors the query tab's setSQL).
                         errorOffset = nil
                         applyError = nil
+                        applyNotice = nil
                         applied = false
                     }
                 ),
@@ -301,6 +311,8 @@ struct PostgresRoutineEditorView: View {
     private var statusStrip: some View {
         if let applyError {
             banner(applyError, systemImage: "xmark.octagon.fill", tint: .red)
+        } else if let applyNotice {
+            banner(applyNotice, systemImage: "exclamationmark.triangle.fill", tint: .orange)
         } else if applied {
             banner("Applied — definition saved.", systemImage: "checkmark.seal.fill", tint: .green)
         } else if isDirty {
@@ -355,19 +367,25 @@ struct PostgresRoutineEditorView: View {
 
     // MARK: - Load / apply
 
-    private func load(initial: Bool) async {
+    /// Bump the generation and load — the entry point for tab-switch and
+    /// manual refresh. The bump invalidates any in-flight apply/load from a
+    /// previous identity.
+    private func reload() async {
+        generation += 1
+        await load(gen: generation, initial: true)
+    }
+
+    /// Fetch the live definition. `gen` is the generation this load belongs to;
+    /// results are discarded if a newer generation began while awaiting, so a
+    /// slow fetch never overwrites a newer routine's buffer.
+    private func load(gen: Int, initial: Bool) async {
         guard let connectionId else {
             phase = .error("Not connected.")
             return
         }
         if initial { phase = .loading }
         let sessionId = "routine-editor-\(UUID().uuidString)"
-        defer {
-            Task {
-                await BridgeManager.shared.pgReleaseSession(
-                    connectionId: connectionId, sessionId: sessionId)
-            }
-        }
+        let outcome: Result<FfiPgExecutionResult, Error>
         do {
             let result = try await BridgeManager.shared.pgExecute(
                 connectionId: connectionId,
@@ -375,6 +393,17 @@ struct PostgresRoutineEditorView: View {
                 sql: PostgresNodeDDL.routineQuery(schema: schema, name: name),
                 pageSize: 200
             )
+            outcome = .success(result)
+        } catch {
+            outcome = .failure(error)
+        }
+        // Structured release — awaited on every path (no fire-and-forget Task),
+        // so rapid tab switching can't pile up leased sessions.
+        await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
+        guard gen == generation else { return }
+
+        switch outcome {
+        case .success(let result):
             let cells = result.rows.map(\.cells)
             let ddl = PostgresNodeDDL.renderRoutineDDL(
                 rows: cells, schema: schema, name: name, signature: signature)
@@ -388,7 +417,7 @@ struct PostgresRoutineEditorView: View {
             errorOffset = nil
             applyError = nil
             phase = .ready
-        } catch {
+        case .failure(let error):
             let message = (error as? PostgresBridgeError)?.errorDescription
                 ?? error.localizedDescription
             if initial {
@@ -406,17 +435,28 @@ struct PostgresRoutineEditorView: View {
         }
         let sql = editorText
         guard !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        // CREATE OR REPLACE only replaces a routine with the SAME name + argument
+        // types. If the user changed the header, applying would silently create a
+        // NEW routine (or rename), leaving the bound one untouched — and the
+        // post-apply reload (keyed on the original name/signature) would mislead.
+        // Detect that and require explicit confirmation.
+        let editedHeader = headerIdentity(of: sql)
+        let baseHeader = headerIdentity(of: loadedText)
+        let identityChanged = editedHeader != nil && baseHeader != nil && editedHeader != baseHeader
+        if identityChanged, !confirmIdentityChange(from: baseHeader!, to: editedHeader!) {
+            return
+        }
+
+        let gen = generation
         isApplying = true
         applyError = nil
+        applyNotice = nil
         errorOffset = nil
         applied = false
+
         let sessionId = "routine-editor-apply-\(UUID().uuidString)"
-        defer {
-            Task {
-                await BridgeManager.shared.pgReleaseSession(
-                    connectionId: connectionId, sessionId: sessionId)
-            }
-        }
+        let outcome: Result<Void, Error>
         do {
             _ = try await BridgeManager.shared.pgExecute(
                 connectionId: connectionId,
@@ -424,27 +464,52 @@ struct PostgresRoutineEditorView: View {
                 sql: sql,
                 pageSize: 1
             )
-            // Refresh the schema tree so the sidebar reflects any rename/signature
-            // change, then re-fetch the live definition (never trust a cache).
+            outcome = .success(())
+        } catch {
+            outcome = .failure(error)
+        }
+        await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
+        // The apply operation is finished regardless of whether the view is
+        // still bound to this routine — always clear the in-flight flag so a
+        // tab switch mid-apply can't leave the button stuck spinning.
+        isApplying = false
+        guard gen == generation else { return }
+
+        switch outcome {
+        case .success:
+            // Refresh the sidebar so a new/renamed routine appears.
             if let database {
                 await schemaStore?.loadSchemaContents(database: database, schema: schema)
             }
-            await load(initial: false)
-            isApplying = false
-            applied = true
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            applied = false
-        } catch let err as PostgresBridgeError {
-            applyError = err.errorDescription ?? "Apply failed."
-            // Server position is 1-based into the submitted statement; we submit
-            // the editor text verbatim, so it maps directly.
-            if let pos = err.serverError?.position, pos >= 1 {
-                errorOffset = Int(pos) - 1
+            guard gen == generation else { return }
+            if identityChanged {
+                // We can't reload by the original (name, signature) — it no
+                // longer matches what was applied. Mark the buffer clean and
+                // tell the user to reopen the new routine.
+                loadedText = editorText
+                applyNotice = "Statement ran. You changed the routine's name or arguments, "
+                    + "so this created a new (or renamed) routine — the original "
+                    + "\(baseHeader ?? "definition") is unchanged. Reopen the new routine from the sidebar to edit it."
+            } else {
+                // Re-fetch the server-normalized definition (never trust a cache).
+                await load(gen: gen, initial: false)
+                guard gen == generation else { return }
+                applied = true
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard gen == generation else { return }
+                applied = false
             }
-            isApplying = false
-        } catch {
-            applyError = error.localizedDescription
-            isApplying = false
+        case .failure(let error):
+            if let err = error as? PostgresBridgeError {
+                applyError = err.errorDescription ?? "Apply failed."
+                // Server position is 1-based into the submitted statement; we
+                // submit the editor text verbatim, so it maps directly.
+                if let pos = err.serverError?.position, pos >= 1 {
+                    errorOffset = Int(pos) - 1
+                }
+            } else {
+                applyError = error.localizedDescription
+            }
         }
     }
 
@@ -452,7 +517,71 @@ struct PostgresRoutineEditorView: View {
         editorText = loadedText
         errorOffset = nil
         applyError = nil
+        applyNotice = nil
         applied = false
+    }
+
+    // MARK: - Header identity
+
+    private func headerIdentity(of ddl: String) -> String? {
+        PostgresRoutineHeader.identity(of: ddl)
+    }
+
+    private func confirmIdentityChange(from base: String, to edited: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Create a new routine instead of replacing this one?"
+        alert.informativeText =
+            "CREATE OR REPLACE only replaces a routine with the same name and argument types. "
+            + "You changed the header from \(base) to \(edited), so running this creates a NEW "
+            + "routine and leaves the original unchanged.\n\nTo rename or change arguments in place, "
+            + "drop the original afterward."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Create New Routine")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+}
+
+// =============================================================================
+// PostgresRoutineHeader — pure parse of a routine's CREATE header into the
+// `name(args)` identity that CREATE OR REPLACE keys on, so the editor can warn
+// when an edit would create a new overload / rename rather than replace in
+// place. Extracted from the view to be unit-testable.
+// =============================================================================
+
+enum PostgresRoutineHeader {
+    /// Normalized `name(args)` of a routine's CREATE header, or `nil` when the
+    /// text isn't a parseable `CREATE [OR REPLACE] FUNCTION|PROCEDURE` (e.g. an
+    /// aggregate or C-stub) — in which case the caller skips the change check.
+    static func identity(of ddl: String) -> String? {
+        let pattern = "(?is)\\bcreate\\b\\s+(?:or\\s+replace\\s+)?(?:function|procedure)\\s+(.+?)\\s*\\("
+        guard let re = try? NSRegularExpression(pattern: pattern),
+              let match = re.firstMatch(in: ddl, range: NSRange(ddl.startIndex..., in: ddl)),
+              let nameRange = Range(match.range(at: 1), in: ddl),
+              let fullRange = Range(match.range, in: ddl)
+        else { return nil }
+        let name = ddl[nameRange].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // Balance-scan the argument list from the '(' the regex stopped at, so a
+        // parenthesized default like `DEFAULT (a + b)` inside the args doesn't
+        // end the list early.
+        let openParen = ddl.index(before: fullRange.upperBound)
+        var depth = 0
+        var args = ""
+        var i = openParen
+        while i < ddl.endIndex {
+            let ch = ddl[i]
+            if ch == "(" {
+                depth += 1
+                if depth == 1 { i = ddl.index(after: i); continue }
+            } else if ch == ")" {
+                depth -= 1
+                if depth == 0 { break }
+            }
+            if depth >= 1 { args.append(ch) }
+            i = ddl.index(after: i)
+        }
+        let normArgs = args.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").lowercased()
+        return "\(name)(\(normArgs))"
     }
 }
 #endif
