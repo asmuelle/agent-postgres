@@ -374,11 +374,11 @@ struct PostgresSafeApplyView: View {
             return .noDependents
         case .failure(let error):
             let se = (error as? PostgresBridgeError)?.serverError
-            // SQLSTATE 2BP01 = dependent_objects_still_exist → DETAIL lists them.
+            // Only SQLSTATE 2BP01 (dependent_objects_still_exist) means the DROP
+            // was blocked BY dependents; its DETAIL enumerates them. Any other
+            // failure (permissions, network, not-found) is not a dependency list
+            // and must not be shown as one.
             if se?.sqlstate == "2BP01", let detail = se?.detail, !detail.isEmpty {
-                return .dependents(detail)
-            }
-            if let detail = se?.detail, !detail.isEmpty {
                 return .dependents(detail)
             }
             return .failed((error as? PostgresBridgeError)?.errorDescription ?? error.localizedDescription)
