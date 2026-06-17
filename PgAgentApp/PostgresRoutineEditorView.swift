@@ -130,6 +130,8 @@ struct PostgresRoutineEditorView: View {
     /// discards its results once a newer generation has begun — so a slow apply
     /// can't write the old routine's text (or flash success) onto a new tab.
     @State private var generation = 0
+    /// Presents the typed parameter runner (Slice 2).
+    @State private var showRunner = false
 
     private var schemaStore: PgSchemaStore? {
         PostgresConnectionManager.shared.schemaStores[profileId]
@@ -155,6 +157,15 @@ struct PostgresRoutineEditorView: View {
         .background(MidnightMacDesign.ColorToken.windowBackground)
         .task(id: routineKey) {
             await reload()
+        }
+        .sheet(isPresented: $showRunner) {
+            PostgresRoutineRunnerView(
+                connectionId: connectionId,
+                profileId: profileId,
+                schema: schema,
+                name: name,
+                signature: signature
+            )
         }
     }
 
@@ -192,6 +203,14 @@ struct PostgresRoutineEditorView: View {
             }
 
             Spacer()
+
+            Button {
+                showRunner = true
+            } label: {
+                Label("Run…", systemImage: "play.fill")
+            }
+            .disabled(connectionId == nil)
+            .help("Call this routine with typed parameters")
 
             Picker("", selection: $selectedTab) {
                 ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
