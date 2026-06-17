@@ -132,6 +132,9 @@ struct PostgresRoutineEditorView: View {
     @State private var generation = 0
     /// Presents the typed parameter runner (Slice 2).
     @State private var showRunner = false
+    /// Bumped after a successful Apply so the plpgsql_check panel re-runs
+    /// against the freshly-saved definition.
+    @State private var checkRefreshToken = 0
 
     private var schemaStore: PgSchemaStore? {
         PostgresConnectionManager.shared.schemaStores[profileId]
@@ -334,6 +337,29 @@ struct PostgresRoutineEditorView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             statusStrip
+
+            // plpgsql_check diagnostics — only for PL/pgSQL routines (the
+            // panel itself handles the extension-missing case gracefully).
+            if meta?.language == "plpgsql" {
+                PostgresRoutineCheckView(
+                    connectionId: connectionId,
+                    schema: schema,
+                    name: name,
+                    signature: signature,
+                    refreshToken: checkRefreshToken,
+                    onJump: { line in jumpToBodyLine(line) }
+                )
+            }
+        }
+    }
+
+    /// Map a plpgsql_check body line onto the editor and highlight it (reusing
+    /// the error-underline + scroll path). Best-effort against the current
+    /// buffer; exact when not dirty (the check runs on the committed body).
+    private func jumpToBodyLine(_ line: Int) {
+        if let offset = PostgresRoutineCheck.bodyLineToCharOffset(
+            editorText: editorText, bodyLine: line) {
+            errorOffset = offset
         }
     }
 
@@ -498,6 +524,8 @@ struct PostgresRoutineEditorView: View {
                 // Re-fetch the server-normalized definition (never trust a cache).
                 await load(gen: gen, initial: false)
                 guard gen == generation else { return }
+                // Re-run plpgsql_check against the freshly-saved body.
+                checkRefreshToken += 1
                 applied = true
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard gen == generation else { return }
