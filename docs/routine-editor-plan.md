@@ -1,4 +1,4 @@
-# Routine Editor — Plan to Beat IntelliJ DataGrip
+# Routine Editor — 
 
 Status: living plan. Slices 1-4 shipped (PRs #21-#24). Slice 5 in progress (see "Build sequence").
 Last updated: 2026-06-17.
