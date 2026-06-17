@@ -115,7 +115,6 @@ struct PostgresRoutineEditorView: View {
     /// Catalog baseline (last loaded/applied). Drives dirty detection + Revert.
     @State private var loadedText: String = ""
     @State private var meta: Meta?
-    @State private var isApplying = false
     @State private var applyError: String?
     /// Non-error notice shown after an apply that ran but did NOT replace the
     /// bound routine in place (the user changed its name/arguments, creating a
@@ -154,7 +153,7 @@ struct PostgresRoutineEditorView: View {
     private var isDirty: Bool { editorText != loadedText }
 
     private var canApply: Bool {
-        connectionId != nil && !isApplying && isDirty
+        connectionId != nil && isDirty
             && !editorText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -248,7 +247,7 @@ struct PostgresRoutineEditorView: View {
 
             if selectedTab == .source {
                 Button("Revert") { revert() }
-                    .disabled(!isDirty || isApplying)
+                    .disabled(!isDirty)
                     .help("Discard changes and restore the live definition")
 
                 Button {
@@ -268,7 +267,6 @@ struct PostgresRoutineEditorView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain)
-            .disabled(isApplying)
             .help("Reload the live definition from the database")
         }
         .padding(.horizontal, 16)
@@ -350,7 +348,7 @@ struct PostgresRoutineEditorView: View {
                         applied = false
                     }
                 ),
-                isEditable: !isApplying,
+                isEditable: true,
                 errorCharOffset: errorOffset,
                 identifiers: { schemaStore?.completionIdentifiers ?? [] }
             )
