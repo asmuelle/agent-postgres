@@ -45,7 +45,7 @@ struct PostgresRoutineEditorView: View {
 
     private enum Tab: String, CaseIterable, Identifiable {
         case source = "Source"
-        case properties = "Properties"
+        case attributes = "Attributes"
         var id: String { rawValue }
     }
 
@@ -286,7 +286,18 @@ struct PostgresRoutineEditorView: View {
             if selectedTab == .source {
                 sourceEditor
             } else {
-                propertiesView
+                PostgresRoutineAttributesView(
+                    connectionId: connectionId,
+                    profileId: profileId,
+                    schema: schema,
+                    name: name,
+                    signature: signature,
+                    onApplied: {
+                        // An ALTER changed the catalog definition — refresh the
+                        // Source buffer so it shows the server-normalized text.
+                        Task { await reload() }
+                    }
+                )
             }
         }
     }
@@ -355,32 +366,6 @@ struct PostgresRoutineEditorView: View {
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .overlay(alignment: .top) {
             Rectangle().fill(Color(NSColor.separatorColor)).frame(height: 1)
-        }
-    }
-
-    @ViewBuilder
-    private var propertiesView: some View {
-        ScrollView {
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 220, maximum: 360), spacing: 12)],
-                spacing: 12
-            ) {
-                PropertyCard(label: "Kind", value: meta?.kind.label ?? "Routine")
-                PropertyCard(
-                    label: "Language",
-                    value: (meta?.language ?? "—").uppercased(),
-                    statusPill: "ACTIVE",
-                    pillColor: .purple
-                )
-                if let returns = meta?.returns, !returns.isEmpty {
-                    PropertyCard(label: "Returns", value: returns)
-                }
-                PropertyCard(
-                    label: "Arguments",
-                    value: (meta?.fullArgs).flatMap { $0.isEmpty ? nil : $0 } ?? "(none)"
-                )
-            }
-            .padding(16)
         }
     }
 
