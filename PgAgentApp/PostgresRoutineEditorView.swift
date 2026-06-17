@@ -115,7 +115,6 @@ struct PostgresRoutineEditorView: View {
     /// Catalog baseline (last loaded/applied). Drives dirty detection + Revert.
     @State private var loadedText: String = ""
     @State private var meta: Meta?
-    @State private var isApplying = false
     @State private var applyError: String?
     /// Non-error notice shown after an apply that ran but did NOT replace the
     /// bound routine in place (the user changed its name/arguments, creating a
@@ -132,9 +131,16 @@ struct PostgresRoutineEditorView: View {
     @State private var generation = 0
     /// Presents the typed parameter runner (Slice 2).
     @State private var showRunner = false
+    /// Presents the Safe-Apply review sheet (Slice 5).
+    @State private var showSafeApply = false
     /// Bumped after a successful Apply so the plpgsql_check panel re-runs
     /// against the freshly-saved definition.
     @State private var checkRefreshToken = 0
+
+    private var isProcedure: Bool {
+        if case .procedure = meta?.kind { return true }
+        return false
+    }
 
     private var schemaStore: PgSchemaStore? {
         PostgresConnectionManager.shared.schemaStores[profileId]
@@ -147,7 +153,7 @@ struct PostgresRoutineEditorView: View {
     private var isDirty: Bool { editorText != loadedText }
 
     private var canApply: Bool {
-        connectionId != nil && !isApplying && isDirty
+        connectionId != nil && isDirty
             && !editorText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -168,6 +174,23 @@ struct PostgresRoutineEditorView: View {
                 schema: schema,
                 name: name,
                 signature: signature
+            )
+        }
+        .sheet(isPresented: $showSafeApply) {
+            PostgresSafeApplyView(
+                connectionId: connectionId,
+                schema: schema,
+                name: name,
+                signature: signature,
+                isProcedure: isProcedure,
+                createText: editorText,
+                loadedText: loadedText,
+                onCommitted: { identityChanged in
+                    Task { await afterApplied(identityChanged: identityChanged) }
+                },
+                onError: { position in
+                    if let position, position >= 1 { errorOffset = Int(position) - 1 }
+                }
             )
         }
     }
@@ -224,22 +247,18 @@ struct PostgresRoutineEditorView: View {
 
             if selectedTab == .source {
                 Button("Revert") { revert() }
-                    .disabled(!isDirty || isApplying)
+                    .disabled(!isDirty)
                     .help("Discard changes and restore the live definition")
 
                 Button {
-                    Task { await apply() }
+                    showSafeApply = true
                 } label: {
-                    if isApplying {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Label("Apply", systemImage: "checkmark.circle")
-                    }
+                    Label("Apply…", systemImage: "checkmark.circle")
                 }
                 .keyboardShortcut("s", modifiers: .command)
                 .buttonStyle(.borderedProminent)
                 .disabled(!canApply)
-                .help("Run CREATE OR REPLACE for this routine (⌘S)")
+                .help("Review the change in a transaction, then commit (⌘S)")
             }
 
             Button {
@@ -248,7 +267,6 @@ struct PostgresRoutineEditorView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain)
-            .disabled(isApplying)
             .help("Reload the live definition from the database")
         }
         .padding(.horizontal, 16)
@@ -330,7 +348,7 @@ struct PostgresRoutineEditorView: View {
                         applied = false
                     }
                 ),
-                isEditable: !isApplying,
+                isEditable: true,
                 errorCharOffset: errorOffset,
                 identifiers: { schemaStore?.completionIdentifiers ?? [] }
             )
@@ -458,90 +476,31 @@ struct PostgresRoutineEditorView: View {
         }
     }
 
-    private func apply() async {
-        guard let connectionId else {
-            applyError = "Not connected."
-            return
+    /// Post-commit steps after the Safe-Apply sheet commits. The sheet already
+    /// ran the change transactionally; here we refresh the sidebar and editor.
+    private func afterApplied(identityChanged: Bool) async {
+        if let database {
+            await schemaStore?.loadSchemaContents(database: database, schema: schema)
         }
-        let sql = editorText
-        guard !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-
-        // CREATE OR REPLACE only replaces a routine with the SAME name + argument
-        // types. If the user changed the header, applying would silently create a
-        // NEW routine (or rename), leaving the bound one untouched — and the
-        // post-apply reload (keyed on the original name/signature) would mislead.
-        // Detect that and require explicit confirmation.
-        let editedHeader = headerIdentity(of: sql)
-        let baseHeader = headerIdentity(of: loadedText)
-        let identityChanged = editedHeader != nil && baseHeader != nil && editedHeader != baseHeader
-        if identityChanged, !confirmIdentityChange(from: baseHeader!, to: editedHeader!) {
-            return
-        }
-
-        let gen = generation
-        isApplying = true
-        applyError = nil
-        applyNotice = nil
-        errorOffset = nil
-        applied = false
-
-        let sessionId = "routine-editor-apply-\(UUID().uuidString)"
-        let outcome: Result<Void, Error>
-        do {
-            _ = try await BridgeManager.shared.pgExecute(
-                connectionId: connectionId,
-                sessionId: sessionId,
-                sql: sql,
-                pageSize: 1
-            )
-            outcome = .success(())
-        } catch {
-            outcome = .failure(error)
-        }
-        await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
-        // The apply operation is finished regardless of whether the view is
-        // still bound to this routine — always clear the in-flight flag so a
-        // tab switch mid-apply can't leave the button stuck spinning.
-        isApplying = false
-        guard gen == generation else { return }
-
-        switch outcome {
-        case .success:
-            // Refresh the sidebar so a new/renamed routine appears.
-            if let database {
-                await schemaStore?.loadSchemaContents(database: database, schema: schema)
-            }
+        if identityChanged {
+            // The original (name, signature) no longer matches what was applied
+            // — reloading by it would mislead. Mark clean and point the user at
+            // the new routine.
+            loadedText = editorText
+            applyNotice = "Created a new (or renamed) routine — the original is unchanged. "
+                + "Reopen it from the sidebar to edit it."
+        } else {
+            // Re-fetch the server-normalized definition (never trust a cache).
+            generation += 1
+            let gen = generation
+            await load(gen: gen, initial: false)
             guard gen == generation else { return }
-            if identityChanged {
-                // We can't reload by the original (name, signature) — it no
-                // longer matches what was applied. Mark the buffer clean and
-                // tell the user to reopen the new routine.
-                loadedText = editorText
-                applyNotice = "Statement ran. You changed the routine's name or arguments, "
-                    + "so this created a new (or renamed) routine — the original "
-                    + "\(baseHeader ?? "definition") is unchanged. Reopen the new routine from the sidebar to edit it."
-            } else {
-                // Re-fetch the server-normalized definition (never trust a cache).
-                await load(gen: gen, initial: false)
-                guard gen == generation else { return }
-                // Re-run plpgsql_check against the freshly-saved body.
-                checkRefreshToken += 1
-                applied = true
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard gen == generation else { return }
-                applied = false
-            }
-        case .failure(let error):
-            if let err = error as? PostgresBridgeError {
-                applyError = err.errorDescription ?? "Apply failed."
-                // Server position is 1-based into the submitted statement; we
-                // submit the editor text verbatim, so it maps directly.
-                if let pos = err.serverError?.position, pos >= 1 {
-                    errorOffset = Int(pos) - 1
-                }
-            } else {
-                applyError = error.localizedDescription
-            }
+            // Re-run plpgsql_check against the freshly-saved body.
+            checkRefreshToken += 1
+            applied = true
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard gen == generation else { return }
+            applied = false
         }
     }
 
@@ -551,26 +510,6 @@ struct PostgresRoutineEditorView: View {
         applyError = nil
         applyNotice = nil
         applied = false
-    }
-
-    // MARK: - Header identity
-
-    private func headerIdentity(of ddl: String) -> String? {
-        PostgresRoutineHeader.identity(of: ddl)
-    }
-
-    private func confirmIdentityChange(from base: String, to edited: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "Create a new routine instead of replacing this one?"
-        alert.informativeText =
-            "CREATE OR REPLACE only replaces a routine with the same name and argument types. "
-            + "You changed the header from \(base) to \(edited), so running this creates a NEW "
-            + "routine and leaves the original unchanged.\n\nTo rename or change arguments in place, "
-            + "drop the original afterward."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Create New Routine")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 
