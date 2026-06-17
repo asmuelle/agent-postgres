@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  :root {
+    --grad: linear-gradient(100deg, #4c8dff 0%, #2ad4e6 48%, #34d39e 100%);
+    --sans: system-ui, -apple-system, "SF Pro Display", "Segoe UI", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --line: rgba(150,180,220,0.14);
+  }
+  .card {
+    position: relative; width: 1280px; height: 640px;
+    background: #070a10; color: #e9eef7; font-family: var(--sans);
+    overflow: hidden;
+  }
+  .mesh {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 56px 56px;
+    -webkit-mask-image: radial-gradient(circle at 76% 50%, black, transparent 78%);
+    mask-image: radial-gradient(circle at 76% 50%, black, transparent 78%);
+    opacity: 0.55;
+  }
+  .glow1 { position:absolute; width:760px; height:760px; right:-120px; top:-220px; border-radius:50%;
+    background: radial-gradient(circle, rgba(42,212,230,0.30), transparent 62%); }
+  .glow2 { position:absolute; width:680px; height:680px; left:-200px; bottom:-260px; border-radius:50%;
+    background: radial-gradient(circle, rgba(76,141,255,0.22), transparent 62%); }
+  .topbar { position:absolute; top:48px; left:64px; display:flex; align-items:center; gap:16px; }
+  .topbar img { width:60px; height:60px; border-radius:15px; box-shadow: 0 0 34px rgba(42,212,230,0.5); }
+  .topbar b { font-size:30px; font-weight:680; letter-spacing:-0.02em; }
+  .topbar .os { font-family: var(--mono); font-size:15px; color:#34d39e; border:1px solid var(--line);
+    padding:5px 13px; border-radius:999px; margin-left:6px; }
+
+  .content { position:absolute; left:64px; top:208px; width:760px; }
+  .eyebrow { font-family: var(--mono); font-size:17px; letter-spacing:0.06em; color:#2ad4e6; text-transform:uppercase; margin-bottom:18px; }
+  h1 { font-size:74px; line-height:1.0; letter-spacing:-0.03em; font-weight:730; }
+  h1 .g { background: var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sub { margin-top:24px; font-size:24px; line-height:1.4; color:#9aa6bb; max-width:620px; }
+
+  .chips { position:absolute; left:64px; bottom:54px; display:flex; gap:14px; }
+  .chip { font-family: var(--mono); font-size:16px; color:#cdd6e6; border:1px solid var(--line);
+    padding:9px 16px; border-radius:999px; background: rgba(255,255,255,0.03); display:flex; align-items:center; gap:9px; }
+  .chip::before { content:""; width:8px; height:8px; border-radius:50%; background: var(--grad); }
+
+  .hero-icon { position:absolute; right:96px; top:50%; transform: translateY(-50%); }
+  .hero-icon .halo { position:absolute; inset:-70px; border-radius:50%;
+    background: radial-gradient(circle, rgba(42,212,230,0.35), transparent 66%); }
+  .hero-icon img { position:relative; width:340px; height:340px; border-radius:64px;
+    box-shadow: 0 50px 90px -30px rgba(0,0,0,0.85), 0 0 70px rgba(42,212,230,0.35); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="mesh"></div>
+  <div class="glow1"></div>
+  <div class="glow2"></div>
+
+  <div class="topbar">
+    <img src="icon.png" alt="" />
+    <b>pgAgent</b>
+    <span class="os">macOS · iPadOS</span>
+  </div>
+
+  <div class="content">
+    <div class="eyebrow">Native · SwiftUI + Rust</div>
+    <h1>PostgreSQL &amp; SSH,<br /><span class="g">engineered like<br />a Mac app.</span></h1>
+    <p class="sub">A routine editor that out-engineers the big IDEs — and a DDL pipeline that refuses to break your schema.</p>
+  </div>
+
+  <div class="chips">
+    <span class="chip">Transactional DDL</span>
+    <span class="chip">On-device AI</span>
+    <span class="chip">ERD &amp; Parquet export</span>
+  </div>
+
+  <div class="hero-icon">
+    <div class="halo"></div>
+    <img src="icon.png" alt="" />
+  </div>
+</div>
+</body>
+</html>
