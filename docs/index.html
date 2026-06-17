@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pgAgent — a native macOS &amp; iPadOS workspace for PostgreSQL and SSH</title>
+<meta name="description" content="pgAgent is a native Mac &amp; iPad client for PostgreSQL and SSH — a routine editor that out-engineers the big IDEs, transactional-safe DDL, an ERD, dual-pane SFTP, and on-device AI. SwiftUI + AppKit over a Rust core via UniFFI." />
+<meta name="author" content="Andreas Müller" />
+<link rel="icon" href="icon.png" />
+<link rel="apple-touch-icon" href="icon.png" />
+<meta name="theme-color" content="#070a10" />
+
+<!-- Open Graph / Twitter -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="pgAgent" />
+<meta property="og:title" content="pgAgent — native PostgreSQL &amp; SSH for Mac and iPad" />
+<meta property="og:description" content="A routine editor that out-engineers the big IDEs, transactional-safe DDL, an ERD, dual-pane SFTP, and on-device AI — SwiftUI + AppKit over a Rust core." />
+<meta property="og:url" content="https://asmuelle.github.io/agent-postgres/" />
+<meta property="og:image" content="https://asmuelle.github.io/agent-postgres/social.png" />
+<meta property="og:image:width" content="1280" />
+<meta property="og:image:height" content="640" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="pgAgent — native PostgreSQL &amp; SSH for Mac and iPad" />
+<meta name="twitter:description" content="A routine editor that out-engineers the big IDEs, transactional-safe DDL, an ERD, dual-pane SFTP, and on-device AI." />
+<meta name="twitter:image" content="https://asmuelle.github.io/agent-postgres/social.png" />
+
+<style>
+  :root {
+    --bg: #070a10;
+    --bg-2: #0a0f18;
+    --panel: #0e1420;
+    --line: rgba(150, 180, 220, 0.12);
+    --line-strong: rgba(150, 180, 220, 0.22);
+    --text: #e9eef7;
+    --muted: #9aa6bb;
+    --dim: #6b768c;
+
+    --blue: #4c8dff;
+    --cyan: #2ad4e6;
+    --teal: #34d39e;
+    --accent: var(--cyan);
+    --grad: linear-gradient(100deg, #4c8dff 0%, #2ad4e6 48%, #34d39e 100%);
+    --glow: 0 0 40px rgba(42, 212, 230, 0.35);
+
+    --sans: system-ui, -apple-system, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+    --r-lg: 18px;
+    --r-md: 13px;
+    --r-sm: 8px;
+    --maxw: 1140px;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+  html, body { max-width: 100%; overflow-x: clip; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Atmosphere: radial glow + faint triangulated mesh echoing the icon. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background:
+      radial-gradient(900px 600px at 78% -8%, rgba(42, 212, 230, 0.14), transparent 60%),
+      radial-gradient(800px 620px at 10% 4%, rgba(76, 141, 255, 0.12), transparent 58%),
+      radial-gradient(700px 700px at 60% 110%, rgba(52, 211, 158, 0.08), transparent 60%);
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    opacity: 0.5;
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 64px 64px;
+    -webkit-mask-image: radial-gradient(circle at 50% 16%, black, transparent 72%);
+    mask-image: radial-gradient(circle at 50% 16%, black, transparent 72%);
+  }
+
+  a { color: inherit; text-decoration: none; }
+  .skip { position: absolute; left: -999px; }
+  .skip:focus { left: 16px; top: 16px; background: var(--panel); padding: 10px 14px; border-radius: 8px; z-index: 99; }
+
+  .wrap { width: 100%; max-width: var(--maxw); margin-inline: auto; padding-inline: clamp(18px, 4vw, 34px); }
+
+  /* ---------- nav ---------- */
+  header {
+    position: sticky; top: 0; z-index: 40;
+    backdrop-filter: blur(14px) saturate(140%);
+    background: rgba(7, 10, 16, 0.62);
+    border-bottom: 1px solid var(--line);
+  }
+  nav { display: flex; align-items: center; gap: 18px; padding: 14px 0; }
+  .brand { display: flex; align-items: center; gap: 11px; font-weight: 680; letter-spacing: -0.01em; }
+  .brand img { width: 30px; height: 30px; border-radius: 8px; box-shadow: 0 0 18px rgba(42,212,230,0.4); }
+  .brand b { font-size: 1.06rem; }
+  nav .spacer { flex: 1; }
+  .navlink { color: var(--muted); font-size: 0.92rem; transition: color 0.2s; }
+  .navlink:hover { color: var(--text); }
+  @media (max-width: 720px) { .navlink.hide-sm { display: none; } }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--sans); font-size: 0.92rem; font-weight: 600;
+    padding: 9px 16px; border-radius: 999px; border: 1px solid var(--line-strong);
+    color: var(--text); background: rgba(255,255,255,0.03);
+    transition: transform 0.18s var(--ease), border-color 0.2s, background 0.2s, box-shadow 0.2s;
+    cursor: pointer;
+  }
+  .btn:hover { transform: translateY(-1px); border-color: var(--accent); box-shadow: var(--glow); }
+  .btn.primary { background: var(--grad); color: #04121a; border: none; font-weight: 700; }
+  .btn.primary:hover { box-shadow: 0 8px 30px rgba(42,212,230,0.4); }
+
+  /* ---------- hero ---------- */
+  .hero { padding: clamp(48px, 7vw, 104px) 0 clamp(40px, 5vw, 72px); }
+  .hero-grid { display: grid; grid-template-columns: 1.05fr 1fr; gap: clamp(28px, 4vw, 56px); align-items: center; }
+  /* Let tracks shrink below the mock's (pre-formatted) min-content width,
+     otherwise the wide code block blows the grid past the viewport. */
+  .hero-grid > * { min-width: 0; }
+  @media (max-width: 920px) { .hero-grid { grid-template-columns: 1fr; } }
+
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.02em;
+    color: var(--cyan); border: 1px solid var(--line-strong);
+    padding: 6px 12px; border-radius: 999px; background: rgba(42,212,230,0.06);
+    margin-bottom: 22px;
+  }
+  .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 10px var(--teal); }
+
+  h1 {
+    font-size: clamp(2.05rem, 1rem + 5vw, 4.6rem);
+    line-height: 1.03; letter-spacing: -0.03em; font-weight: 720;
+    margin: 0 0 18px; overflow-wrap: break-word;
+  }
+  @media (max-width: 460px) { h1 br { display: none; } }
+  h1 .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { font-size: clamp(1.05rem, 0.96rem + 0.5vw, 1.28rem); color: var(--muted); max-width: 36ch; margin: 0 0 28px; }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .built { margin-top: 22px; font-family: var(--mono); font-size: 0.8rem; color: var(--dim); }
+  .built b { color: var(--muted); font-weight: 500; }
+
+  /* ---------- app window mock ---------- */
+  .mock {
+    border-radius: var(--r-lg);
+    background: linear-gradient(180deg, #0d1421, #0a0f18);
+    border: 1px solid var(--line-strong);
+    box-shadow: 0 40px 80px -30px rgba(0,0,0,0.8), 0 0 0 1px rgba(0,0,0,0.4), var(--glow);
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+  .titlebar { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,0.02); }
+  .lights { display: flex; gap: 7px; }
+  .lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .lights i:nth-child(1){ background:#ff5f57; } .lights i:nth-child(2){ background:#febc2e; } .lights i:nth-child(3){ background:#28c840; }
+  .titlebar .fn { color: var(--muted); margin-left: 6px; }
+  .titlebar .fn b { color: var(--text); font-weight: 600; }
+  .titlebar .pill { margin-left: auto; font-size: 10.5px; color: var(--teal); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; }
+
+  .tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); }
+  .tabs span { font-size: 11px; color: var(--dim); padding: 6px 12px; border-radius: 7px 7px 0 0; }
+  .tabs span.on { color: var(--text); background: rgba(255,255,255,0.04); box-shadow: inset 0 -2px 0 var(--cyan); }
+
+  .code { padding: 16px 18px; line-height: 1.65; white-space: pre; overflow: hidden; }
+  .code .kw { color: #c792ff; } .code .fn2 { color: #82d0ff; } .code .str { color: #8ee6a0; }
+  .code .num { color: #ffb86b; } .code .cm { color: var(--dim); } .code .ty { color: #5fd0e6; }
+
+  .safebar { display: flex; align-items: center; gap: 9px; padding: 12px 16px; border-top: 1px solid var(--line); background: rgba(52,211,158,0.06); font-size: 11.5px; }
+  .safebar .ok { color: var(--teal); font-weight: 700; }
+  .safebar .muted { color: var(--muted); }
+  .safebar .commit { margin-left: auto; background: var(--grad); color:#04121a; font-weight:700; padding: 5px 13px; border-radius: 999px; font-family: var(--sans); }
+
+  /* ---------- marquee strip ---------- */
+  .strip { border-block: 1px solid var(--line); margin-top: clamp(28px,4vw,56px); }
+  .strip .row { display: flex; flex-wrap: wrap; gap: 10px 26px; padding: 18px 0; justify-content: center; }
+  .chip { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); display: inline-flex; align-items: center; gap: 8px; }
+  .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--grad); }
+
+  /* ---------- sections ---------- */
+  section { padding: clamp(56px, 7vw, 104px) 0; }
+  .kicker { font-family: var(--mono); font-size: 0.8rem; color: var(--cyan); letter-spacing: 0.04em; text-transform: uppercase; margin: 0 0 12px; }
+  h2 { font-size: clamp(1.8rem, 1.2rem + 2vw, 2.85rem); line-height: 1.08; letter-spacing: -0.025em; font-weight: 700; margin: 0 0 16px; }
+  .sub { color: var(--muted); max-width: 60ch; font-size: 1.05rem; }
+
+  /* feature: routine editor */
+  .feature { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(28px,4vw,60px); align-items: start; }
+  @media (max-width: 920px) { .feature { grid-template-columns: 1fr; } }
+  .speclist { list-style: none; margin: 26px 0 0; padding: 0; display: grid; gap: 2px; }
+  .speclist li { padding: 15px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: start; }
+  .speclist li:last-child { border-bottom: 1px solid var(--line); }
+  .speclist .ic { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: rgba(42,212,230,0.08); border: 1px solid var(--line); color: var(--cyan); font-family: var(--mono); font-weight: 700; font-size: 13px; }
+  .speclist strong { display: block; font-size: 1rem; letter-spacing: -0.01em; }
+  .speclist span { color: var(--muted); font-size: 0.92rem; }
+
+  /* bento */
+  .bento { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; }
+  .card {
+    border: 1px solid var(--line); border-radius: var(--r-md);
+    background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.01));
+    padding: 22px; position: relative; overflow: hidden;
+    transition: transform 0.22s var(--ease), border-color 0.22s, box-shadow 0.22s;
+  }
+  .card:hover { transform: translateY(-3px); border-color: var(--line-strong); box-shadow: 0 18px 40px -24px rgba(0,0,0,0.8); }
+  .card::after { content:""; position:absolute; inset:0 0 auto 0; height:1px; background: var(--grad); opacity: 0; transition: opacity .25s; }
+  .card:hover::after { opacity: .8; }
+  .card .glyph { font-family: var(--mono); font-size: 0.74rem; color: var(--cyan); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 12px; }
+  .card h3 { font-size: 1.18rem; letter-spacing: -0.015em; margin: 0 0 8px; }
+  .card p { color: var(--muted); font-size: 0.94rem; margin: 0; }
+  .col-3 { grid-column: span 3; } .col-2 { grid-column: span 2; } .col-4 { grid-column: span 4; }
+  @media (max-width: 920px) { .bento { grid-template-columns: repeat(2, 1fr); } .col-3,.col-2,.col-4 { grid-column: span 2; } }
+  @media (max-width: 560px) { .bento { grid-template-columns: 1fr; } .col-3,.col-2,.col-4 { grid-column: span 1; } }
+
+  /* architecture */
+  .arch { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 30px; }
+  @media (max-width: 760px) { .arch { grid-template-columns: 1fr 1fr; } }
+  .layer { border: 1px solid var(--line); border-radius: var(--r-md); padding: 18px; background: rgba(255,255,255,0.02); }
+  .layer .n { font-family: var(--mono); font-size: 0.72rem; color: var(--dim); }
+  .layer .t { font-weight: 650; margin: 6px 0 4px; letter-spacing: -0.01em; }
+  .layer .d { color: var(--muted); font-size: 0.86rem; }
+  .layer.hl { border-color: var(--line-strong); box-shadow: var(--glow); }
+  .layer.hl .t { background: var(--grad); -webkit-background-clip:text; background-clip:text; color: transparent; }
+
+  /* engineering notes */
+  .notes { display: grid; grid-template-columns: repeat(4,1fr); gap: 16px; margin-top: 28px; }
+  @media (max-width: 880px) { .notes { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 480px) { .notes { grid-template-columns: 1fr; } }
+  .note { padding: 20px; border: 1px solid var(--line); border-radius: var(--r-md); background: rgba(255,255,255,0.02); }
+  .note .big { font-size: 1.5rem; font-weight: 720; letter-spacing: -0.02em; background: var(--grad); -webkit-background-clip:text; background-clip:text; color: transparent; }
+  .note p { color: var(--muted); font-size: 0.9rem; margin: 6px 0 0; }
+
+  /* cta band */
+  .band { text-align: center; border: 1px solid var(--line-strong); border-radius: var(--r-lg); padding: clamp(40px,6vw,72px) 24px; background: radial-gradient(700px 300px at 50% 0%, rgba(42,212,230,0.12), transparent 70%), var(--panel); }
+  .band h2 { margin-bottom: 10px; }
+  .band .sub { margin: 0 auto 26px; }
+
+  footer { border-top: 1px solid var(--line); padding: 34px 0 56px; color: var(--dim); font-size: 0.88rem; }
+  .foot { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+  .foot .spacer { flex: 1; }
+  footer a { color: var(--muted); } footer a:hover { color: var(--text); }
+
+  /* reveal */
+  .reveal { opacity: 0; transform: translateY(18px); transition: opacity 0.7s var(--ease), transform 0.7s var(--ease); }
+  .reveal.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header>
+  <nav class="wrap" aria-label="Primary">
+    <a class="brand" href="#top" aria-label="pgAgent home">
+      <img src="icon.png" alt="" width="30" height="30" />
+      <b>pgAgent</b>
+    </a>
+    <span class="spacer"></span>
+    <a class="navlink hide-sm" href="#postgres">Postgres</a>
+    <a class="navlink hide-sm" href="#features">Features</a>
+    <a class="navlink hide-sm" href="#architecture">Architecture</a>
+    <a class="btn" href="https://github.com/asmuelle/agent-postgres" rel="noopener">GitHub ↗</a>
+  </nav>
+</header>
+
+<main id="main">
+  <a id="top"></a>
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <span class="eyebrow"><span class="dot"></span> Native macOS &amp; iPadOS · SwiftUI + Rust</span>
+        <h1>The database client that<br /><span class="grad">refuses to break things.</span></h1>
+        <p class="lede">pgAgent is a native Mac &amp; iPad workspace for PostgreSQL and SSH — with a routine editor that out-engineers the big IDEs, and a DDL pipeline that won't let an edit silently take down your schema.</p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/asmuelle/agent-postgres" rel="noopener">Explore the code ↗</a>
+          <a class="btn" href="#postgres">See what it does</a>
+        </div>
+        <p class="built">Built with <b>SwiftUI · AppKit · Rust</b> over <b>UniFFI</b> — one codebase, Mac &amp; iPad.</p>
+      </div>
+
+      <div class="mock reveal" aria-hidden="true">
+        <div class="titlebar">
+          <span class="lights"><i></i><i></i><i></i></span>
+          <span class="fn">ƒ <b>billing.recalc_invoice</b>(order_id integer)</span>
+          <span class="pill">PL/pgSQL</span>
+        </div>
+        <div class="tabs"><span class="on">Source</span><span>Attributes</span><span>Diagnostics</span></div>
+<div class="code"><span class="kw">CREATE OR REPLACE FUNCTION</span> billing.<span class="fn2">recalc_invoice</span>(order_id <span class="ty">integer</span>)
+  <span class="kw">RETURNS</span> <span class="ty">numeric</span>
+  <span class="kw">LANGUAGE</span> plpgsql
+  <span class="kw">SECURITY DEFINER</span> <span class="kw">SET</span> search_path = billing, pg_temp
+<span class="kw">AS</span> <span class="str">$$</span>
+<span class="kw">BEGIN</span>
+  <span class="kw">RETURN</span> (<span class="kw">SELECT</span> sum(qty * unit_price)
+          <span class="kw">FROM</span> billing.line_item
+         <span class="kw">WHERE</span> invoice_id = order_id);
+<span class="kw">END;</span>
+<span class="str">$$</span>;</div>
+        <div class="safebar">
+          <span class="ok">✓ Dry-run passed</span>
+          <span class="muted">in a transaction · 2 dependents preserved · grants intact</span>
+          <span class="commit">Commit</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="strip">
+      <div class="wrap row">
+        <span class="chip">Transactional DDL</span>
+        <span class="chip">On-device AI</span>
+        <span class="chip">CSV · JSONL · Parquet</span>
+        <span class="chip">SSH tunneling</span>
+        <span class="chip">Keychain-only secrets</span>
+        <span class="chip">Validated on PostgreSQL 18</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Crown jewel -->
+  <section id="postgres">
+    <div class="wrap feature">
+      <div class="reveal">
+        <p class="kicker">The routine editor</p>
+        <h2>Edit a function like you mean it.</h2>
+        <p class="sub">Most clients show you a function's source read-only and wish you luck. pgAgent makes routines a first-class, editable, <em>testable</em> object — and treats every change as a transaction you get to inspect before it lands.</p>
+      </div>
+      <div class="reveal">
+        <ul class="speclist">
+          <li><span class="ic">↺</span><div><strong>Edit &amp; replace, exact overload</strong><span>Loads the live <code>pg_get_functiondef</code> for the precise overload, edits in a real SQL editor, applies <code>CREATE OR REPLACE</code>.</span></div></li>
+          <li><span class="ic">▶</span><div><strong>Typed parameter runner</strong><span>Call it with a generated, type-aware form — <code>CALL</code> vs <code>SELECT&nbsp;*&nbsp;FROM</code>, named args, NULL/DEFAULT — and save fixtures to replay.</span></div></li>
+          <li><span class="ic">⚙</span><div><strong>Attributes as controls + security lens</strong><span>Volatility, parallelism, cost, <code>SET search_path</code> as real controls — and a lens that flags <code>SECURITY DEFINER</code> without a pinned path.</span></div></li>
+          <li><span class="ic">✓</span><div><strong>Inline plpgsql_check</strong><span>Catches the bugs <code>CREATE FUNCTION</code> accepts — bad column refs, type mismatches — and jumps to the offending line. Works on managed Postgres.</span></div></li>
+          <li><span class="ic">⛉</span><div><strong>Safe-Apply</strong><span>A transactional dry-run, the exact dependency blast-radius, and ACL/<code>search_path</code> preserved across a forced <code>DROP&nbsp;+&nbsp;CREATE</code> — then one explicit commit.</span></div></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Bento -->
+  <section id="features">
+    <div class="wrap">
+      <p class="kicker reveal">The whole workspace</p>
+      <h2 class="reveal">Depth where the work happens.</h2>
+      <p class="sub reveal">A multi-database explorer, a real query surface, a terminal, and file transfer — all native, all fast.</p>
+      <div class="bento" style="margin-top:34px">
+        <div class="card col-3 reveal"><div class="glyph">Explore</div><h3>Schema tree &amp; ERD</h3><p>Multi-database tree down to tables, views, mat-views, sequences and functions — with a generated entity-relationship diagram and full DDL for every node.</p></div>
+        <div class="card col-3 reveal"><div class="glyph">Query</div><h3>Query tabs that scale</h3><p>Per-tab server-side cursors, multi-statement scripts, paginated results, history and saved queries — export unbounded results to CSV, JSONL or Parquet.</p></div>
+        <div class="card col-2 reveal"><div class="glyph">Edit</div><h3>Inline cell editing</h3><p>Click-to-edit grid cells with type-aware coercion and an unsaved-edits indicator.</p></div>
+        <div class="card col-2 reveal"><div class="glyph">Terminal</div><h3>SSH, done right</h3><p>SwiftTerm PTY with full xterm-256color, tabbed sessions, split panes and a ⌘K command palette.</p></div>
+        <div class="card col-2 reveal"><div class="glyph">Transfer</div><h3>Dual-pane SFTP</h3><p>Side-by-side local/remote, drag-and-drop, and a three-way diff with snapshot-before-write so a typo never takes a host down.</p></div>
+        <div class="card col-3 reveal"><div class="glyph">Trust</div><h3>Secrets stay in the Keychain</h3><p>Passwords and key passphrases live only in the macOS/iOS Keychain. SSH key vault with per-key access coordination, and TOFU host-key verification that fails closed.</p></div>
+        <div class="card col-3 reveal"><div class="glyph">Intelligence</div><h3>On-device AI</h3><p>Generate SQL from a description and explain errors in plain language — running on Apple's on-device model, grounded in your real schema. Nothing leaves the machine.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture -->
+  <section id="architecture">
+    <div class="wrap">
+      <p class="kicker reveal">Under the hood</p>
+      <h2 class="reveal">One Rust core. Two native apps.</h2>
+      <p class="sub reveal">The protocol and database work live in a Rust core exposed to Swift through UniFFI — so the Mac and iPad apps share one tested, memory-safe engine and stay thin, native shells.</p>
+      <div class="arch">
+        <div class="layer reveal"><div class="n">01 · UI</div><div class="t">SwiftUI + AppKit</div><div class="d">Native Mac windowing &amp; iPad app, NSTableView-grade grids, the SQL editor and every panel.</div></div>
+        <div class="layer reveal hl"><div class="n">02 · Bridge</div><div class="t">UniFFI</div><div class="d">Proc-macro-generated, checksum-verified Swift bindings over the Rust surface — no hand-written glue.</div></div>
+        <div class="layer reveal"><div class="n">03 · Core</div><div class="t">Rust engine</div><div class="d"><code>ssh-commander-core</code> — connection pooling, the PostgreSQL protocol, cursors, transactions, Parquet export.</div></div>
+        <div class="layer reveal"><div class="n">04 · Targets</div><div class="t">Postgres &amp; SSH</div><div class="d">Pooled Postgres over optional SSH tunnels; PTY, SFTP and known-hosts trust on the same connection.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Engineering notes -->
+  <section>
+    <div class="wrap">
+      <p class="kicker reveal">Why it reads as a reference project</p>
+      <h2 class="reveal">Engineered, not assembled.</h2>
+      <div class="notes">
+        <div class="note reveal"><div class="big">0 surprises</div><p>Every DDL change runs through a transactional dry-run with a dependency blast-radius before it can commit.</p></div>
+        <div class="note reveal"><div class="big">Live-validated</div><p>Catalog queries and generated SQL verified against a real PostgreSQL 18 — overloads, aggregates, procedures, ACLs.</p></div>
+        <div class="note reveal"><div class="big">Native speed</div><p>AppKit-backed grids and editors — no Electron, no JVM. It launches and responds like a Mac app should.</p></div>
+        <div class="note reveal"><div class="big">Memory-safe</div><p>The protocol and data layer are Rust; Swift never hand-parses a wire protocol or manages a socket.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="band reveal">
+        <h2>Read the source.</h2>
+        <p class="sub">The full architecture, the routine-editor design notes, and the engineering decisions are all in the open.</p>
+        <div class="cta" style="justify-content:center">
+          <a class="btn primary" href="https://github.com/asmuelle/agent-postgres" rel="noopener">View on GitHub ↗</a>
+          <a class="btn" href="https://github.com/asmuelle/agent-postgres/blob/main/docs/routine-editor-plan.md" rel="noopener">Routine-editor design notes</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <a class="brand" href="#top"><img src="icon.png" alt="" width="26" height="26" style="width:26px;height:26px" /><b>pgAgent</b></a>
+    <span class="spacer"></span>
+    <span>Designed &amp; built by Andreas Müller</span>
+    <span>·</span>
+    <a href="https://github.com/asmuelle/agent-postgres" rel="noopener">github.com/asmuelle/agent-postgres</a>
+    <span>·</span>
+    <span id="yr"></span>
+  </div>
+</footer>
+
+<script>
+  document.getElementById("yr").textContent = new Date().getFullYear();
+  (function () {
+    var els = document.querySelectorAll(".reveal");
+    if (!("IntersectionObserver" in window) || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      els.forEach(function (e) { e.classList.add("in"); });
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) { en.target.classList.add("in"); io.unobserve(en.target); }
+      });
+    }, { threshold: 0.12, rootMargin: "0px 0px -8% 0px" });
+    els.forEach(function (e) { io.observe(e); });
+  })();
+</script>
+</body>
+</html>
