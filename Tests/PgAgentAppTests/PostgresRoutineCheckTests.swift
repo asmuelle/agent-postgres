@@ -94,6 +94,28 @@ final class PostgresRoutineCheckLineMapTests: XCTestCase {
         XCTAssertTrue(def[idx...].hasPrefix("DECLARE"))
     }
 
+    func testOpenerAnchoredToASNotArgumentDefaultDollarQuote() {
+        // A dollar-quoted argument default ($param$..$param$) must NOT be
+        // mistaken for the body opener (regression for the AS-anchor fix).
+        let def = """
+            CREATE OR REPLACE FUNCTION s.f(p text DEFAULT $param$hi$param$)
+             RETURNS integer
+             LANGUAGE plpgsql
+            AS $function$
+            BEGIN
+              RETURN 1;
+            END;
+            $function$
+            """
+        // Body opener is the AS line (4), not the $param$ on line 1.
+        XCTAssertEqual(PostgresRoutineCheck.dollarQuoteOpenerLine(in: def), 4)
+        // prosrc line 1 is the empty line after $function$, line 2 = BEGIN,
+        // line 3 = RETURN → editor line 4 + 3 - 1 = 6.
+        let offset = PostgresRoutineCheck.bodyLineToCharOffset(editorText: def, bodyLine: 3)!
+        let idx = def.index(def.startIndex, offsetBy: offset)
+        XCTAssertTrue(def[idx...].hasPrefix("RETURN"))
+    }
+
     func testSingleLineBodyMapsToOpenerLine() {
         // `AS $$ SELECT 1 $$` — body line 1 is on the opener line itself.
         let oneLine = "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$"

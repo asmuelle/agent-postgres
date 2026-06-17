@@ -129,17 +129,32 @@ enum PostgresRoutineCheck {
         return charOffset(ofLine: targetLine, in: editorText)
     }
 
-    /// 1-based line number of the first `$tag$` / `$$` delimiter, or nil.
+    /// 1-based line number of the body's opening `$tag$` / `$$` delimiter, or
+    /// nil. Anchored to the `AS` keyword (`LANGUAGE … AS $tag$`) so a
+    /// dollar-quoted *argument default* (`DEFAULT $param$…$param$`) earlier in
+    /// the header can't be mistaken for the body opener.
     static func dollarQuoteOpenerLine(in text: String) -> Int? {
-        guard let range = text.range(of: "\\$[A-Za-z_0-9]*\\$", options: .regularExpression) else {
+        if let asRange = text.range(
+            of: "\\bAS\\s+\\$[A-Za-z_0-9]*\\$",
+            options: [.regularExpression, .caseInsensitive]
+        ), let dollar = text[asRange].firstIndex(of: "$") {
+            return lineNumber(ofIndex: dollar, in: text)
+        }
+        // Fallback: first dollar-quote anywhere (e.g. hand-edited text without
+        // a recognizable AS opener).
+        guard let any = text.range(of: "\\$[A-Za-z_0-9]*\\$", options: .regularExpression) else {
             return nil
         }
-        let prefix = text[text.startIndex..<range.lowerBound]
-        return 1 + prefix.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        return lineNumber(ofIndex: any.lowerBound, in: text)
+    }
+
+    private static func lineNumber(ofIndex index: String.Index, in text: String) -> Int {
+        1 + text[text.startIndex..<index].reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
     }
 
     /// 0-based Character offset of the first non-whitespace character on the
-    /// 1-based `line`, or nil when the line is out of range.
+    /// 1-based `line`, or nil when the line is out of range. Assumes LF line
+    /// endings — what `pg_get_functiondef` returns and NSTextView preserves.
     static func charOffset(ofLine line: Int, in text: String) -> Int? {
         guard line >= 1 else { return nil }
         let lines = text.components(separatedBy: "\n")
