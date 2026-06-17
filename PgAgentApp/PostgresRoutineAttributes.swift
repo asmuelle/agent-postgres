@@ -88,7 +88,7 @@ enum PostgresRoutineAttributes {
         """
         SELECT p.prokind::text,
                l.lanname,
-               COALESCE(l.lanpltrusted, true)::text,
+               COALESCE(l.lanpltrusted, false)::text,
                p.provolatile::text,
                p.proparallel::text,
                p.prosecdef::text,
@@ -99,7 +99,7 @@ enum PostgresRoutineAttributes {
                p.proretset::text,
                pg_get_function_result(p.oid),
                pg_get_function_arguments(p.oid),
-               array_to_string(p.proconfig, E'\\n'),
+               array_to_string(p.proconfig, E'\\x01'),
                (p.proacl IS NULL OR EXISTS (
                   SELECT 1 FROM aclexplode(p.proacl) a
                   WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))::text
@@ -118,8 +118,11 @@ enum PostgresRoutineAttributes {
         func c(_ i: Int) -> String? { i < row.count ? row[i] : nil }
         guard let prokind = c(0) else { return nil }
 
+        // proconfig elements are joined server-side with a non-printable
+        // separator (\x01) that can't appear in a GUC value, so splitting can't
+        // be fooled by commas/newlines inside a value.
         var configLines = (c(13) ?? "")
-            .split(separator: "\n", omittingEmptySubsequences: true)
+            .split(separator: "\u{01}", omittingEmptySubsequences: true)
             .map(String.init)
         var searchPath: String?
         let prefix = "search_path="
@@ -188,7 +191,13 @@ enum PostgresRoutineAttributes {
         let newPath = normalizedPath(edited.searchPath)
         if oldPath != newPath {
             if let newPath {
-                clauses.append("SET search_path = \(newPath)")
+                // Defense-in-depth: the value is user-typed and interpolated
+                // raw, so refuse anything that could chain statements. The view
+                // also blocks Apply on an invalid value; this guarantees the
+                // builder can never emit an injecting SET even if that's bypassed.
+                if isValidSearchPath(newPath) {
+                    clauses.append("SET search_path = \(newPath)")
+                }
             } else {
                 clauses.append("RESET search_path")
             }
@@ -197,6 +206,18 @@ enum PostgresRoutineAttributes {
         guard !clauses.isEmpty else { return nil }
         return "\(alterPrefix(schema: schema, name: name, signature: signature, isProcedure: isProc)) "
             + clauses.joined(separator: " ") + ";"
+    }
+
+    /// A `search_path` value is a comma-separated list of (optionally quoted)
+    /// schema names plus the specials `"$user"` / `pg_temp` — none of which
+    /// contain `;` or control characters. Rejecting those closes the only
+    /// statement-chaining injection vector through the free-text field while
+    /// never rejecting a legitimate value. Empty (→ RESET) is valid.
+    static func isValidSearchPath(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        if trimmed.contains(";") { return false }
+        return !trimmed.unicodeScalars.contains { $0.value < 0x20 }
     }
 
     /// Trim whitespace; treat empty as "not set" (→ RESET).

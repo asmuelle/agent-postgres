@@ -44,8 +44,9 @@ final class PostgresRoutineAttributesParseTests: XCTestCase {
     }
 
     func testSeparatesSearchPathFromOtherConfig() {
+        // proconfig elements are joined with \x01 (matches introspectionQuery).
         let a = PostgresRoutineAttributes.parse(row: row(
-            config: "search_path=public\nwork_mem=64MB"))!
+            config: "search_path=public\u{01}work_mem=64MB"))!
         XCTAssertEqual(a.searchPath, "public")
         XCTAssertEqual(a.otherConfig, ["work_mem=64MB"])
     }
@@ -123,6 +124,22 @@ final class PostgresRoutineAttributesAlterTests: XCTestCase {
         XCTAssertTrue(sql.contains("SET search_path = app"))
         XCTAssertFalse(sql.contains("IMMUTABLE"))
         XCTAssertFalse(sql.contains("STRICT"))
+    }
+
+    func testSearchPathInjectionIsRejected() {
+        // Valid values pass.
+        XCTAssertTrue(PostgresRoutineAttributes.isValidSearchPath("public, pg_temp"))
+        XCTAssertTrue(PostgresRoutineAttributes.isValidSearchPath("\"$user\", public"))
+        XCTAssertTrue(PostgresRoutineAttributes.isValidSearchPath(""))
+        // Statement chaining / control chars are rejected.
+        XCTAssertFalse(PostgresRoutineAttributes.isValidSearchPath("public; DROP TABLE x"))
+        XCTAssertFalse(PostgresRoutineAttributes.isValidSearchPath("public\n; bad"))
+
+        // And the builder never emits an injecting SET even if asked.
+        var to = RoutineAttributes()
+        to.searchPath = "public; DROP TABLE secrets"
+        let sql = alter(from: RoutineAttributes(), to: to)
+        XCTAssertNil(sql, "an invalid search_path must not produce an ALTER clause")
     }
 
     func testRowsOnlyEmittedForSetReturning() {

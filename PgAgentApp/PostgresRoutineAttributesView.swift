@@ -38,8 +38,17 @@ struct PostgresRoutineAttributesView: View {
     @State private var isApplying = false
     @State private var applyError: String?
     @State private var applied = false
+    /// Bumped on identity change / each introspect / each apply. Post-await
+    /// state writes are discarded once a newer generation begins, so a tab
+    /// switch or a re-entrant Apply can't write stale state (or flash success)
+    /// onto a different routine.
+    @State private var generation = 0
 
     private var isDirty: Bool { edited != original }
+
+    private var searchPathValid: Bool {
+        PostgresRoutineAttributes.isValidSearchPath(edited.searchPath ?? "")
+    }
 
     private var alterSQL: String? {
         PostgresRoutineAttributes.alterStatement(
@@ -52,6 +61,13 @@ struct PostgresRoutineAttributesView: View {
     }
 
     var body: some View {
+        // One launch site for the load, fired on appear and whenever the bound
+        // routine changes — so there's no double-fire across phase branches.
+        phaseContent.task(id: routineKey) { await introspect() }
+    }
+
+    @ViewBuilder
+    private var phaseContent: some View {
         switch phase {
         case .loading:
             VStack(spacing: 12) {
@@ -59,7 +75,6 @@ struct PostgresRoutineAttributesView: View {
                 Text("Reading attributes…").font(.caption).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .task(id: routineKey) { await introspect() }
 
         case .error(let msg):
             VStack(spacing: 12) {
@@ -71,7 +86,6 @@ struct PostgresRoutineAttributesView: View {
                 Button("Retry") { Task { await introspect() } }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .task(id: routineKey) { await introspect() }
 
         case .ready:
             ready
@@ -223,13 +237,19 @@ struct PostgresRoutineAttributesView: View {
             }
 
             attrRow("search_path") {
-                TextField("not pinned", text: Binding(
-                    get: { edited.searchPath ?? "" },
-                    set: { edited.searchPath = $0.isEmpty ? nil : $0 }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.body, design: .monospaced))
-                .frame(maxWidth: 320)
+                VStack(alignment: .leading, spacing: 2) {
+                    TextField("not pinned", text: Binding(
+                        get: { edited.searchPath ?? "" },
+                        set: { edited.searchPath = $0.isEmpty ? nil : $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(maxWidth: 320)
+                    if !searchPathValid {
+                        Text("Remove ';' and control characters.")
+                            .font(.caption2).foregroundStyle(.red)
+                    }
+                }
             }
             if !edited.otherConfig.isEmpty {
                 Text("Other SET: \(edited.otherConfig.joined(separator: ", "))")
@@ -299,7 +319,7 @@ struct PostgresRoutineAttributesView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!isDirty || isApplying || alterSQL == nil || connectionId == nil)
+            .disabled(!isDirty || isApplying || alterSQL == nil || connectionId == nil || !searchPathValid)
         }
         .padding(12)
     }
@@ -308,6 +328,8 @@ struct PostgresRoutineAttributesView: View {
 
     private func introspect() async {
         guard let connectionId else { phase = .error("Not connected."); return }
+        generation += 1
+        let gen = generation
         if phase != .ready { phase = .loading }
         let sessionId = "routine-attrs-\(UUID().uuidString)"
         let outcome: Result<FfiPgExecutionResult, Error>
@@ -322,6 +344,7 @@ struct PostgresRoutineAttributesView: View {
             outcome = .failure(error)
         }
         await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
+        guard gen == generation else { return }
         switch outcome {
         case .success(let res):
             guard let row = res.rows.first?.cells,
@@ -340,6 +363,8 @@ struct PostgresRoutineAttributesView: View {
     /// Run an ALTER / GRANT statement, then re-introspect and notify the host.
     private func runStatement(_ sql: String) async {
         guard let connectionId else { return }
+        generation += 1
+        let gen = generation
         isApplying = true
         applyError = nil
         applied = false
@@ -353,13 +378,18 @@ struct PostgresRoutineAttributesView: View {
             outcome = .failure(error)
         }
         await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
+        guard gen == generation else { return }
         isApplying = false
         switch outcome {
         case .success:
+            // introspect() bumps the generation; capture the new one so the
+            // flash only clears if this apply is still the latest action.
             await introspect()
             onApplied()
+            let flashGen = generation
             applied = true
             try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard flashGen == generation else { return }
             applied = false
         case .failure(let error):
             applyError = (error as? PostgresBridgeError)?.errorDescription ?? error.localizedDescription
