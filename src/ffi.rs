@@ -1215,11 +1215,9 @@ pub fn rshell_sftp_list_dir(
                 owner: e.owner,
                 group: e.group,
                 kind: match e.file_type {
-                    ssh_commander_core::sftp_client::FileEntryType::File => FfiFileKind::File,
-                    ssh_commander_core::sftp_client::FileEntryType::Directory => {
-                        FfiFileKind::Directory
-                    }
-                    ssh_commander_core::sftp_client::FileEntryType::Symlink => FfiFileKind::Symlink,
+                    ssh_commander_core::FileEntryType::File => FfiFileKind::File,
+                    ssh_commander_core::FileEntryType::Directory => FfiFileKind::Directory,
+                    ssh_commander_core::FileEntryType::Symlink => FfiFileKind::Symlink,
                 },
             })
             .collect())
@@ -1807,11 +1805,6 @@ impl From<FfiPgConfig> for ssh_commander_core::PgConfig {
             auth: c.auth.into(),
             tls: c.tls.into(),
             application_name: c.application_name,
-            ssh_tunnel: c.tunnel.map(|t| ssh_commander_core::SshTunnelRef {
-                ssh_connection_id: t.ssh_connection_id,
-                remote_host: t.remote_host,
-                remote_port: t.remote_port,
-            }),
             connect_timeout_secs: c.connect_timeout_secs,
             max_pool_size: c.max_pool_size,
             idle_timeout_secs: c.idle_timeout_secs,
@@ -1880,6 +1873,10 @@ impl From<ssh_commander_core::PgError> for FfiPgError {
             ssh_commander_core::PgError::Connect(detail) => Self::Connect { detail },
             ssh_commander_core::PgError::Auth(detail) => Self::Auth { detail },
             ssh_commander_core::PgError::Tls(detail) => Self::Tls { detail },
+            // Client-side validation failures (e.g. an invalid type name or
+            // identifier in an edit op), added to PgError in core 0.2. Surface
+            // as a generic error — no dedicated FFI variant needed.
+            ssh_commander_core::PgError::InvalidInput(detail) => Self::Other { detail },
             ssh_commander_core::PgError::Tunnel(detail) => Self::Tunnel { detail },
             ssh_commander_core::PgError::TunnelSourceMissing(detail) => {
                 Self::TunnelSourceMissing { detail }
@@ -1977,6 +1974,17 @@ fn pg_connection_id(cfg: &ssh_commander_core::PgConfig, profile_id: Option<&str>
 pub fn rshell_pg_connect(config: FfiPgConfig) -> Result<String, FfiPgError> {
     let bridge = MacOsBridge::global();
     let profile_id = config.profile_id.clone();
+    // ssh-commander-core 0.2: the SSH tunnel is no longer a field on
+    // PgConfig — the ConnectionManager owns the tunnel seam and takes it
+    // as a separate argument. Extract it before consuming `config`.
+    let tunnel = config
+        .tunnel
+        .as_ref()
+        .map(|t| ssh_commander_core::SshTunnelRef {
+            ssh_connection_id: t.ssh_connection_id.clone(),
+            remote_host: t.remote_host.clone(),
+            remote_port: t.remote_port,
+        });
     let core_cfg: ssh_commander_core::PgConfig = config.into();
     let connection_id = pg_connection_id(&core_cfg, profile_id.as_deref());
     let conn_id = connection_id.clone();
@@ -1984,7 +1992,10 @@ pub fn rshell_pg_connect(config: FfiPgConfig) -> Result<String, FfiPgError> {
 
     bridge
         .runtime
-        .block_on(async move { cm.create_postgres_connection(conn_id, core_cfg).await })
+        .block_on(async move {
+            cm.create_postgres_connection(conn_id, core_cfg, tunnel)
+                .await
+        })
         .map_err(|e| {
             // The manager wraps PgError in anyhow; downcast back so we
             // keep the typed classification through to Swift.
@@ -4445,7 +4456,6 @@ mod tests {
             },
             tls: ssh_commander_core::PgTlsMode::Disable,
             application_name: None,
-            ssh_tunnel: None,
             connect_timeout_secs: None,
             max_pool_size: None,
             idle_timeout_secs: None,

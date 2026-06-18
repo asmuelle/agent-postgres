@@ -19,8 +19,16 @@ name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
 [dependencies]
-ssh-commander-core = "0.1.0"
-ssh-commander-pg-parquet = "0.1.0"
+# Uses ssh, sftp, postgres, and tools (DNS / tcpdump / git diagnostics);
+# opting out of the defaults drops the FTP (suppaftp/async-std) and
+# desktop (RDP/VNC) stacks, which this app does not use.
+ssh-commander-core = { version = "0.2.2", default-features = false, features = [
+    "ssh",
+    "sftp",
+    "postgres",
+    "tools",
+] }
+ssh-commander-pg-parquet = "0.2.2"
 # Already transitive via ssh-commander-core (PgError::Driver wraps a
 # tokio_postgres::Error); declared directly so the FFI can name
 # `tokio_postgres::error::ErrorPosition` when extracting structured DB errors.
