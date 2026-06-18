@@ -28,7 +28,7 @@ jobs:
     name: Rust — lint, unit, live-Postgres integration
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -75,7 +75,7 @@ jobs:
     name: Swift — compile macOS app (no signing)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The app imports FoundationModels (weak-linked, gated on macOS 26), so
       # it must build against the macOS 26 SDK — select the newest Xcode.
