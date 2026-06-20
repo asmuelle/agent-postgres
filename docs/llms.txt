@@ -1,0 +1,27 @@
+# pgAgent
+
+> A native macOS & iPadOS workspace for PostgreSQL and SSH — with a routine editor that out-engineers the big IDEs, and a DDL pipeline that won't let an edit silently take down your schema.
+
+## What it is
+
+pgAgent is a native Mac & iPad client for PostgreSQL and SSH. It treats database routines as first-class, editable, testable objects and runs every DDL change as a transactional dry-run you can inspect — with the exact dependency blast-radius, and ACL and `search_path` preserved across a forced `DROP + CREATE` — before one explicit commit. It is built with SwiftUI + AppKit over a Rust core (`ssh-commander-core`) exposed to Swift through UniFFI, so the Mac and iPad apps share one tested, memory-safe engine.
+
+## Who it's for
+
+Engineers and developers who work directly with PostgreSQL and remote hosts and want a fast, native client that refuses to break things — instead of a read-only function viewer or an Electron/JVM IDE.
+
+## Key features
+
+- Routine editor: edit and replace the exact function overload via `pg_get_functiondef`, apply `CREATE OR REPLACE`, with a typed parameter runner (`CALL` vs `SELECT * FROM`, named args, NULL/DEFAULT) and saved fixtures.
+- Attributes as controls (volatility, parallelism, cost, `SET search_path`) plus a security lens that flags `SECURITY DEFINER` without a pinned path.
+- Inline plpgsql_check that catches bugs `CREATE FUNCTION` accepts and jumps to the offending line; works on managed Postgres.
+- Safe-Apply: transactional dry-run, dependency blast-radius, preserved grants and `search_path`, then one explicit commit.
+- Multi-database schema tree and generated ERD with full DDL for every node; query tabs with server-side cursors, multi-statement scripts, paginated results, history and saved queries; export unbounded results to CSV, JSONL or Parquet.
+- Inline cell editing with type-aware coercion; SSH terminal (SwiftTerm PTY, xterm-256color, tabbed sessions, split panes, ⌘K palette); dual-pane SFTP with drag-and-drop and a three-way diff with snapshot-before-write.
+- Secrets stay in the macOS/iOS Keychain; SSH key vault with per-key access coordination and TOFU host-key verification that fails closed.
+- On-device AI: generate SQL from a description and explain errors in plain language using Apple's on-device model, grounded in your real schema — nothing leaves the machine.
+
+## Link
+
+- Site: https://asmuelle.github.io/agent-postgres/
+- Source: https://github.com/asmuelle/agent-postgres
