@@ -1,0 +1,23 @@
+# cargo-deny configuration — run with `cargo deny check advisories`.
+#
+# Every ignore below is a tracked exception, not a dismissal. When an entry's
+# upstream fix lands, remove it so CI starts enforcing again.
+
+[advisories]
+ignore = [
+    # rsa Marvin timing side-channel — no patched release exists (upstream is
+    # still migrating to a constant-time implementation). Pulled in transitively
+    # via russh 0.61 → ssh-key → rsa for SSH RSA key support. Low practical risk
+    # for this client and no safe upgrade is available.
+    # TRACKED: drop when the rsa crate ships a constant-time fix.
+    { id = "RUSTSEC-2023-0071", reason = "no fix available; transitive via russh 0.61 / ssh-key" },
+
+    # paste unmaintained/archived — build-time proc-macro only, no exploit path.
+    # Pulled in transitively via parquet ^54 (→ ssh-commander-pg-parquet); the
+    # upstream parquet ^54 pin blocks moving off the dependency, and no patched
+    # release of paste exists. Same parquet ^54 chain that also pins thrift ^0.17
+    # (thrift: unfixable upstream — no patched release; not yet in the RustSec DB,
+    # listed here so the exception is documented if/when an advisory is published).
+    # TRACKED: drop when parquet drops paste or a maintained drop-in is adopted.
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained — transitive proc-macro via parquet ^54, build-time only" },
+]

@@ -71,6 +71,18 @@ jobs:
           PGDATABASE: postgres
         run: cargo test --lib pg_it_ -- --test-threads=1 --nocapture
 
+  # Separate job: cargo-deny-action is a container action (Linux-only),
+  # and advisory checking only parses Cargo.lock — no macOS deps needed.
+  advisories:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
   swift:
     name: Swift — compile macOS app (no signing)
     runs-on: macos-15
