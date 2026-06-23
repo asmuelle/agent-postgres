@@ -344,6 +344,32 @@ run-on-ipad name="":
     xcrun simctl launch "$udid" "$bundle"; \
     echo "Launched pgAgent on iPad simulator $udid"
 
+# Build, install, and launch on an iPhone simulator. Pass a simulator name
+# fragment if you want a specific iPhone, e.g. `just run-on-iphone "iPhone 16 Pro"`.
+run-on-iphone name="":
+    @just ios-sim-build
+    @app="{{ios_sim_app}}"; \
+    bundle="{{ios_bundle}}"; \
+    name="{{name}}"; \
+    test -d "$app" || (echo "iOS simulator app not found: $app"; exit 1); \
+    if [ -n "$name" ]; then \
+        udid="$(xcrun simctl list devices available | grep 'iPhone' | grep -F "$name" | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
+    else \
+        udid="$(xcrun simctl list devices available | grep 'iPhone' | grep 'Booted' | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
+        if [ -z "$udid" ]; then \
+            udid="$(xcrun simctl list devices available | grep 'iPhone' | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
+        fi; \
+    fi; \
+    test -n "$udid" || (echo "No available iPhone simulator found"; xcrun simctl list devices available; exit 1); \
+    if ! xcrun simctl list devices | grep "$udid" | grep -q 'Booted'; then \
+        xcrun simctl boot "$udid" || true; \
+        xcrun simctl bootstatus "$udid" -b; \
+    fi; \
+    open -a Simulator; \
+    xcrun simctl install "$udid" "$app"; \
+    xcrun simctl launch "$udid" "$bundle"; \
+    echo "Launched pgAgent on iPhone simulator $udid"
+
 # Build the iOS app for a connected device or archive workflow.
 ios-build config="Debug":
     @just _ensure-xcodeproj
