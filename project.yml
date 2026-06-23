@@ -457,6 +457,7 @@ targets:
         buildPhase: resources
       - path: PgAgentMobile/MobileEntitlementsStore.swift
       - path: PgAgentMobile/FleetHealthModel.swift
+      - path: PgAgentMobile/LockChainModel.swift
     dependencies:
       - sdk: StoreKitTest.framework
     settings:

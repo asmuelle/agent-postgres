@@ -44,12 +44,17 @@ FFI record shapes:
 
 Proves the whole approach end-to-end with zero Rust changes.
 
-### Slice 2 — Locks / deadlock chains
+### Slice 2 — Locks / deadlock chains ✅
 
-- `MobileInstanceLocksView`: render `pgListLocks` as blocker→blocked wait
-  chains. Quick fix = "Terminate the blocker" on the head of a chain.
-- Group the three tabs (Activity / Locks / Maintenance) under the instance
-  detail with a segmented control, mirroring the macOS activity monitor.
+- `LockChainModel` — pure `lockWaitGroups(from:)` that shapes `pgListLocks`
+  edges into blocker→waiters groups (de-dups waiters, flags chains where the
+  blocker is itself blocked). Unit-tested.
+- `MobileInstanceLocksView` — renders the groups; quick fix = "Terminate the
+  blocker" on the head of a wait chain (`pgTerminateBackend`), gated by a
+  confirmation alert that warns when the blocker is itself in a chain.
+- `MobileInstanceDetailView` — Activity / Locks tabs behind a segmented
+  control, mirroring the macOS activity monitor. (Maintenance tab lands in
+  Slice 3.)
 
 ### Slice 3 — Maintenance / vacuum
 

@@ -27,7 +27,7 @@ struct MobileFleetMonitorView: View {
                     List {
                         ForEach(profileStore.profiles) { profile in
                             NavigationLink {
-                                MobileInstanceActivityView(profile: profile)
+                                MobileInstanceDetailView(profile: profile)
                             } label: {
                                 InstanceHealthCard(
                                     profile: profile,

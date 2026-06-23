@@ -36,8 +36,6 @@ struct MobileInstanceActivityView: View {
                 sessionList
             }
         }
-        .navigationTitle(profile.name)
-        .navigationBarTitleDisplayMode(.inline)
         .task {
             while !Task.isCancelled {
                 await refresh()
