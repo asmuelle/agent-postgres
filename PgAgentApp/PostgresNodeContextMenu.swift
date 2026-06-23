@@ -19,17 +19,8 @@ import SwiftUI
 // "backupRestore" kinds.
 // =============================================================================
 
-/// Quote a Postgres identifier defensively — mixed-case and
-/// reserved-word identifiers silently target the wrong object when
-/// unquoted.
-func pgQuoteIdent(_ s: String) -> String {
-    "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-}
-
-/// Escape a value for inclusion in a single-quoted SQL literal.
-func pgQuoteLiteral(_ s: String) -> String {
-    "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
-}
+// `pgQuoteIdent` / `pgQuoteLiteral` moved to PostgresSQLQuoting.swift so the
+// iOS target (which excludes this AppKit-only file) can share them.
 
 struct PostgresNodeContextMenu: View {
     let node: PgSchemaNode

@@ -27,6 +27,7 @@ The harness gives you a fast deterministic sensor — use it instead of guessing
 - **Strict gate**: `just lint` — `cargo fmt --check` + `cargo clippy -D warnings`. Run before declaring done.
 - **Tests**: `just test-rust` (Rust) / `just mac-test` (Swift) / `just test` (both).
 - A **Stop hook** auto-runs `just check` when you finish a turn: silent if clean, and it will block + show errors if Rust is broken so you can fix them. Swift changes are not covered there — verify those with `just mac-test` / `just mac-build` yourself.
+- **iOS target is unverified by CI and the Stop hook.** The `PgAgentMobile` target lists `PgAgentApp/*` sources file-by-file in `project.yml` (macOS includes the whole group), so a shared file gaining a mac-only dep breaks iOS silently. After editing a shared Swift file, run `just ios-ci-build`. Fix gaps by extracting the platform-neutral part into its own file (add it to the mobile list) or a mobile stub — don't pull AppKit/SSH into the Postgres-only iOS app.
 - Formatting is automatic on save (rustfmt / swift-format via PostToolUse) — don't hand-format.
 
 ## 🛡️ Safety Guard (enforced, not advisory)

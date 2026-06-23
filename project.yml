@@ -153,6 +153,7 @@ targets:
         optional: true
       - path: PgAgentApp/PostgresProfile.swift
       - path: PgAgentApp/KeychainManager.swift
+      - path: PgAgentApp/PostgresSQLQuoting.swift
       - path: PgAgentApp/PgSchemaStore.swift
       - path: PgAgentApp/PostgresConnectionManager.swift
       - path: PgAgentApp/PostgresPropertyInspectorView.swift
@@ -455,6 +456,7 @@ targets:
       - path: Tests/PgAgentMobileTests/Products.storekit
         buildPhase: resources
       - path: PgAgentMobile/MobileEntitlementsStore.swift
+      - path: PgAgentMobile/FleetHealthModel.swift
     dependencies:
       - sdk: StoreKitTest.framework
     settings:

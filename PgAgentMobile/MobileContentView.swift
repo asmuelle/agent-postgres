@@ -45,7 +45,8 @@ struct MobileContentView: View {
     @State private var creatingProfile = false
     @State private var showingProUpgrade = false
     @State private var showingCSVImport = false
-    
+    @State private var showingFleetMonitor = false
+
     var body: some View {
         Group {
             if horizontalSizeClass == .compact {
@@ -79,6 +80,10 @@ struct MobileContentView: View {
                 }
                 showingCSVImport = false
             }
+        }
+        .sheet(isPresented: $showingFleetMonitor) {
+            MobileFleetMonitorView()
+                .environmentObject(profileStore)
         }
         // Properties sheet removed to present all node details directly in the main query workspace pane.
     }
@@ -161,7 +166,8 @@ struct MobileContentView: View {
                 onAddProfile: handleAddProfile,
                 onEditProfile: { p in editingProfile = p },
                 onShowCSVImport: { showingCSVImport = true },
-                onShowProUpgrade: { showingProUpgrade = true }
+                onShowProUpgrade: { showingProUpgrade = true },
+                onShowMonitor: { showingFleetMonitor = true }
             )
             .navigationTitle("pgAgent")
             .navigationDestination(item: $selectedProfileId) { profileId in
@@ -230,7 +236,8 @@ struct MobileConnectionListView: View {
     var onEditProfile: (PostgresProfile) -> Void
     var onShowCSVImport: () -> Void
     var onShowProUpgrade: () -> Void
-    
+    var onShowMonitor: () -> Void
+
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @EnvironmentObject private var entitlementsStore: MobileEntitlementsStore
     @ObservedObject private var statusStore = PostgresConnectionStatusStore.shared
@@ -289,6 +296,9 @@ struct MobileConnectionListView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 8) {
+                    Button(action: onShowMonitor) {
+                        Label("Fleet Monitor", systemImage: "waveform.path.ecg")
+                    }
                     Button(action: onShowCSVImport) {
                         Label("Import CSV", systemImage: "square.and.arrow.down")
                     }
