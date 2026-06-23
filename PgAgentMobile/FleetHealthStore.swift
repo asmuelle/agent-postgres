@@ -13,10 +13,6 @@ import PgAgentMacOS
 // =============================================================================
 @MainActor
 final class FleetHealthStore: ObservableObject {
-    /// A query is "long-running" once its active backend has been on the same
-    /// statement for at least this many seconds.
-    static let longRunningThreshold: TimeInterval = 5
-
     @Published private(set) var health: [String: FleetInstanceHealth] = [:]
     @Published private(set) var isRefreshing = false
 
@@ -63,10 +59,11 @@ final class FleetHealthStore: ObservableObject {
             let locks = try await BridgeManager.shared.pgListLocks(connectionId: connectionId)
             let now = Date().timeIntervalSince1970
 
+            let threshold = FleetMonitorSettings.shared.longRunningThreshold
             let activeBackends = sessions.filter { $0.state == "active" }.count
             let longRunning = sessions.filter { session in
                 guard session.state == "active", let start = session.queryStart else { return false }
-                return now - Double(start) >= Self.longRunningThreshold
+                return now - Double(start) >= threshold
             }.count
             let blocked = locks.filter { $0.blockedByPid != nil || !$0.granted }.count
 

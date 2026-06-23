@@ -459,6 +459,8 @@ targets:
       - path: PgAgentMobile/FleetHealthModel.swift
       - path: PgAgentMobile/LockChainModel.swift
       - path: PgAgentMobile/MaintenanceModel.swift
+      - path: PgAgentMobile/FleetAlertModel.swift
+      - path: PgAgentMobile/FleetMonitorSettings.swift
       - path: PgAgentApp/PostgresSQLQuoting.swift
     dependencies:
       - sdk: StoreKitTest.framework

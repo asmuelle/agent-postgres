@@ -123,6 +123,13 @@ struct MobileContentView: View {
                 }
             )
             .navigationTitle("Object Explorer")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showingFleetMonitor = true } label: {
+                        Label("Fleet Monitor", systemImage: "waveform.path.ecg")
+                    }
+                }
+            }
         } detail: {
             if let profileId = selectedProfileId,
                let profile = profileStore.profiles.first(where: { $0.id == profileId }) {

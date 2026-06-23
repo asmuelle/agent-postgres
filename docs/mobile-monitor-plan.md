@@ -79,15 +79,28 @@ Proves the whole approach end-to-end with zero Rust changes.
   Non-destructive fixes (cancel query, `VACUUM ANALYZE`) stay friction-free.
 - `NSFaceIDUsageDescription` updated to mention destructive actions.
 
-### Slice 5 — Background monitoring + notifications
+### Slice 5 — Background monitoring + notifications ✅
 
-- BGAppRefresh poll; local notification when an instance crosses a threshold
-  (long-running count, blocked locks). Fits the "monitor" framing.
+- `FleetAlertModel` — pure, edge-triggered `evaluateFleetAlerts(...)`: emits an
+  alert only when a condition newly crosses a threshold, returning the firing
+  set to persist so a persistent problem notifies once, not every poll.
+  Unit-tested (8 tests).
+- `FleetBackgroundMonitor` — BGAppRefresh body: refresh every instance, evaluate
+  against thresholds, post `UNUserNotification`s for newly-crossed conditions,
+  persist firing state. Registered via the SwiftUI
+  `.backgroundTask(.appRefresh(…))` scene modifier; scheduled on launch and on
+  entering background. Info.plist gains `BGTaskSchedulerPermittedIdentifiers` +
+  `UIBackgroundModes: fetch`.
 
-### Slice 6 — iPad regular layout + polish
+### Slice 6 — iPad regular layout + polish ✅
 
-- Surface the monitor in the iPad `NavigationSplitView` (currently only wired
-  into the compact connection list), empty/error states, thresholds in Settings.
+- Fleet Monitor reachable from the iPad `NavigationSplitView` sidebar (was only
+  on the compact connection list).
+- `FleetMonitorSettings` (UserDefaults-backed, unit-tested) + `MobileMonitorSettingsView`
+  (gear in the monitor toolbar): tune the slow-query threshold, per-condition
+  alert counts, unreachable alerts, and the background-alerts toggle (which
+  requests notification permission + schedules). The threshold now drives the
+  live fleet glance and activity list too.
 
 ## Decisions
 
@@ -95,7 +108,5 @@ Proves the whole approach end-to-end with zero Rust changes.
   (VACUUM/ANALYZE, cancel-query) stay friction-free; `terminate_backend` and
   `VACUUM FULL` get a biometric speed bump. Killing a prod backend from a phone
   on the train is exactly the fat-finger risk worth gating.
-- **Long-running threshold:** default 5s (`FleetHealthStore.longRunningThreshold`),
-  later configurable in Settings.
-</content>
-</invoke>
+- **Long-running threshold:** default 5s (`FleetMonitorThresholds.defaults`),
+  configurable in Monitor Settings (Slice 6).

@@ -12,6 +12,7 @@ struct MobileFleetMonitorView: View {
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @StateObject private var store = FleetHealthStore()
     @Environment(\.dismiss) private var dismiss
+    @State private var showingSettings = false
 
     /// How often the fleet glance auto-refreshes.
     private static let refreshInterval: Duration = .seconds(5)
@@ -51,6 +52,11 @@ struct MobileFleetMonitorView: View {
                     Button("Done") { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
+                    Button { showingSettings = true } label: {
+                        Image(systemName: "gearshape")
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     if store.isRefreshing {
                         ProgressView().controlSize(.small).tint(MidnightColors.accentCyan)
                     } else {
@@ -61,6 +67,9 @@ struct MobileFleetMonitorView: View {
                         }
                     }
                 }
+            }
+            .sheet(isPresented: $showingSettings) {
+                MobileMonitorSettingsView()
             }
             .task {
                 // Poll until the sheet is dismissed (task is cancelled on teardown).

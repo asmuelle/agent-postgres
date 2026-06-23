@@ -292,7 +292,7 @@ private struct SessionRow: View {
 
     private var isLong: Bool {
         guard session.state == "active", let start = session.queryStart else { return false }
-        return Date().timeIntervalSince1970 - Double(start) >= FleetHealthStore.longRunningThreshold
+        return Date().timeIntervalSince1970 - Double(start) >= FleetMonitorSettings.shared.longRunningThreshold
     }
 
     private var stateBadge: some View {
