@@ -15,9 +15,18 @@ ignore = [
     # paste unmaintained/archived — build-time proc-macro only, no exploit path.
     # Pulled in transitively via parquet ^54 (→ ssh-commander-pg-parquet); the
     # upstream parquet ^54 pin blocks moving off the dependency, and no patched
-    # release of paste exists. Same parquet ^54 chain that also pins thrift ^0.17
-    # (thrift: unfixable upstream — no patched release; not yet in the RustSec DB,
-    # listed here so the exception is documented if/when an advisory is published).
+    # release of paste exists. Same parquet ^54 chain that also pins thrift ^0.17.
     # TRACKED: drop when parquet drops paste or a maintained drop-in is adopted.
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained — transitive proc-macro via parquet ^54, build-time only" },
+
+    # NOTE: thrift excessive-allocation on parse — CVE-2026-43868 /
+    # GHSA-2f9f-gq7v-9h6m, affects thrift <= 0.22.0 with NO patched release.
+    # Pulled in transitively via parquet ^54 (→ ssh-commander-pg-parquet); not
+    # optional in parquet. The vuln triggers when *parsing* untrusted
+    # Thrift/parquet input; pgAgent only ever *writes* parquet from trusted DB
+    # rows (FFI parquet_open/append/close — no reader), so the path is
+    # unreachable. Dismissed in GitHub Dependabot as tolerable_risk (alert #5).
+    # No RustSec advisory ID exists yet, so there is nothing for cargo-deny to
+    # match — add an `{ id = ... }` entry here if/when one is published.
+    # TRACKED: drop when parquet drops thrift or thrift ships a fix.
 ]

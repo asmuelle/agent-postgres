@@ -155,6 +155,10 @@ struct MobileInstanceLocksView: View {
 
     private func terminate(_ pid: Int32) async {
         guard let connectionId else { return }
+        guard await BiometricGate.confirm(reason: "Terminate blocker PID \(pid) on \(profile.name)") else {
+            await flash("Authentication failed — PID \(pid) not terminated")
+            return
+        }
         do {
             let ok = try await BridgeManager.shared.pgTerminateBackend(connectionId: connectionId, pid: pid)
             await flash(ok ? "Terminated blocker PID \(pid)" : "PID \(pid) was already gone")

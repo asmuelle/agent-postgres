@@ -30,7 +30,7 @@
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>NSFaceIDUsageDescription</key>
-    <string>Unlock saved SSH credentials.</string>
+    <string>Confirm destructive database actions and unlock saved credentials.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>pgAgent needs local network access to discover and connect to your local Postgres databases and SSH servers.</string>
     <key>NSSupportsLiveActivities</key>

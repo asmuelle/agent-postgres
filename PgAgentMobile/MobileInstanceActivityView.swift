@@ -171,6 +171,14 @@ struct MobileInstanceActivityView: View {
     private func apply(_ fix: PendingFix) async {
         guard let connectionId else { return }
         let pid = fix.session.pid
+        // Terminating a backend is destructive — gate behind biometrics.
+        // Cancelling a query is recoverable, so it skips the gate.
+        if case .terminate = fix {
+            guard await BiometricGate.confirm(reason: "Terminate PID \(pid) on \(profile.name)") else {
+                await flash("Authentication failed — PID \(pid) not terminated")
+                return
+            }
+        }
         do {
             let ok: Bool
             switch fix {

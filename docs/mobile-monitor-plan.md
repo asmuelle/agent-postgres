@@ -68,11 +68,16 @@ Proves the whole approach end-to-end with zero Rust changes.
   `pg-maintenance` session, released on disappear.
 - Added as the third tab in `MobileInstanceDetailView`.
 
-### Slice 4 — Safety posture (biometric gate)
+### Slice 4 — Safety posture (biometric gate) ✅
 
-- Route destructive fixes (`terminate_backend`, `VACUUM FULL`) through a
-  Face/Touch ID check using the already-linked `LocalAuthentication` +
-  `MobilePrivacyGateView` pattern. Non-destructive fixes stay friction-free.
+- `BiometricGate.confirm(reason:)` — `LAContext.evaluatePolicy(.deviceOwnerAuthentication)`
+  (biometrics, passcode fallback). Fails open only when the device has no
+  passcode at all (fresh simulator); a real device with a passcode is a true
+  gate, and the action's typed confirm alert always runs first regardless.
+- Gated the three destructive fixes: terminate-backend in the Activity tab,
+  terminate-the-blocker in the Locks tab, and `VACUUM FULL` in Maintenance.
+  Non-destructive fixes (cancel query, `VACUUM ANALYZE`) stay friction-free.
+- `NSFaceIDUsageDescription` updated to mention destructive actions.
 
 ### Slice 5 — Background monitoring + notifications
 

@@ -165,6 +165,14 @@ struct MobileInstanceMaintenanceView: View {
 
     private func runVacuum(_ candidate: VacuumCandidate, full: Bool) async {
         guard let connectionId, runningTableId == nil else { return }
+        // VACUUM FULL takes an exclusive lock + rewrites the table — gate it.
+        // Plain VACUUM (ANALYZE) is routine and safe, so it runs freely.
+        if full {
+            guard await BiometricGate.confirm(reason: "VACUUM FULL \(candidate.table) on \(profile.name)") else {
+                await flash("Authentication failed — VACUUM FULL not run")
+                return
+            }
+        }
         runningTableId = candidate.id
         defer { runningTableId = nil }
         do {
