@@ -56,11 +56,17 @@ Proves the whole approach end-to-end with zero Rust changes.
   control, mirroring the macOS activity monitor. (Maintenance tab lands in
   Slice 3.)
 
-### Slice 3 — Maintenance / vacuum
+### Slice 3 — Maintenance / vacuum ✅
 
-- A bloat/dead-tuple candidates query against `pg_stat_user_tables`
-  (net-new SQL, runs through `pgExecute` — no FFI change).
-- Per-table **VACUUM (ANALYZE)** button; **VACUUM FULL** behind extra confirm.
+- `MaintenanceModel` — `vacuumCandidates(fromRows:)` parses the
+  `pg_stat_user_tables` bloat query (`MaintenanceQuery.bloatCandidates`) into
+  ranked `VacuumCandidate`s and builds quoted VACUUM SQL. Unit-tested,
+  including identifier-quote escaping.
+- `MobileInstanceMaintenanceView` — worst-bloat-first list; per-row
+  **VACUUM (ANALYZE)** is friction-free, **VACUUM FULL** is behind an extra
+  confirm (exclusive lock + rewrite). Runs through `pgExecute` on a dedicated
+  `pg-maintenance` session, released on disappear.
+- Added as the third tab in `MobileInstanceDetailView`.
 
 ### Slice 4 — Safety posture (biometric gate)
 

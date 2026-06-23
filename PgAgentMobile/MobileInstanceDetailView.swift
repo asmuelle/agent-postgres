@@ -13,12 +13,13 @@ struct MobileInstanceDetailView: View {
     let profile: PostgresProfile
 
     private enum Tab: Int, CaseIterable {
-        case activity, locks
+        case activity, locks, maintenance
 
         var title: String {
             switch self {
             case .activity: return "Activity"
             case .locks: return "Locks"
+            case .maintenance: return "Maintenance"
             }
         }
 
@@ -26,6 +27,7 @@ struct MobileInstanceDetailView: View {
             switch self {
             case .activity: return "bolt.horizontal"
             case .locks: return "lock"
+            case .maintenance: return "wrench.and.screwdriver"
             }
         }
     }
@@ -51,6 +53,8 @@ struct MobileInstanceDetailView: View {
                     MobileInstanceActivityView(profile: profile)
                 case .locks:
                     MobileInstanceLocksView(profile: profile)
+                case .maintenance:
+                    MobileInstanceMaintenanceView(profile: profile)
                 }
             }
         }
