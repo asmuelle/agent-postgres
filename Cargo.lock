@@ -2836,9 +2836,9 @@ dependencies = [
 
 [[package]]
 name = "ssh-commander-pg-parquet"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e05fbcb9354cc369a55f2aaa0fa85a5fd5bcbdc4b226880355b9b7db16a1b5c"
+checksum = "0ea0d59693b385ed4b9f27a6f850ddbb070d64c5503fef79c1fca87099884d96"
 dependencies = [
  "arrow-array",
  "arrow-schema",
