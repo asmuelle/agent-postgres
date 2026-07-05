@@ -3,6 +3,28 @@
 # Every ignore below is a tracked exception, not a dismissal. When an entry's
 # upstream fix lands, remove it so CI starts enforcing again.
 
+# Minimal allow list — only the SPDX identifiers actually present across the
+# resolved dependency tree (`cargo deny check licenses`), including the ones
+# required by an `AND` clause (e.g. aws-lc-sys, ring, brotli, unicode-ident
+# each combine multiple licenses that must *all* be allowed). Re-run
+# `cargo deny check licenses` and extend this list if a new dependency
+# introduces a license not covered here.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+]
+# pg-agent itself (`publish = false`) is this app's own AGPL-3.0-or-later
+# code, not a third-party dependency — skip the license scan for
+# workspace-private crates rather than adding our own license to the
+# third-party allow list above.
+private = { ignore = true }
+
 [advisories]
 ignore = [
     # rsa Marvin timing side-channel — no patched release exists (upstream is

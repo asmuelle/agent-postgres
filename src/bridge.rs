@@ -12,10 +12,20 @@ pub struct MacOsBridge {
 }
 
 impl MacOsBridge {
+    /// Return the process-wide bridge instance, lazily creating it if
+    /// `rshell_init()` hasn't run yet.
+    ///
+    /// Every `rshell_*` FFI entry point (~56 call sites) reaches this
+    /// through `global()`, so a bad ordering on the Swift side used to
+    /// `.expect()`-panic here — which aborts the whole host process
+    /// across the FFI boundary rather than surfacing a recoverable
+    /// error. `init()` only builds a fresh `Runtime` + `ConnectionManager`
+    /// (no per-call state, nothing that depends on caller-supplied
+    /// arguments), and `rshell_init()` is otherwise a fire-and-forget
+    /// `bool`, so self-initializing here is behaviorally equivalent to
+    /// requiring `rshell_init()` first while removing the panic entirely.
     pub fn global() -> &'static Self {
-        BRIDGE
-            .get()
-            .expect("MacOsBridge not initialized — call rshell_init() first")
+        Self::init()
     }
 
     pub fn init() -> &'static Self {

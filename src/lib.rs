@@ -8,6 +8,7 @@
 //!   uniffi-bindgen generate src/lib.rs --language swift --out-dir ../bindings
 
 mod bridge;
+mod collector_support;
 mod doctor;
 mod ffi;
 mod monitor;

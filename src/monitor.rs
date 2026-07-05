@@ -31,19 +31,30 @@ fn cache() -> &'static Mutex<HashMap<String, OsKind>> {
     OS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// A poisoned lock here just means some other holder panicked while
+// touching this plain `HashMap` — the map itself is still a valid,
+// usable value, so recovering it is safe. Propagating the panic
+// instead would cross the FFI boundary and abort the whole app.
 pub fn cached(connection_id: &str) -> Option<OsKind> {
-    cache().lock().unwrap().get(connection_id).cloned()
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(connection_id)
+        .cloned()
 }
 
 pub fn store(connection_id: &str, os: OsKind) {
     cache()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .insert(connection_id.to_string(), os);
 }
 
 pub fn evict(connection_id: &str) {
-    cache().lock().unwrap().remove(connection_id);
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(connection_id);
 }
 
 /// Map a `uname -s` output line to a typed kind. Trims whitespace and

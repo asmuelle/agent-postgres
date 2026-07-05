@@ -67,70 +67,19 @@ fn commands_for_profile(profile: DoctorCollectorProfile) -> &'static [DoctorComm
     }
 }
 
+/// Doctor commands never need the `apt-get -s upgrade` exception (its
+/// fixed command list has no package-manager entries), so this always
+/// runs the shared guard's plain (non-simulate) path.
 pub fn command_is_read_only(command: &str) -> bool {
-    let lowered = format!(" {} ", command.to_lowercase());
-    let blocked = [
-        " rm ",
-        " mv ",
-        " cp ",
-        " chmod ",
-        " chown ",
-        " kill ",
-        " pkill ",
-        " systemctl restart ",
-        " systemctl reload ",
-        " systemctl start ",
-        " systemctl stop ",
-        " apt install ",
-        " apt upgrade ",
-        " apt remove ",
-        " dnf install ",
-        " yum install ",
-        " tee ",
-        " drop table ",
-        " truncate table ",
-    ];
-    !blocked.iter().any(|token| lowered.contains(token))
+    crate::collector_support::command_is_read_only(command, false)
 }
 
 pub fn permission_limited(output: &str) -> bool {
-    let lower = output.to_lowercase();
-    lower.contains("permission denied")
-        || lower.contains("operation not permitted")
-        || lower.contains("authentication is required")
-        || lower.contains("a password is required")
-        || lower.contains("access denied")
+    crate::collector_support::permission_limited(output, &[])
 }
 
 pub fn cap_text(input: &str, max_bytes: usize, max_lines: usize) -> (String, bool, u32, u32) {
-    let original_bytes = input.len();
-    let original_lines = input.lines().count();
-
-    let mut bytes = 0usize;
-    let mut lines = Vec::new();
-    for line in input.lines().take(max_lines) {
-        let line_bytes = line.len() + 1;
-        if bytes + line_bytes > max_bytes {
-            break;
-        }
-        bytes += line_bytes;
-        lines.push(line);
-    }
-
-    let truncated = original_bytes > bytes || original_lines > lines.len();
-    let mut text = lines.join("\n");
-    if truncated {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str("[truncated]");
-    }
-    (
-        text,
-        truncated,
-        original_bytes as u32,
-        original_lines as u32,
-    )
+    crate::collector_support::cap_text(input, max_bytes, max_lines)
 }
 
 static HOST_COMMANDS: [DoctorCommand; 7] = [
