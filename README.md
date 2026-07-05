@@ -4,7 +4,6 @@
 
 Native macOS / iPadOS SSH workspace. AppKit + SwiftUI shell, SwiftTerm for the PTY, [`ssh-commander-core`](https://github.com/asmuelle/ssh-commander-core) for the protocol layer, [uniffi](https://mozilla.github.io/uniffi-rs/) for the FFI bridge.
 
-> Private repository. See [TOOLS.md](TOOLS.md) for the in-app feature catalog and [AGENTS.md](AGENTS.md) for code-tour notes for AI agents.
 
 ## Stack
 
