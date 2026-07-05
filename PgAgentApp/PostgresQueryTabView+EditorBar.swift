@@ -14,8 +14,7 @@ extension PostgresQueryTabView {
 
     @ViewBuilder
     func sqlEditor(for tab: PostgresQueryTab) -> some View {
-        ZStack(alignment: .topTrailing) {
-            PostgresSQLEditor(
+        PostgresSQLEditor(
                 text: Binding(
                     get: { tab.sql },
                     set: { store.setSQL($0, forTab: tab.id) }
@@ -51,7 +50,25 @@ extension PostgresQueryTabView {
                 }
                 .accessibilityHidden(true)
             }
+            .sheet(isPresented: $nlToSQLStore.isPresented) {
+                PgAINLToSQLView(
+                    store: nlToSQLStore,
+                    connectionId: connectionId ?? "",
+                    defaultSchema: "public"
+                ) { generatedSql in
+                    store.setAIGeneratedSQL(generatedSql, forTab: tab.id)
+                }
+            }
+    }
 
+    // MARK: - Editor actions
+    //
+    // Run/cancel/history/saved/snippets/AI-generate controls. Rendered on the
+    // transaction-bar row above the editor (see PostgresQueryTabView.content),
+    // NOT as an overlay on the text view — an overlay sat on top of the SQL
+    // and long lines disappeared underneath it.
+    @ViewBuilder
+    func editorActions(for tab: PostgresQueryTab) -> some View {
             HStack(spacing: 6) {
                 if aiAvailable {
                     Button {
@@ -160,17 +177,6 @@ extension PostgresQueryTabView {
                 }
             }
             .controlSize(.small)
-            .padding(8)
-        }
-        .sheet(isPresented: $nlToSQLStore.isPresented) {
-            PgAINLToSQLView(
-                store: nlToSQLStore,
-                connectionId: connectionId ?? "",
-                defaultSchema: "public"
-            ) { generatedSql in
-                store.setAIGeneratedSQL(generatedSql, forTab: tab.id)
-            }
-        }
     }
 
     // MARK: - Status bar

@@ -209,13 +209,23 @@ struct PostgresQueryTabView: View {
                     .fill(envColor)
                     .frame(height: 2)
             }
-            PostgresTransactionBar(
-                state: tab.transactionState,
-                isConnected: connectionId != nil,
-                onBegin: { beginTransaction(tab: tab) },
-                onCommit: { commitTransaction(tab: tab) },
-                onRollback: { rollbackTransaction(tab: tab) }
-            )
+            // One control row: transaction state/controls on the left (its
+            // internal Spacer pushes everything else right), editor actions
+            // (Generate/History/Saved/Snippets/Explain/Run) on the right.
+            // The actions used to float as an overlay on the SQL text view,
+            // where long lines disappeared underneath them.
+            HStack(spacing: 0) {
+                PostgresTransactionBar(
+                    state: tab.transactionState,
+                    isConnected: connectionId != nil,
+                    onBegin: { beginTransaction(tab: tab) },
+                    onCommit: { commitTransaction(tab: tab) },
+                    onRollback: { rollbackTransaction(tab: tab) }
+                )
+                editorActions(for: tab)
+                    .padding(.trailing, 10)
+                    .padding(.vertical, 4)
+            }
             VSplitView {
                 sqlEditor(for: tab)
                     .frame(minHeight: 100, idealHeight: 160)
