@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import WidgetKit
 #if canImport(PgAgentMacOS)
 import PgAgentMacOS
 #endif
@@ -36,6 +37,27 @@ final class FleetHealthStore: ObservableObject {
             }
         }
         isRefreshing = false
+        publishWidgetSnapshot(profiles: profiles)
+    }
+
+    /// Hand the fresh fleet picture to the lock-screen accessory widgets: one
+    /// compact JSON snapshot in the App Group container, then a timeline
+    /// reload. Best-effort — widget plumbing must never fail a refresh.
+    private func publishWidgetSnapshot(profiles: [PostgresProfile]) {
+        let instances = profiles.map { profile -> PgFleetWidgetInstance in
+            let health = self.health(for: profile.id)
+            return PgFleetWidgetInstance(
+                profileId: profile.id,
+                name: profile.name,
+                status: PgFleetInstanceStatus(severity: health.severity),
+                activeBackends: health.activeBackends,
+                longRunningCount: health.longRunningCount,
+                blockedLockCount: health.blockedLockCount
+            )
+        }
+        let snapshot = PgFleetWidgetSnapshot(generatedAt: Date(), instances: instances)
+        try? PgFleetWidgetSnapshotStore().save(snapshot)
+        WidgetCenter.shared.reloadTimelines(ofKind: PgFleetWidgetConfiguration.accessoryWidgetKind)
     }
 
     private func refreshOne(profile: PostgresProfile) async {
@@ -86,6 +108,18 @@ final class FleetHealthStore: ObservableObject {
                 errorMessage: error.localizedDescription,
                 lastUpdated: Date()
             )
+        }
+    }
+}
+
+private extension PgFleetInstanceStatus {
+    init(severity: FleetInstanceHealth.Severity) {
+        switch severity {
+        case .offline: self = .offline
+        case .blocked: self = .blocked
+        case .slow: self = .slow
+        case .busy: self = .busy
+        case .healthy: self = .healthy
         }
     }
 }

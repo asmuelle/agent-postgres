@@ -225,6 +225,12 @@ targets:
       - path: Sources/PgAgentMacOS/LiveActivityModels.swift
       - path: Sources/PgAgentMacOS/WatchStatusModels.swift
       - path: Sources/PgAgentMacOS/ShellIntegrationCommands.swift
+      # Deliberately compiled into BOTH the app (via the PgAgentMobile group
+      # above) and this extension: the Live Activity attributes and the fleet
+      # accessory-widget snapshot schema must be byte-identical on both sides
+      # of the App Group / ActivityKit boundary.
+      - path: PgAgentMobile/PgOperationActivityAttributes.swift
+      - path: PgAgentMobile/PgFleetWidgetSnapshot.swift
     entitlements:
       path: PgAgentMobileWidgets/PgAgentMobileWidgets.entitlements
       properties:

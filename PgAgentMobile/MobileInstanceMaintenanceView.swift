@@ -175,6 +175,13 @@ struct MobileInstanceMaintenanceView: View {
         }
         runningTableId = candidate.id
         defer { runningTableId = nil }
+        // Lock-screen Live Activity for the duration of the vacuum — nil token
+        // (activities disabled) makes every call below a silent no-op.
+        let activityId = LiveActivityManager.shared.start(
+            operationKind: full ? "VACUUM FULL" : "VACUUM ANALYZE",
+            instanceName: profile.name,
+            targetName: "\(candidate.schema).\(candidate.table)"
+        )
         do {
             _ = try await BridgeManager.shared.pgExecute(
                 connectionId: connectionId,
@@ -182,8 +189,10 @@ struct MobileInstanceMaintenanceView: View {
                 sql: candidate.vacuumSQL(analyze: true, full: full),
                 pageSize: 1
             )
+            LiveActivityManager.shared.end(id: activityId, success: true)
             await flash("\(full ? "VACUUM FULL" : "VACUUM ANALYZE") \(candidate.table) done")
         } catch {
+            LiveActivityManager.shared.end(id: activityId, success: false, detail: error.localizedDescription)
             await flash("Failed: \(error.localizedDescription)")
         }
         await load()

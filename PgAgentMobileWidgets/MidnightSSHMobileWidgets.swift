@@ -342,6 +342,8 @@ struct MidnightSSHMobileWidgetBundle: WidgetBundle {
     var body: some Widget {
         MidnightSSHMobileMonitoringWidget()
         MidnightSSHOperationLiveActivityWidget()
+        PgFleetAccessoryWidget()
+        PgOperationLiveActivityWidget()
     }
 }
 
