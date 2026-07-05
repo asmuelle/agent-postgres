@@ -24,7 +24,11 @@ class ConnectionStoreManager: ObservableObject {
     }
 
     private static var storeFileURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        // Application Support always resolves in practice; fall back to the
+        // temp directory (same idiom as SSHKeyVault) rather than crashing
+        // connection persistence on an exotic sandbox state.
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         let dir = appSupport.appendingPathComponent("com.mc-ssh")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("connections.json")

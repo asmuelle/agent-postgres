@@ -183,9 +183,12 @@ final class PostgresHistoryStore: ObservableObject {
     // MARK: - Disk
 
     private static func directoryURL() -> URL {
+        // Application Support always resolves in practice; fall back to the
+        // temp directory (same idiom as SSHKeyVault) rather than crashing
+        // the history store on an exotic sandbox state.
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
+            .first ?? FileManager.default.temporaryDirectory
         let dir = appSupport
             .appendingPathComponent("com.mc-ssh")
             .appendingPathComponent("postgres-history")

@@ -96,7 +96,7 @@ enum SSHTunnelResolver {
         var prepared: PreparedSSHKey? = nil
         if sshProfile.authMethod == .publicKey {
             do {
-                prepared = try SSHKeyAccessCoordinator.prepare(
+                prepared = try await SSHKeyAccessCoordinator.prepare(
                     sshProfile.sshKeyReference,
                     profile: sshProfile,
                     sessionId: nil

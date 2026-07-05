@@ -28,8 +28,11 @@ class CrashReporter {
 
     // MARK: - Log capture
 
+    /// All captured strings pass through `CrashLogRedactor` here — at the
+    /// sink — so no call site can accidentally persist a secret into a
+    /// user-exportable .crash file.
     func log(_ message: String) {
-        memoryLog.write(message)
+        memoryLog.write(CrashLogRedactor.redact(message))
     }
 
     // MARK: - Report generation
@@ -51,9 +54,9 @@ class CrashReporter {
             timestamp: Date(),
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
             appBuild: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?",
-            errorDomain: nsError.domain,
+            errorDomain: CrashLogRedactor.redact(nsError.domain),
             errorCode: nsError.code,
-            errorDescription: nsError.localizedDescription,
+            errorDescription: CrashLogRedactor.redact(nsError.localizedDescription),
             callStack: Thread.callStackSymbols,
             recentLogs: memoryLog.snapshot()
         )
@@ -92,6 +95,48 @@ class CrashReporter {
 
     func deleteAll() {
         for url in reportURLs { deleteReport(url) }
+    }
+}
+
+// MARK: - Secret redaction
+
+/// Regex-redacts secret-bearing substrings before they are persisted by
+/// `CrashReporter`. Covers the password/passphrase/secret/token/api_key/
+/// private_key assignment family plus URL-embedded credentials
+/// (`scheme://user:pass@host`). Values are replaced with `[REDACTED]`;
+/// keys and structure are kept so reports stay diagnosable.
+enum CrashLogRedactor {
+    /// (pattern, replacement template) pairs. Templates keep the key and
+    /// separator ($1) and drop only the secret value.
+    private static let rules: [(regex: NSRegularExpression, template: String)] = {
+        let raw: [(String, String)] = [
+            // key: value / key=value / "key": "value" — quoted or bare values.
+            (
+                #"(?i)("?(?:password|passphrase|secret|token|api[_-]?key|private[_-]?key)"?\s*[:=]\s*)("[^"]*"|\S+)"#,
+                "$1[REDACTED]"
+            ),
+            // URL credentials: scheme://user:secret@host
+            (
+                #"(://[^/\s:@]+:)([^@\s]+)(@)"#,
+                "$1[REDACTED]$3"
+            ),
+        ]
+        return raw.compactMap { pattern, template in
+            (try? NSRegularExpression(pattern: pattern)).map { ($0, template) }
+        }
+    }()
+
+    static func redact(_ message: String) -> String {
+        var result = message
+        for rule in rules {
+            let range = NSRange(result.startIndex..., in: result)
+            result = rule.regex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: rule.template
+            )
+        }
+        return result
     }
 }
 

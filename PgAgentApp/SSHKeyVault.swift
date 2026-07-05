@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import OSLog
 import Security
 import PgAgentMacOS
 
@@ -57,6 +58,7 @@ final class SSHKeyVault {
     private let maxKeyBytes = 256 * 1024
     private let keychainService = "com.mc-ssh.ssh.key-vault"
     private let keychainAccount = "master-key"
+    private let logger = Logger(subsystem: "com.mc-ssh", category: "ssh-key-vault")
 
     private init() {}
 
@@ -239,6 +241,30 @@ final class SSHKeyVault {
         try? fileManager.removeItem(at: recordURL(id: id))
     }
 
+    /// Purge every file in the materialized-keys directory. Decrypted keys
+    /// are normally removed by their session's teardown, but a crash strands
+    /// plaintext key files on disk indefinitely. At app launch no sessions
+    /// are live, so a full purge is always safe — call this once from
+    /// startup before any connection can materialize a key.
+    func sweepStaleMaterializedKeys() {
+        guard let dir = try? materializedDirectory(),
+              let names = try? fileManager.contentsOfDirectory(atPath: dir.path)
+        else { return }
+        var removed = 0
+        for name in names {
+            let url = dir.appendingPathComponent(name)
+            do {
+                try fileManager.removeItem(at: url)
+                removed += 1
+            } catch {
+                logger.error("Failed to sweep stale materialized key \(name, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        if removed > 0 {
+            logger.notice("Swept \(removed) stale materialized SSH key file(s) left by a previous session")
+        }
+    }
+
     static func fingerprint(publicKeyLine: String?) -> String? {
         guard let publicKeyLine else { return nil }
         let parts = publicKeyLine.split(separator: " ")
@@ -347,6 +373,12 @@ final class SSHKeyVault {
         addQuery.removeValue(forKey: kSecReturnData as String)
         addQuery.removeValue(forKey: kSecMatchLimit as String)
         addQuery[kSecValueData as String] = bytes
+        // Pin the accessibility class explicitly — readable only while the
+        // device is unlocked, never migrated to another device — matching
+        // AdvancedAuthenticationStore and the iOS KeychainManager. Existing
+        // installs keep the class their item was created with; only newly
+        // created master keys get the pinned attribute.
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
             throw SSHKeyVaultError.keychainUnavailable(addStatus)

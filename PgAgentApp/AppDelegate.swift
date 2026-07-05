@@ -14,6 +14,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         BridgeManager.shared.initialize()
         logger.info("Rust bridge initialized — app ready")
 
+        // No sessions are live yet, so any decrypted key file left in the
+        // materialized-keys directory is a stranded artifact of a crash —
+        // purge them before anything can connect.
+        SSHKeyVault.shared.sweepStaleMaterializedKeys()
+
         // Persist the main window's frame across launches via AppKit's
         // built-in autosave. SwiftUI's WindowGroup doesn't expose a
         // direct frameAutosaveName binding, so we set it on the

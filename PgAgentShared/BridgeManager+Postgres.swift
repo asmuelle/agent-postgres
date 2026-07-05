@@ -116,6 +116,27 @@ extension BridgeManager {
     func pgConnect(profile: PostgresProfile) async throws -> String {
         var config = profile.toFfiConfig()
 
+        #if os(iOS)
+        // The Rust core's keychain integration is macOS-only (it links the
+        // macOS Security framework); on iOS that path is a no-op stub that
+        // always reports "no keychain entry". The password actually lives in
+        // the native iOS Keychain, saved via `KeychainManager`. Resolve it
+        // here and pass it to the FFI as an explicit password so connecting
+        // never reaches the stub.
+        if case .keychain = profile.auth {
+            let account = profile.keychainAccount
+            let stored = await MainActor.run {
+                KeychainManager.shared.loadPassword(kind: .postgresPassword, account: account)
+            }
+            guard let password = stored, !password.isEmpty else {
+                throw PostgresBridgeError.other(
+                    "No saved password for \(profile.user)@\(profile.host). Edit the connection and re-enter it."
+                )
+            }
+            config.auth = .password(password: password)
+        }
+        #endif
+
         // The profile stores the *SSH profile id* the user picked; the
         // FFI needs the *live connection id* the Rust manager holds.
         // Resolve (auto-opening the SSH connection with stored

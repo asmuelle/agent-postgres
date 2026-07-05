@@ -143,8 +143,12 @@ class KeychainManager {
         alert.accessoryView = field
 
         let response = alert.runModal()
+        let value = field.stringValue
+        // Clear the secure field so the secret doesn't linger in the
+        // dismissed alert's view hierarchy.
+        field.stringValue = ""
         guard response == .alertFirstButtonReturn else { return nil }
-        return field.stringValue.isEmpty ? nil : field.stringValue
+        return value.isEmpty ? nil : value
     }
 
     /// Prompt for a key passphrase.
@@ -160,8 +164,12 @@ class KeychainManager {
         alert.accessoryView = field
 
         let response = alert.runModal()
+        let value = field.stringValue
+        // Clear the secure field so the secret doesn't linger in the
+        // dismissed alert's view hierarchy.
+        field.stringValue = ""
         guard response == .alertFirstButtonReturn else { return nil }
-        return field.stringValue.isEmpty ? nil : field.stringValue
+        return value.isEmpty ? nil : value
     }
     #endif
 }

@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import PgAgentMacOS
 
 final class PreparedSSHKey {
@@ -65,7 +66,7 @@ enum SSHKeyAccessCoordinator {
         _ reference: SSHKeyReference?,
         profile: ConnectionProfile? = nil,
         sessionId: String? = nil
-    ) throws -> PreparedSSHKey {
+    ) async throws -> PreparedSSHKey {
         guard let reference else { throw SSHKeyAccessError.missingKey }
 
         switch reference {
@@ -119,9 +120,18 @@ enum SSHKeyAccessCoordinator {
             }
 
         case .agent(let identityHint):
-            if let _ = profile {
-                let approved = true
-                guard approved else { throw SSHKeyAccessError.agentApprovalDenied }
+            // A plain agent reference has no policy record of its own; the
+            // `requiresBiometricApproval` flag lives on
+            // AdvancedAuthIdentityRecord. When the hint resolves to a stored
+            // advanced identity, honor that identity's flag — otherwise no
+            // approval is required and background reconnects stay silent.
+            let matchedIdentity = AdvancedAuthenticationStore.shared.identities
+                .first { $0.identityHint != nil && $0.identityHint == identityHint }
+            if let matchedIdentity, matchedIdentity.requiresBiometricApproval {
+                try await requireDeviceOwnerApproval(
+                    identityName: matchedIdentity.displayName,
+                    profileName: profile?.name
+                )
             }
             return PreparedSSHKey(
                 keyPath: nil,
@@ -138,9 +148,11 @@ enum SSHKeyAccessCoordinator {
             switch identity.kind {
             case .securityKey, .sshCertificate:
                 let hint = identity.identityHint
-                if let _ = profile {
-                    let approved = true
-                    guard approved else { throw SSHKeyAccessError.agentApprovalDenied }
+                if identity.requiresBiometricApproval {
+                    try await requireDeviceOwnerApproval(
+                        identityName: identity.displayName,
+                        profileName: profile?.name
+                    )
                 }
                 return PreparedSSHKey(
                     keyPath: nil,
@@ -157,5 +169,35 @@ enum SSHKeyAccessCoordinator {
                 )
             }
         }
+    }
+
+    /// The real approval gate behind identities whose
+    /// `requiresBiometricApproval` flag is set (the UI advertises them as
+    /// "Biometric approval" protected). `.deviceOwnerAuthentication` falls
+    /// back to the account password on Macs without Touch ID. The check is
+    /// await-based end to end — no semaphores — so a background reconnect
+    /// that lands here suspends on the system prompt instead of blocking
+    /// the main actor.
+    ///
+    /// Mirrors the mobile `BiometricGate` policy: fails open only when the
+    /// device has no evaluatable authentication at all (effectively never
+    /// on macOS, where the login password always qualifies); any cancel or
+    /// failure denies agent use.
+    private static func requireDeviceOwnerApproval(
+        identityName: String,
+        profileName: String?
+    ) async throws {
+        let context = LAContext()
+        var policyError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
+            return
+        }
+        let target = profileName.map { " for “\($0)”" } ?? ""
+        let reason = "approve SSH agent use of “\(identityName)”\(target)"
+        let approved = (try? await context.evaluatePolicy(
+            .deviceOwnerAuthentication,
+            localizedReason: reason
+        )) ?? false
+        guard approved else { throw SSHKeyAccessError.agentApprovalDenied }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 #if canImport(PgAgentMacOS)
 import PgAgentMacOS
 #endif
@@ -388,6 +389,8 @@ enum PgForeignKeyParser {
 
 @MainActor
 final class PgSchemaStore: ObservableObject {
+    private let logger = Logger(subsystem: "com.mc-ssh", category: "pg-schema-store")
+
     /// The connection this store is bound to. Held for the store's
     /// lifetime — switching connections means a new store.
     let connectionId: String
@@ -621,9 +624,12 @@ final class PgSchemaStore: ObservableObject {
                     }
                 }
             } catch {
-                // Ignore query failures defensively
+                // Keep the metadata pane usable without constraints, but
+                // leave a trace — a permission-denied on pg_constraint is
+                // otherwise undiagnosable.
+                logger.warning("constraint introspection failed for \(schema, privacy: .public).\(table, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
-            
+
             // Execute triggers query
             do {
                 let res = try await BridgeManager.shared.pgExecute(
@@ -645,9 +651,11 @@ final class PgSchemaStore: ObservableObject {
                     }
                 }
             } catch {
-                // Ignore query failures defensively
+                // Same defensive posture as constraints above: don't fail
+                // the pane, but record why triggers are missing.
+                logger.warning("trigger introspection failed for \(schema, privacy: .public).\(table, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
-            
+
             metaState[key] = .loaded(nodes)
         } catch {
             metaState[key] = .failed(error.localizedDescription)
