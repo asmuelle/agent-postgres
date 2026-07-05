@@ -1,21 +1,30 @@
 import Foundation
 import SwiftUI
-import WidgetKit
 #if canImport(PgAgentMacOS)
 import PgAgentMacOS
 #endif
 
 // =============================================================================
 // FleetHealthStore — polls every saved Postgres profile for a lightweight
-// health glance used by the mobile Fleet Monitor. Connects lazily through the
-// shared PostgresConnectionManager and reads pg_stat_activity / pg_locks via
-// the existing FFI bridge. No Rust changes — pure consumer of pgListSessions /
-// pgListLocks.
+// health glance. Used by the mobile Fleet Monitor AND the macOS monitoring
+// hub, so it must stay platform-neutral: no WidgetKit / UIKit / BGTask deps.
+// Connects lazily through the shared PostgresConnectionManager and reads
+// pg_stat_activity / pg_locks via the existing FFI bridge. No Rust changes —
+// pure consumer of pgListSessions / pgListLocks.
+//
+// Platform-specific post-refresh work (e.g. publishing the iOS lock-screen
+// widget snapshot) hangs off `onRefreshCompleted` — see
+// PgAgentMobile/FleetHealthStore+Widgets.swift.
 // =============================================================================
 @MainActor
 final class FleetHealthStore: ObservableObject {
     @Published private(set) var health: [String: FleetInstanceHealth] = [:]
     @Published private(set) var isRefreshing = false
+
+    /// Invoked after every full fleet refresh with the profiles just polled.
+    /// The iOS app uses this to publish the accessory-widget snapshot; the
+    /// macOS hub leaves it nil.
+    var onRefreshCompleted: (([PostgresProfile]) -> Void)?
 
     private let connectionManager = PostgresConnectionManager.shared
 
@@ -37,27 +46,7 @@ final class FleetHealthStore: ObservableObject {
             }
         }
         isRefreshing = false
-        publishWidgetSnapshot(profiles: profiles)
-    }
-
-    /// Hand the fresh fleet picture to the lock-screen accessory widgets: one
-    /// compact JSON snapshot in the App Group container, then a timeline
-    /// reload. Best-effort — widget plumbing must never fail a refresh.
-    private func publishWidgetSnapshot(profiles: [PostgresProfile]) {
-        let instances = profiles.map { profile -> PgFleetWidgetInstance in
-            let health = self.health(for: profile.id)
-            return PgFleetWidgetInstance(
-                profileId: profile.id,
-                name: profile.name,
-                status: PgFleetInstanceStatus(severity: health.severity),
-                activeBackends: health.activeBackends,
-                longRunningCount: health.longRunningCount,
-                blockedLockCount: health.blockedLockCount
-            )
-        }
-        let snapshot = PgFleetWidgetSnapshot(generatedAt: Date(), instances: instances)
-        try? PgFleetWidgetSnapshotStore().save(snapshot)
-        WidgetCenter.shared.reloadTimelines(ofKind: PgFleetWidgetConfiguration.accessoryWidgetKind)
+        onRefreshCompleted?(profiles)
     }
 
     private func refreshOne(profile: PostgresProfile) async {
@@ -108,18 +97,6 @@ final class FleetHealthStore: ObservableObject {
                 errorMessage: error.localizedDescription,
                 lastUpdated: Date()
             )
-        }
-    }
-}
-
-private extension PgFleetInstanceStatus {
-    init(severity: FleetInstanceHealth.Severity) {
-        switch severity {
-        case .offline: self = .offline
-        case .blocked: self = .blocked
-        case .slow: self = .slow
-        case .busy: self = .busy
-        case .healthy: self = .healthy
         }
     }
 }

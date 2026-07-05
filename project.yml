@@ -88,6 +88,16 @@ targets:
         com.apple.security.network.server: true
         com.apple.security.application-groups:
           - group.com.pgagent.pgagent
+        # CloudKit alert relay (roadmap 1.1): the Mac hub writes FleetAlert
+        # records to the user's private database. CloudKit works with
+        # Developer ID signing; unsigned/ad-hoc local builds simply surface
+        # "iCloud unavailable" in the hub UI at runtime (CI builds with
+        # CODE_SIGNING_ALLOWED=NO are unaffected at compile time).
+        com.apple.developer.icloud-services:
+          - CloudKit
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.pgagent.pgagent
+        com.apple.developer.aps-environment: development
         # `keychain-access-groups` requires a provisioning profile (Apple
         # ties access groups to a Team ID), so it can't coexist with
         # ad-hoc signing. Keychain APIs still work via the implicit
@@ -179,6 +189,16 @@ targets:
           - $(AppIdentifierPrefix)com.pgagent.mobile
         com.apple.security.application-groups:
           - group.com.pgagent.pgagent
+        # CloudKit alert relay (roadmap 1.1): subscription-driven pushes from
+        # the Mac hub. aps-environment is rewritten to `production` by the
+        # App Store submission pipeline; `development` is correct for local
+        # device builds. CI simulator builds run CODE_SIGNING_ALLOWED=NO, so
+        # these entitlements don't require a provisioning profile there.
+        com.apple.developer.icloud-services:
+          - CloudKit
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.pgagent.pgagent
+        aps-environment: development
     settings:
       base:
         INFOPLIST_FILE: PgAgentMobile/Info.plist
@@ -348,11 +368,13 @@ targets:
       - path: Tests/PgAgentMobileTests/Products.storekit
         buildPhase: resources
       - path: PgAgentMobile/MobileEntitlementsStore.swift
-      - path: PgAgentMobile/FleetHealthModel.swift
       - path: PgAgentMobile/LockChainModel.swift
       - path: PgAgentMobile/MaintenanceModel.swift
-      - path: PgAgentMobile/FleetAlertModel.swift
-      - path: PgAgentMobile/FleetMonitorSettings.swift
+      # Fleet monitor engine moved to PgAgentShared (reused by the macOS
+      # monitoring hub) — same sources, new home.
+      - path: PgAgentShared/FleetHealthModel.swift
+      - path: PgAgentShared/FleetAlertModel.swift
+      - path: PgAgentShared/FleetMonitorSettings.swift
       - path: PgAgentShared/PostgresSQLQuoting.swift
     dependencies:
       - sdk: StoreKitTest.framework

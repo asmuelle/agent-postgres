@@ -2,8 +2,11 @@ import SwiftUI
 
 @main
 struct PgAgentMobileApp: App {
+    // Remote-notification plumbing for the Mac-hub CloudKit alert relay.
+    @UIApplicationDelegateAdaptor(MobileAppDelegate.self) private var appDelegate
     @StateObject private var entitlementsStore = MobileEntitlementsStore.shared
     @StateObject private var profileStore = PostgresProfileStore.shared
+    @StateObject private var alertRouter = MobileAlertRouter.shared
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -13,6 +16,7 @@ struct PgAgentMobileApp: App {
             }
             .environmentObject(entitlementsStore)
             .environmentObject(profileStore)
+            .environmentObject(alertRouter)
             .task {
                 BridgeManager.shared.initialize()
                 entitlementsStore.start()

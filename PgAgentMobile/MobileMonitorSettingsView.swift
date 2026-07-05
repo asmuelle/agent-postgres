@@ -7,6 +7,7 @@ import SwiftUI
 // =============================================================================
 struct MobileMonitorSettingsView: View {
     @ObservedObject private var settings = FleetMonitorSettings.shared
+    @ObservedObject private var hubReceiver = HubAlertReceiver.shared
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -50,6 +51,28 @@ struct MobileMonitorSettingsView: View {
                         }
                 } footer: {
                     Text("When enabled, pgAgent periodically checks your instances in the background (about every 15 minutes, at the system's discretion) and notifies you when a threshold is crossed.")
+                }
+
+                Section {
+                    Toggle("Receive alerts from your Mac hub", isOn: $settings.receiveHubAlertsEnabled)
+                        .onChange(of: settings.receiveHubAlertsEnabled) { _, enabled in
+                            Task {
+                                if enabled {
+                                    await HubAlertReceiver.shared.enable()
+                                } else {
+                                    await HubAlertReceiver.shared.disable()
+                                }
+                            }
+                        }
+                    if let status = hubReceiver.statusMessage {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("Mac Monitoring Hub")
+                } footer: {
+                    Text("If pgAgent on your Mac is set up as a monitoring hub, alerts arrive here as push notifications within seconds — even when this app hasn't been opened. Delivered through your private iCloud database; nothing leaves your Apple ID. Without a Mac hub, background alerts above remain the best-effort fallback (alert latency: minutes vs. seconds).")
                 }
             }
             .navigationTitle("Monitor Settings")

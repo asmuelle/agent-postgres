@@ -24,7 +24,7 @@ final class FleetBackgroundMonitor {
     private static let earliestInterval: TimeInterval = 15 * 60
     private static let firingKey = "fleet.firingAlerts"
 
-    private let store = FleetHealthStore()
+    private let store = FleetHealthStore.withWidgetPublishing()
     private let settings = FleetMonitorSettings.shared
 
     private init() {}
@@ -78,6 +78,19 @@ final class FleetBackgroundMonitor {
         }
     }
 
+    // MARK: - Hub-alert dedupe
+
+    /// A Mac-hub push arrived for `alertId` ("instanceId:kind:bucket"). Mark
+    /// the underlying condition ("instanceId:kind") as already-notified so
+    /// the next BGAppRefresh pass doesn't post a duplicate local
+    /// notification for the same ongoing problem. If the condition clears
+    /// before that pass, the key drops out of the firing set as usual.
+    func noteHubAlert(alertId: String) {
+        var firing = loadFiring()
+        firing.insert(FleetAlertPayload.localAlertKey(forAlertId: alertId))
+        saveFiring(firing)
+    }
+
     // MARK: - Notifications
 
     private func post(_ alert: FleetAlert) async {
@@ -85,6 +98,9 @@ final class FleetBackgroundMonitor {
         content.title = alert.title
         content.body = alert.body
         content.sound = .default
+        // Route notification taps to the affected instance (HubAlertReceiver
+        // is the shared UNUserNotificationCenter delegate).
+        content.userInfo = ["instanceId": alert.profileId]
         let request = UNNotificationRequest(identifier: alert.id, content: content, trigger: nil)
         try? await UNUserNotificationCenter.current().add(request)
     }

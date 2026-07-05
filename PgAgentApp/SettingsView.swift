@@ -38,6 +38,9 @@ struct SettingsView: View {
             syncSettings
                 .tabItem { Label("Sync", systemImage: "icloud") }
 
+            FleetHubSettingsView()
+                .tabItem { Label("Monitoring Hub", systemImage: "antenna.radiowaves.left.and.right") }
+
             if FeatureFlags.networkPolish.isEnabled {
                 NetworkPolishSettingsView()
                     .tabItem { Label("Network", systemImage: "network") }

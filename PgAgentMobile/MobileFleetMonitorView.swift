@@ -10,7 +10,7 @@ import PgAgentMacOS
 // =============================================================================
 struct MobileFleetMonitorView: View {
     @EnvironmentObject private var profileStore: PostgresProfileStore
-    @StateObject private var store = FleetHealthStore()
+    @StateObject private var store = FleetHealthStore.withWidgetPublishing()
     @Environment(\.dismiss) private var dismiss
     @State private var showingSettings = false
 

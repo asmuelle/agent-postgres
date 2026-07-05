@@ -32,7 +32,8 @@ struct MobileContentView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @EnvironmentObject private var entitlementsStore: MobileEntitlementsStore
-    
+    @EnvironmentObject private var alertRouter: MobileAlertRouter
+
     // Top-Level Active State Shared Per Profile
     @State private var selectedProfileId: String?
     @State private var activeConnections: [String: String] = [:] // profileId -> connectionId
@@ -84,6 +85,18 @@ struct MobileContentView: View {
         .sheet(isPresented: $showingFleetMonitor) {
             MobileFleetMonitorView()
                 .environmentObject(profileStore)
+        }
+        // Alert-notification deep link: tapping a fleet alert (Mac-hub push or
+        // local BGAppRefresh notification) routes to the affected instance.
+        // `initial: true` also consumes a route set before the view existed
+        // (cold launch from a notification).
+        .onChange(of: alertRouter.pendingInstanceId, initial: true) { _, pendingId in
+            guard let pendingId,
+                  profileStore.profiles.contains(where: { $0.id == pendingId })
+            else { return }
+            showingFleetMonitor = false
+            selectedProfileId = pendingId
+            alertRouter.pendingInstanceId = nil
         }
         // Properties sheet removed to present all node details directly in the main query workspace pane.
     }

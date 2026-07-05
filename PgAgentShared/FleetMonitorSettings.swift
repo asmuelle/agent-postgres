@@ -17,7 +17,14 @@ final class FleetMonitorSettings: ObservableObject {
         static let blockedLockAlert = "fleet.blockedLockAlert"
         static let alertOnUnreachable = "fleet.alertOnUnreachable"
         static let backgroundAlertsEnabled = "fleet.backgroundAlertsEnabled"
+        static let hubModeEnabled = "fleet.hubModeEnabled"
+        static let hubPollIntervalSeconds = "fleet.hubPollIntervalSeconds"
+        static let receiveHubAlertsEnabled = "fleet.receiveHubAlertsEnabled"
     }
+
+    /// Default seconds between hub polls; the Mac hub is an always-on app so
+    /// it can afford a much tighter loop than iOS BGAppRefresh.
+    static let defaultHubPollIntervalSeconds = 30
 
     private let defaults: UserDefaults
 
@@ -26,6 +33,13 @@ final class FleetMonitorSettings: ObservableObject {
     @Published var blockedLockAlert: Int { didSet { defaults.set(blockedLockAlert, forKey: Key.blockedLockAlert) } }
     @Published var alertOnUnreachable: Bool { didSet { defaults.set(alertOnUnreachable, forKey: Key.alertOnUnreachable) } }
     @Published var backgroundAlertsEnabled: Bool { didSet { defaults.set(backgroundAlertsEnabled, forKey: Key.backgroundAlertsEnabled) } }
+    /// macOS only: this Mac acts as the always-on monitoring hub and relays
+    /// alerts to the user's other devices via CloudKit.
+    @Published var hubModeEnabled: Bool { didSet { defaults.set(hubModeEnabled, forKey: Key.hubModeEnabled) } }
+    /// macOS only: seconds between hub poll passes.
+    @Published var hubPollIntervalSeconds: Int { didSet { defaults.set(hubPollIntervalSeconds, forKey: Key.hubPollIntervalSeconds) } }
+    /// iOS only: subscribe to FleetAlert records published by a Mac hub.
+    @Published var receiveHubAlertsEnabled: Bool { didSet { defaults.set(receiveHubAlertsEnabled, forKey: Key.receiveHubAlertsEnabled) } }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -35,6 +49,9 @@ final class FleetMonitorSettings: ObservableObject {
         blockedLockAlert = (defaults.object(forKey: Key.blockedLockAlert) as? Int) ?? d.blockedLockAlert
         alertOnUnreachable = (defaults.object(forKey: Key.alertOnUnreachable) as? Bool) ?? d.alertOnUnreachable
         backgroundAlertsEnabled = (defaults.object(forKey: Key.backgroundAlertsEnabled) as? Bool) ?? false
+        hubModeEnabled = (defaults.object(forKey: Key.hubModeEnabled) as? Bool) ?? false
+        hubPollIntervalSeconds = (defaults.object(forKey: Key.hubPollIntervalSeconds) as? Int) ?? Self.defaultHubPollIntervalSeconds
+        receiveHubAlertsEnabled = (defaults.object(forKey: Key.receiveHubAlertsEnabled) as? Bool) ?? false
     }
 
     var thresholds: FleetMonitorThresholds {
