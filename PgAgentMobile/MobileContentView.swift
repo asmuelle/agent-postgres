@@ -129,7 +129,14 @@ struct MobileContentView: View {
                     
                     switch kind {
                     case "relation":
-                        qStore.openRelationTab(schema: schema, name: name)
+                        // Kind-aware so views/foreign tables get a
+                        // ctid-free SELECT (no ctid on those).
+                        qStore.openRelationTab(
+                            schema: schema,
+                            name: name,
+                            relationKind: MobileStoreCache.schemaStores[profile.id]?
+                                .relationDisplayKind(schema: schema, name: name)
+                        )
                     case "routine":
                         let signature = details["signature"] ?? ""
                         qStore.openRoutineTab(schema: schema, name: name, signature: signature)
@@ -552,7 +559,11 @@ struct MobileProfileWorkspaceView: View {
                                     if kind == "relation" {
                                         let schema = details["schema"] ?? ""
                                         let name = details["name"] ?? ""
-                                        queryStore.openRelationTab(schema: schema, name: name)
+                                        queryStore.openRelationTab(
+                                            schema: schema,
+                                            name: name,
+                                            relationKind: store.relationDisplayKind(schema: schema, name: name)
+                                        )
                                     } else if kind == "properties" {
                                         queryStore.openPropertyTab(node: node)
                                     }

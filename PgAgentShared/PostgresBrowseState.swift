@@ -30,6 +30,12 @@ struct PostgresBrowseState: Hashable, Sendable {
     /// exact multiple of `pageSize` yields one trailing empty page —
     /// acceptable, and far cheaper than a count(*) per browse.
     var hasNextPage: Bool = false
+    /// `false` for relations without a `ctid` (plain views, foreign
+    /// tables) — selecting it there fails with "column ctid does not
+    /// exist". Tables, partitioned tables, and materialized views all
+    /// have one. Without a row identity the grid is read-only, which
+    /// is correct for those relation kinds anyway.
+    var hasRowIdentity: Bool = true
 
     /// First row number (1-based) shown on the current page.
     var firstRowNumber: Int { page * pageSize + 1 }
@@ -40,7 +46,8 @@ struct PostgresBrowseState: Hashable, Sendable {
     /// UPDATEs (hidden from display). OFFSET is omitted on the first
     /// page so the common case reads clean in the editor.
     func sql() -> String {
-        var s = "SELECT *, ctid AS \(POSTGRES_ROWID_COLUMN) FROM \(Self.quoteIdent(schema)).\(Self.quoteIdent(table))"
+        let projection = hasRowIdentity ? "*, ctid AS \(POSTGRES_ROWID_COLUMN)" : "*"
+        var s = "SELECT \(projection) FROM \(Self.quoteIdent(schema)).\(Self.quoteIdent(table))"
         if let whereClause {
             s += " WHERE \(whereClause)"
         }

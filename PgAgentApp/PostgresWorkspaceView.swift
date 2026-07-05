@@ -102,11 +102,20 @@ struct PostgresWorkspaceView: View {
                 // immediately instead of waiting for ⌘↵.
                 let whereClause = userInfo["whereClause"] as? String
                 let autoRun = userInfo["autoRun"] as? Bool ?? false
+                // Resolve the relation kind so views/foreign tables get
+                // a ctid-free SELECT (they have no ctid; selecting it
+                // errors). Unknown (contents not loaded, e.g. FK
+                // navigation) falls back to table semantics — FKs can
+                // only reference tables.
+                let relationKind = PostgresConnectionManager.shared
+                    .schemaStores[profile.id]?
+                    .relationDisplayKind(schema: schema, name: name)
                 queryStore.openRelationTab(
                     schema: schema,
                     name: name,
                     whereClause: whereClause,
-                    autoRun: autoRun
+                    autoRun: autoRun,
+                    relationKind: relationKind
                 )
             }
         case "routine":

@@ -24,6 +24,28 @@ final class PostgresBrowseStateTests: XCTestCase {
         )
     }
 
+    func testViewSQLOmitsCtid() {
+        // Plain views (and foreign tables) have no ctid — selecting it
+        // fails with "column ctid does not exist".
+        var state = makeState(table: "import_statistics")
+        state.hasRowIdentity = false
+        XCTAssertEqual(
+            state.sql(),
+            "SELECT * FROM \"public\".\"import_statistics\" LIMIT 500;"
+        )
+    }
+
+    func testViewSQLKeepsSortAndPaging() {
+        var state = makeState(table: "v")
+        state.hasRowIdentity = false
+        state.sortColumn = "name"
+        state.page = 2
+        XCTAssertEqual(
+            state.sql(),
+            "SELECT * FROM \"public\".\"v\" ORDER BY \"name\" ASC LIMIT 500 OFFSET 1000;"
+        )
+    }
+
     func testWhereClauseLandsBeforeOrderAndLimit() {
         var state = makeState()
         state.whereClause = "\"org_id\" = '42'"

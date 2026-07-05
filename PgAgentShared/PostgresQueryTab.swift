@@ -316,12 +316,18 @@ final class PostgresQueryTabsStore: ObservableObject {
     /// `autoRun` marks the tab to execute as soon as the view shows
     /// it (double-click = "show me the data now"); plain clicks and
     /// FK navigation keep the review-before-run convention.
+    /// `relationKind` decides whether the generated SELECT may carry
+    /// `ctid` (plain views and foreign tables have none — selecting it
+    /// fails) and whether the tab is row-editable at all. `nil` means
+    /// "unknown, assume table" — safe for FK navigation, since foreign
+    /// keys can only reference tables.
     @discardableResult
     func openRelationTab(
         schema: String,
         name: String,
         whereClause: String? = nil,
-        autoRun: Bool = false
+        autoRun: Bool = false,
+        relationKind: PgRelationDisplayKind? = nil
     ) -> UUID {
         if let existing = tabs.first(where: {
             $0.browse?.schema == schema
@@ -340,16 +346,36 @@ final class PostgresQueryTabsStore: ObservableObject {
             }
             return existing.id
         }
+        // ctid is selectable on tables, partitioned tables, and
+        // materialized views; plain views and foreign tables have none.
+        // Row edits additionally require a physically updatable relation,
+        // so only (partitioned) tables get an editTarget.
+        let hasRowIdentity: Bool
+        let isRowEditable: Bool
+        switch relationKind {
+        case .none, .table, .partitionedTable:
+            hasRowIdentity = true
+            isRowEditable = true
+        case .materializedView:
+            hasRowIdentity = true
+            isRowEditable = false
+        case .view, .foreignTable:
+            hasRowIdentity = false
+            isRowEditable = false
+        }
         let browse = PostgresBrowseState(
             schema: schema,
             table: name,
             whereClause: whereClause,
-            pageSize: Int(pageSize)
+            pageSize: Int(pageSize),
+            hasRowIdentity: hasRowIdentity
         )
         let tab = PostgresQueryTab(
             title: "\(schema).\(name)",
             sql: browse.sql(),
-            editTarget: PostgresEditTarget(schema: schema, table: name),
+            editTarget: isRowEditable
+                ? PostgresEditTarget(schema: schema, table: name)
+                : nil,
             browse: browse,
             pendingAutoRun: autoRun
         )

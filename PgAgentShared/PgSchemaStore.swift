@@ -832,6 +832,27 @@ final class PgSchemaStore: ObservableObject {
         await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
     }
 
+    /// The display kind of `schema.name`, from whichever loaded
+    /// contents bundle knows it — `nil` when that schema's contents
+    /// aren't loaded (callers then fall back to assuming a table).
+    /// Used to keep `ctid` out of generated browse SQL for relations
+    /// that have none (plain views, foreign tables).
+    func relationDisplayKind(schema: String, name: String) -> PgRelationDisplayKind? {
+        for state in schemaContentsState.values {
+            guard case .loaded(let bundle) = state, bundle.schema == schema else { continue }
+            for rel in bundle.contents.tables where rel.name == name {
+                return PgRelationDisplayKind(rel.kind)
+            }
+            for rel in bundle.contents.views where rel.name == name {
+                return PgRelationDisplayKind(rel.kind)
+            }
+            for rel in bundle.contents.materializedViews where rel.name == name {
+                return PgRelationDisplayKind(rel.kind)
+            }
+        }
+        return nil
+    }
+
     func findNode(byId id: String) -> PgSchemaNode? {
         // 1. Check databases
         if case .loaded(let dbs) = databasesState {
