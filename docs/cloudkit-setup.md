@@ -56,6 +56,35 @@ users.
 No custom indexes are required — the subscription uses `TRUEPREDICATE` and
 records are fetched by ID.
 
+## 2b. UserData zone / opt-in sync (roadmap 2.3)
+
+The same container hosts a second custom zone, **`UserData`**, for the
+opt-in sync of connection profiles (sans secrets) and saved queries
+(`PgAgentShared/CloudSyncEngine.swift`; toggles live in macOS Settings →
+Sync and the iOS settings sheet). Record types, auto-created in Development
+the first time a signed build syncs:
+
+- `SyncedProfile` — record name = profile UUID. Fields: `payload` (String —
+  the sanitized profile JSON; **never** contains passwords, the encoder
+  refuses secret-shaped keys), `name`, `environment`, `color`,
+  `sshProfileRef` (all String), `isReadOnly`, `deleted` (Int64),
+  `updatedAt`, `deletedAt` (Date/Time).
+- `SyncedSavedQuery` — record name = saved-query UUID. Fields: `profileId`,
+  `title`, `sql` (String), `deleted` (Int64), `createdAt`, `updatedAt`,
+  `deletedAt` (Date/Time).
+
+Sync mechanics: last-writer-wins by `updatedAt`; deletions propagate as
+tombstone records (`deleted = 1`, purged after 30 days); incremental pulls
+use a persisted zone change token; remote changes arrive via a silent
+`CKRecordZoneSubscription` (`user-data-sync-v1`). Passwords never ride in
+these records — they sync exclusively through iCloud Keychain
+(`kSecAttrSynchronizable`) when "Sync password via iCloud Keychain" is
+enabled on a specific connection.
+
+**The Production schema deploy (step above) now includes these two record
+types as well** — re-deploy after the first Development sync, or sync is
+silently broken for TestFlight/App Store users.
+
 ## 3. End-to-end test (two signed devices, one Apple ID)
 
 Prereqs: a Mac and an iPhone signed into the **same iCloud account**;

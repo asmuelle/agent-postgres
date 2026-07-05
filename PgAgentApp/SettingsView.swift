@@ -199,23 +199,28 @@ struct SettingsView: View {
 
     private var syncSettings: some View {
         Form {
+            // Opt-in CloudKit sync of Postgres profiles + saved queries
+            // (roadmap 2.3). The section is shared with the iOS settings
+            // sheet so both platforms present identical semantics.
+            CloudSyncSettingsSection()
+
             Section {
                 statusRow(
                     icon: "key.fill",
                     title: "Secrets",
-                    value: "Local Keychain only",
+                    value: "Keychain — synced only per-connection opt-in",
                     color: .green
                 )
                 statusRow(
                     icon: "icloud.fill",
-                    title: "Profile metadata",
+                    title: "SSH profile metadata",
                     value: "iCloud key-value snapshot",
                     color: .blue
                 )
             } header: {
-                Text("Scope")
+                Text("SSH snapshot scope")
             } footer: {
-                Text("Sync snapshots contain server names, hosts, usernames, folders, tags, snippets, and terminal preferences. Passwords and passphrases are not exported from Keychain.")
+                Text("Sync snapshots contain server names, hosts, usernames, folders, tags, snippets, and terminal preferences. Passwords and passphrases are never exported from Keychain; a connection's password syncs via iCloud Keychain only when its own “Sync password” option is on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

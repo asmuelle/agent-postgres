@@ -227,6 +227,8 @@ final class MobileAppDelegate: NSObject, UIApplicationDelegate {
         UNUserNotificationCenter.current().delegate = HubAlertReceiver.shared
         HubAlertReceiver.registerNotificationCategories()
         Task { await HubAlertReceiver.shared.refreshIfEnabled() }
+        // Resume opt-in iCloud sync (roadmap 2.3) if the user left it on.
+        CloudSyncEngine.shared.startIfEnabled()
         return true
     }
 
@@ -235,6 +237,15 @@ final class MobileAppDelegate: NSObject, UIApplicationDelegate {
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
+        // Silent user-data sync push (CKRecordZoneSubscription on the
+        // UserData zone) — pull remote changes, then report to the system.
+        if CloudSyncEngine.isSyncPush(userInfo: userInfo) {
+            Task { @MainActor in
+                await CloudSyncEngine.shared.handleRemotePush()
+                completionHandler(.newData)
+            }
+            return
+        }
         let result = HubAlertReceiver.shared.handleRemoteNotification(userInfo: userInfo)
         completionHandler(result)
     }

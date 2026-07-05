@@ -19,6 +19,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // purge them before anything can connect.
         SSHKeyVault.shared.sweepStaleMaterializedKeys()
 
+        // Resume opt-in iCloud sync (roadmap 2.3) if the user left it on.
+        Task { @MainActor in
+            CloudSyncEngine.shared.startIfEnabled()
+        }
+
         // Persist the main window's frame across launches via AppKit's
         // built-in autosave. SwiftUI's WindowGroup doesn't expose a
         // direct frameAutosaveName binding, so we set it on the
@@ -41,6 +46,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+    }
+
+    /// Silent CloudKit push from the UserData zone subscription — another
+    /// device changed synced profiles/queries; pull them. FleetAlert pushes
+    /// are user-visible and don't route through the Mac (it's the hub).
+    func application(
+        _ application: NSApplication,
+        didReceiveRemoteNotification userInfo: [String: Any]
+    ) {
+        guard CloudSyncEngine.isSyncPush(userInfo: userInfo) else { return }
+        Task { @MainActor in
+            await CloudSyncEngine.shared.handleRemotePush()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

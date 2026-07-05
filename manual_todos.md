@@ -61,19 +61,37 @@ Part A — Development (automatic, you just trigger + verify):
    - record type `FleetAlert` with fields `alertId`, `instanceId`,
      `instanceName`, `severity`, `kind`, `title`, `detail` (String),
      `blockerPid` (Int64, optional), `createdAt` (Date/Time)
-3. Verify in CloudKit Console → Data → Development that the record type and
-   zone exist. No custom indexes are needed (the subscription is
-   TRUEPREDICATE; records are fetched by ID).
+3. Also trigger the **user-data sync** schema once (roadmap 2.3): on the same
+   signed build, enable Settings → Sync → *"Sync via iCloud"* and let it run
+   a sync ("Up to date"). That auto-creates, in **Development**:
+   - custom zone `UserData`
+   - record type `SyncedProfile` with fields `payload`, `name`,
+     `environment`, `color`, `sshProfileRef` (String), `isReadOnly`,
+     `deleted` (Int64), `updatedAt`, `deletedAt` (Date/Time)
+   - record type `SyncedSavedQuery` with fields `profileId`, `title`, `sql`
+     (String), `deleted` (Int64), `createdAt`, `updatedAt`, `deletedAt`
+     (Date/Time)
+
+   (Saving at least one connection profile before enabling sync guarantees
+   both record types are exercised — add a saved query too for
+   `SyncedSavedQuery`.)
+4. Verify in CloudKit Console → Data → Development that the record types and
+   zones exist. No custom indexes are needed (the alert subscription is
+   TRUEPREDICATE, the sync subscription is a zone subscription; records are
+   fetched by ID / zone change token).
 
 Part B — Production (**manual, release-blocking**):
 
-4. CloudKit Console → *Deploy Schema Changes…* → Development → **Production**.
+5. CloudKit Console → *Deploy Schema Changes…* → Development → **Production**.
    Production NEVER auto-creates schema. Skipping this bricks the alert relay
-   for every TestFlight/App Store user while working fine on your own dev
-   devices — the most deceptive failure mode there is. Make this a hard item
-   on the release checklist for ANY build that leaves your machines.
+   AND profile/saved-query sync for every TestFlight/App Store user while
+   working fine on your own dev devices — the most deceptive failure mode
+   there is. Make this a hard item on the release checklist for ANY build
+   that leaves your machines.
 
-Done when: `FleetAlert`/`FleetAlerts` appear in the **Production** schema view.
+Done when: `FleetAlert`/`FleetAlerts` **and**
+`SyncedProfile`/`SyncedSavedQuery`/`UserData` appear in the **Production**
+schema view.
 
 ---
 

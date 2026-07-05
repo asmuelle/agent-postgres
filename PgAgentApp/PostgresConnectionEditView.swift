@@ -22,6 +22,7 @@ struct PostgresConnectionEditView: View {
     @State private var user: String = ""
     @State private var password: String = ""
     @State private var savePasswordToKeychain: Bool = true
+    @State private var syncPasswordViaICloud: Bool = false
     @State private var tls: PostgresTlsMode = .prefer
     @State private var applicationName: String = "mc-ssh"
     @State private var color: String? = nil
@@ -148,6 +149,13 @@ struct PostgresConnectionEditView: View {
                         .textFieldStyle(.roundedBorder)
                     Toggle("Save password to Keychain", isOn: $savePasswordToKeychain)
                         .help("Stores the password under \(derivedKeychainAccount). Unchecked means password is held in memory only and lost on quit.")
+                    if savePasswordToKeychain {
+                        Toggle("Sync password via iCloud Keychain", isOn: $syncPasswordViaICloud)
+                            .help("Stores the password as a synchronizable keychain item so your other devices can use it. The synced profile itself never contains the password.")
+                        Text("Synced via iCloud Keychain to your devices. Synchronizable items can't be locked to this device only — they use the when-unlocked protection class instead of the device-only default.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Encryption") {
@@ -365,6 +373,7 @@ struct PostgresConnectionEditView: View {
             tunnelRemoteHost = t.remoteHost
             tunnelRemotePort = String(t.remotePort)
         }
+        syncPasswordViaICloud = p.syncPassword
         switch p.auth {
         case .keychain:
             savePasswordToKeychain = true
@@ -435,16 +444,28 @@ struct PostgresConnectionEditView: View {
             color: color,
             notes: notes.trimmingCharacters(in: .whitespaces).isEmpty ? nil : notes,
             environment: environment,
-            isReadOnly: isReadOnly
+            isReadOnly: isReadOnly,
+            syncPassword: savePasswordToKeychain && syncPasswordViaICloud
         )
 
         if savePasswordToKeychain && !password.isEmpty {
+            // The synchronizable variant writes to exactly one store and
+            // removes the other, so flipping the iCloud toggle migrates.
             KeychainManager.shared.savePassword(
                 kind: .postgresPassword,
                 account: profile.keychainAccount,
-                secret: password
+                secret: password,
+                synchronizable: profile.syncPassword
             )
-        } else if !savePasswordToKeychain {
+        } else if savePasswordToKeychain {
+            // No password re-entered — migrate whatever already exists so
+            // the toggle still takes effect (local ↔ iCloud Keychain).
+            KeychainManager.shared.setPasswordSynchronizable(
+                kind: .postgresPassword,
+                account: profile.keychainAccount,
+                synchronizable: profile.syncPassword
+            )
+        } else {
             // Drop any prior keychain entry so we don't keep stale secrets.
             KeychainManager.shared.deletePassword(
                 kind: .postgresPassword,

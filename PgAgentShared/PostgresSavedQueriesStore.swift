@@ -82,6 +82,7 @@ final class PostgresSavedQueriesStore: ObservableObject {
         current.insert(entry, at: 0)
         entriesByProfile[profileId] = current
         persist(profileId: profileId, entries: current)
+        CloudSyncEngine.shared.noteSavedQueriesChanged()
         return entry
     }
 
@@ -95,6 +96,7 @@ final class PostgresSavedQueriesStore: ObservableObject {
         current.sort { $0.updatedAt > $1.updatedAt }
         entriesByProfile[entry.profileId] = current
         persist(profileId: entry.profileId, entries: current)
+        CloudSyncEngine.shared.noteSavedQueriesChanged()
     }
 
     func remove(entryId: UUID, fromProfile profileId: String) {
@@ -102,6 +104,64 @@ final class PostgresSavedQueriesStore: ObservableObject {
         current.removeAll { $0.id == entryId }
         entriesByProfile[profileId] = current
         persist(profileId: profileId, entries: current)
+        CloudSyncEngine.shared.noteSavedQueryDeleted(id: entryId, profileId: profileId)
+    }
+
+    // MARK: - Sync support
+
+    /// Every saved query on this device, across all profiles — the sync
+    /// engine's push set. Disk is authoritative (mutations persist
+    /// immediately); the in-memory cache is layered on top for safety.
+    func allEntriesAcrossProfiles() -> [PostgresSavedQuery] {
+        var byId: [UUID: PostgresSavedQuery] = [:]
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: Self.directoryURL(), includingPropertiesForKeys: nil
+        )) ?? []
+        for url in files where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let entries = try? decoder.decode([PostgresSavedQuery].self, from: data)
+            else { continue }
+            for entry in entries { byId[entry.id] = entry }
+        }
+        for entries in entriesByProfile.values {
+            for entry in entries { byId[entry.id] = entry }
+        }
+        return Array(byId.values)
+    }
+
+    /// Apply a merged batch of remote changes (CloudSyncEngine). Preserves
+    /// remote `updatedAt` stamps and does NOT notify the sync engine back.
+    func applyRemoteMerge(
+        upserts: [PostgresSavedQuery],
+        deletes: [UserDataSavedQueryMerge.SavedQueryDeletion]
+    ) {
+        guard !(upserts.isEmpty && deletes.isEmpty) else { return }
+        var touchedProfiles = Set<String>()
+        for entry in upserts {
+            var current = entries(forProfile: entry.profileId)
+            if let idx = current.firstIndex(where: { $0.id == entry.id }) {
+                if current[idx] == entry { continue }
+                current[idx] = entry
+            } else {
+                current.append(entry)
+            }
+            current.sort { $0.updatedAt > $1.updatedAt }
+            entriesByProfile[entry.profileId] = current
+            touchedProfiles.insert(entry.profileId)
+        }
+        for deletion in deletes {
+            var current = entries(forProfile: deletion.profileId)
+            let before = current.count
+            current.removeAll { $0.id == deletion.entryId }
+            guard current.count != before else { continue }
+            entriesByProfile[deletion.profileId] = current
+            touchedProfiles.insert(deletion.profileId)
+        }
+        for profileId in touchedProfiles {
+            persist(profileId: profileId, entries: entriesByProfile[profileId] ?? [])
+        }
     }
 
     /// Profile-delete hook — wipes the on-disk file alongside other

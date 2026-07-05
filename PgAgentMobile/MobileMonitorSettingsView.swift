@@ -74,6 +74,10 @@ struct MobileMonitorSettingsView: View {
                 } footer: {
                     Text("If pgAgent on your Mac is set up as a monitoring hub, alerts arrive here as push notifications within seconds — even when this app hasn't been opened. Delivered through your private iCloud database; nothing leaves your Apple ID. Without a Mac hub, background alerts above remain the best-effort fallback (alert latency: minutes vs. seconds).")
                 }
+
+                // Opt-in CloudKit sync of connection profiles + saved
+                // queries (roadmap 2.3) — shared with macOS Settings → Sync.
+                CloudSyncSettingsSection()
             }
             .navigationTitle("Monitor Settings")
             .navigationBarTitleDisplayMode(.inline)

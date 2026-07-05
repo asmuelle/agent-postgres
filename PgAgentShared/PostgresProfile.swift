@@ -128,6 +128,16 @@ struct PostgresProfile: Codable, Identifiable, Hashable, Sendable {
     /// grid's editing affordances are hidden. Decodes to `false` for
     /// profiles saved before this field existed.
     var isReadOnly: Bool
+    /// Last local modification — drives last-writer-wins in iCloud sync.
+    /// Stamped by `PostgresProfileStore.saveOrUpdate`; profiles saved before
+    /// this field existed decode it as `createdAt`.
+    var updatedAt: Date
+    /// Opt-in per connection: store the keychain password as a
+    /// *synchronizable* item (iCloud Keychain) so it follows the user's
+    /// devices. Default `false` = device-local only. The synced profile
+    /// record NEVER carries the password either way — iCloud Keychain is
+    /// the only transport. Decodes to `false` for older profiles.
+    var syncPassword: Bool
 
     init(
         id: String = UUID().uuidString,
@@ -155,7 +165,9 @@ struct PostgresProfile: Codable, Identifiable, Hashable, Sendable {
         color: String? = nil,
         notes: String? = nil,
         environment: PostgresEnvironment = .unspecified,
-        isReadOnly: Bool = false
+        isReadOnly: Bool = false,
+        updatedAt: Date = Date(),
+        syncPassword: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -178,6 +190,8 @@ struct PostgresProfile: Codable, Identifiable, Hashable, Sendable {
         self.notes = notes
         self.environment = environment
         self.isReadOnly = isReadOnly
+        self.updatedAt = updatedAt
+        self.syncPassword = syncPassword
     }
 
     // Custom decoding only so `environment` / `isReadOnly` — added after
@@ -190,7 +204,7 @@ struct PostgresProfile: Codable, Identifiable, Hashable, Sendable {
         case applicationName, tunnel, connectTimeoutSecs
         case maxPoolSize, idleTimeoutSecs, minIdleConnections
         case folderPath, createdAt, lastConnected, color, notes
-        case environment, isReadOnly
+        case environment, isReadOnly, updatedAt, syncPassword
     }
 
     init(from decoder: Decoder) throws {
@@ -217,6 +231,11 @@ struct PostgresProfile: Codable, Identifiable, Hashable, Sendable {
         environment = try c.decodeIfPresent(PostgresEnvironment.self, forKey: .environment)
             ?? .unspecified
         isReadOnly = try c.decodeIfPresent(Bool.self, forKey: .isReadOnly) ?? false
+        // Pre-sync profiles never carried a modification stamp; treating
+        // them as "unchanged since creation" makes any synced copy win the
+        // first LWW comparison, which is the conservative default.
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        syncPassword = try c.decodeIfPresent(Bool.self, forKey: .syncPassword) ?? false
     }
 
     /// Stable account string for the keychain. Includes the database so the
@@ -267,24 +286,39 @@ final class PostgresProfileStore: ObservableObject {
     }
 
     func saveOrUpdate(_ profile: PostgresProfile) {
-        if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
+        // Stamp the modification time here (single choke point for local
+        // mutations) so last-writer-wins sync has a truthful clock.
+        // Remote merges bypass this via `applyRemoteMerge` and keep the
+        // originating device's stamp.
+        var stamped = profile
+        stamped.updatedAt = Date()
+        if let idx = profiles.firstIndex(where: { $0.id == stamped.id }) {
             let previous = profiles[idx]
             // If the keychain account changed, drop the old entry so we
             // don't accumulate orphaned secrets.
-            if previous.keychainAccount != profile.keychainAccount {
+            if previous.keychainAccount != stamped.keychainAccount {
                 KeychainManager.shared.deletePassword(
                     kind: .postgresPassword,
                     account: previous.keychainAccount
                 )
             }
-            profiles[idx] = profile
+            profiles[idx] = stamped
         } else {
-            profiles.append(profile)
+            profiles.append(stamped)
         }
         persist()
+        CloudSyncEngine.shared.noteProfilesChanged()
     }
 
     func delete(_ profile: PostgresProfile) {
+        removeLocally(profile)
+        persist()
+        CloudSyncEngine.shared.noteProfileDeleted(id: profile.id)
+    }
+
+    /// Shared teardown for local + remote-initiated deletions: drop the
+    /// profile, its keychain entry, and its per-profile artifacts.
+    private func removeLocally(_ profile: PostgresProfile) {
         profiles.removeAll { $0.id == profile.id }
         KeychainManager.shared.deletePassword(
             kind: .postgresPassword,
@@ -296,7 +330,31 @@ final class PostgresProfileStore: ObservableObject {
         // shouldn't inherit the previous user's SQL.
         PostgresHistoryStore.shared.purge(profileId: profile.id)
         PostgresSavedQueriesStore.shared.purge(profileId: profile.id)
-        persist()
+    }
+
+    /// Apply a merged batch of remote changes (CloudSyncEngine). Preserves
+    /// the remote `updatedAt` stamps and does NOT notify the sync engine —
+    /// that would echo remote changes straight back up.
+    func applyRemoteMerge(upserts: [PostgresProfile], deleteIds: [String]) {
+        guard !(upserts.isEmpty && deleteIds.isEmpty) else { return }
+        var changed = false
+        for profile in upserts {
+            if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
+                if profiles[idx] != profile {
+                    profiles[idx] = profile
+                    changed = true
+                }
+            } else {
+                profiles.append(profile)
+                changed = true
+            }
+        }
+        for id in deleteIds {
+            guard let existing = profiles.first(where: { $0.id == id }) else { continue }
+            removeLocally(existing)
+            changed = true
+        }
+        if changed { persist() }
     }
 
     func profile(withId id: String) -> PostgresProfile? {
