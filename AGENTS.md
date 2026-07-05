@@ -49,7 +49,7 @@ Native **macOS + iPadOS** SSH workspace. Swift on top, Rust at the bottom, [unif
 | What | Where | Why it matters |
 |------|-------|----------------|
 | App entry | `PgAgentApp/PgAgentApp.swift` | `@main` SwiftUI App, scene setup |
-| FFI entry point on Swift side | `PgAgentApp/BridgeManager.swift` | The single `BridgeManager.initialize()` call routes everything |
+| FFI entry point on Swift side | `PgAgentShared/BridgeManager.swift` | The single `BridgeManager.initialize()` call routes everything |
 | FFI extensions per feature | `BridgeManager+Postgres.swift`, `BridgeManager+Tools.swift` | Postgres explorer, network tools |
 | FFI surface | `src/ffi.rs` | The uniffi-exported functions and types — most edits land here |
 | FFI runtime | `src/bridge.rs` | Owns the Tokio runtime + connection-manager singleton |

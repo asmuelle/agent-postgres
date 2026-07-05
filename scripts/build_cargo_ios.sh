@@ -12,6 +12,14 @@ set -euo pipefail
 # Ensure cargo and rustup can be found in non-interactive environments (e.g. Xcode GUI builds)
 export PATH="$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
+# Pin the iOS deployment target for the C dependencies the `cc` crate compiles
+# (zstd, etc.). Without this they default to the SDK's newest OS while the Rust
+# device link defaults to an ancient one, and the version skew leaves runtime
+# builtins like `___chkstk_darwin` unresolved (ld: "symbol(s) not found for
+# architecture arm64"). 17.0 matches IPHONEOS_DEPLOYMENT_TARGET in project.yml —
+# keep this default in sync with `deploymentTarget` in project.yml when bumping.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Script lives at <repo>/scripts/build_cargo_ios.sh — Cargo.toml sits one level up.
 RUST_PROJECT_DIR="${RUST_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -21,6 +29,15 @@ LIB_NAME="libpg_agent.a"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 UNIVERSAL_DIR="$RUST_TARGET_DIR/universal-ios/release"
 UNIVERSAL_LIB="$UNIVERSAL_DIR/$LIB_NAME"
+# The universal archive path is shared between simulator and device builds
+# (and between Debug and Release), but those are NOT interchangeable:
+# aarch64-apple-ios (device) and aarch64-apple-ios-sim both report arch
+# "arm64", so `lipo -verify_arch` cannot tell them apart, and a Debug link
+# would happily pick up a Release rustlib. Record `<platform>:<cargo_profile>`
+# the archive was built for so a simulator↔device or debug↔release switch
+# forces a rebuild instead of silently linking the wrong slice
+# (ld: "built for iOS-simulator").
+PLATFORM_MARKER="$UNIVERSAL_DIR/.platform"
 
 case "${CONFIGURATION:-Debug}" in
     Release)
@@ -40,6 +57,8 @@ esac
 
 platform="${PLATFORM_NAME:-iphonesimulator}"
 archs="${ARCHS:-arm64}"
+# Marker content the current invocation expects/stamps (see PLATFORM_MARKER).
+WANTED_MARKER="$platform:$CARGO_PROFILE"
 
 rust_target_for_arch() {
     local arch="$1"
@@ -80,6 +99,10 @@ rust_inputs_are_newer_than_universal_lib() {
          -newer "$UNIVERSAL_LIB" | grep -q .
 }
 
+prebuilt_matches_platform() {
+    [ -f "$PLATFORM_MARKER" ] && [ "$(cat "$PLATFORM_MARKER" 2>/dev/null)" = "$WANTED_MARKER" ]
+}
+
 verify_prebuilt_static_lib() {
     if [ ! -f "$UNIVERSAL_LIB" ]; then
         echo "Missing prebuilt iOS static library: $UNIVERSAL_LIB"
@@ -110,12 +133,24 @@ echo "   Jobs:     $CARGO_BUILD_JOBS"
 cd "$RUST_PROJECT_DIR"
 
 if is_truthy "${AGENT_POSTGRES_XCODE_PHASE:-}" || is_truthy "${AGENT_POSTGRES_SKIP_RUST_BUILD:-${SKIP_RUST_BUILD:-}}"; then
+    if [ ! -f "$PLATFORM_MARKER" ]; then
+        echo "Prebuilt iOS static library has no platform marker (built before marker support, or by hand)."
+        echo "Rebuild once with: PLATFORM_NAME=$platform ARCHS=\"$archs\" CONFIGURATION=${CONFIGURATION:-Debug} bash scripts/build_cargo_ios.sh"
+        exit 1
+    fi
+    if ! prebuilt_matches_platform; then
+        echo "Prebuilt iOS static library was built for a different platform/profile:"
+        echo "   marker: $(cat "$PLATFORM_MARKER" 2>/dev/null)"
+        echo "   wanted: $WANTED_MARKER"
+        echo "Rebuild it with: PLATFORM_NAME=$platform ARCHS=\"$archs\" CONFIGURATION=${CONFIGURATION:-Debug} bash scripts/build_cargo_ios.sh"
+        exit 1
+    fi
     verify_prebuilt_static_lib
     echo "Reusing prebuilt iOS static library: $UNIVERSAL_LIB"
     exit 0
 fi
 
-if [ -f "$UNIVERSAL_LIB" ] && ! rust_inputs_are_newer_than_universal_lib; then
+if [ -f "$UNIVERSAL_LIB" ] && prebuilt_matches_platform && ! rust_inputs_are_newer_than_universal_lib; then
     verify_prebuilt_static_lib
     echo "iOS static library up to date: $UNIVERSAL_LIB"
     exit 0
@@ -142,6 +177,10 @@ if [ "${#libs[@]}" -eq 1 ]; then
 else
     lipo -create "${libs[@]}" -output "$UNIVERSAL_LIB"
 fi
+
+# Stamp `<platform>:<cargo_profile>` so the next invocation can detect a
+# simulator↔device or debug↔release switch.
+printf '%s' "$WANTED_MARKER" > "$PLATFORM_MARKER"
 
 echo "iOS static library: $UNIVERSAL_LIB"
 if command -v lipo >/dev/null 2>&1; then

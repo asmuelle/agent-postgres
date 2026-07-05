@@ -20,7 +20,7 @@ This plan turns the product spec in `read_only_server_doctor.md` into concrete w
 
 Existing pieces to reuse:
 
-- `PgAgentApp/BridgeManager.swift`: queue pattern for FFI calls and host command work.
+- `PgAgentShared/BridgeManager.swift`: queue pattern for FFI calls and host command work.
 - `PgAgentApp/BridgeManager+Tools.swift`: extension pattern for feature-specific bridge wrappers.
 - `src/ffi.rs`: UniFFI exported types and functions.
 - `src/bridge.rs`: global Tokio runtime and connection manager.
@@ -913,7 +913,7 @@ Settings later:
 ### Files To Update
 
 - `PgAgentApp/SettingsView.swift`
-- `PgAgentApp/KeychainManager.swift` if adding provider API key storage helpers.
+- `PgAgentShared/KeychainManager.swift` if adding provider API key storage helpers.
 
 ### Settings Section
 
@@ -1347,7 +1347,7 @@ Verification:
 Files:
 
 - `PgAgentApp/SettingsView.swift`
-- `PgAgentApp/KeychainManager.swift` if needed.
+- `PgAgentShared/KeychainManager.swift` if needed.
 
 Steps:
 

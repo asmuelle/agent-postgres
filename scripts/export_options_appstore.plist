@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Export options for `just ios-upload` (TestFlight / App Store Connect).
+	     "app-store-connect" is the Xcode 15.4+ name for the App Store method;
+	     destination "upload" makes xcodebuild upload directly instead of
+	     leaving an .ipa on disk. -->
+	<key>method</key>
+	<string>app-store-connect</string>
+	<key>destination</key>
+	<string>upload</string>
+	<key>uploadSymbols</key>
+	<true/>
+	<!-- Let Xcode auto-increment the build number on upload so TestFlight
+	     never rejects a duplicate CFBundleVersion. -->
+	<key>manageAppVersionAndBuildNumber</key>
+	<true/>
+</dict>
+</plist>

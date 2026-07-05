@@ -112,3 +112,32 @@ jobs:
 
       - name: Compile app (single-arch Debug, no signing)
         run: just mac-ci-build
+
+  # The PgAgentMobile target lists shared PgAgentApp sources file-by-file
+  # (the repo's most-documented drift risk) and nothing else compiles it —
+  # a shared file gaining a mac-only dependency breaks iOS silently without
+  # this job. Compiler-only (no simulator tests) to keep CI time bounded.
+  ios:
+    name: iOS — compile simulator app (no signing)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select latest Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install just + xcodegen
+        run: brew install just xcodegen
+
+      - name: Compile iOS app (simulator Debug, no signing)
+        run: just ios-ci-build

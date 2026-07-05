@@ -27,7 +27,7 @@ The harness gives you a fast deterministic sensor — use it instead of guessing
 - **Strict gate**: `just lint` — `cargo fmt --check` + `cargo clippy -D warnings`. Run before declaring done.
 - **Tests**: `just test-rust` (Rust) / `just mac-test` (Swift) / `just test` (both).
 - A **Stop hook** auto-runs `just check` when you finish a turn: silent if clean, and it will block + show errors if Rust is broken so you can fix them. Swift changes are not covered there — verify those with `just mac-test` / `just mac-build` yourself.
-- **iOS target is unverified by CI and the Stop hook.** The `PgAgentMobile` target lists `PgAgentApp/*` sources file-by-file in `project.yml` (macOS includes the whole group), so a shared file gaining a mac-only dep breaks iOS silently. After editing a shared Swift file, run `just ios-ci-build`. Fix gaps by extracting the platform-neutral part into its own file (add it to the mobile list) or a mobile stub — don't pull AppKit/SSH into the Postgres-only iOS app.
+- **Shared code lives in `PgAgentShared/`** — it's a directory source of BOTH app targets (macOS + iOS), so everything in it must compile for both platforms; never add mac-only APIs (AppKit/SSH) to a `PgAgentShared` file. New platform-neutral files go in `PgAgentShared/`, NOT into per-file target lists in `project.yml`. The Stop hook still doesn't cover iOS, so after editing a `PgAgentShared/` file run `just ios-ci-build` — CI's ios job is the gate. If a shared file needs a mac-only dep, split the platform-specific part into `PgAgentApp/` (or a mobile stub in `PgAgentMobile/`).
 - Formatting is automatic on save (rustfmt / swift-format via PostToolUse) — don't hand-format.
 
 ## 🛡️ Safety Guard (enforced, not advisory)

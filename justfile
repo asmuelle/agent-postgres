@@ -18,6 +18,9 @@ ios_scheme  := "PgAgentMobile"
 ios_bundle  := "com.pgagent.mobile"
 ios_sim_dd  := "/private/tmp/pgAgent-ios-dd"
 ios_sim_app := ios_sim_dd + "/Build/Products/Debug-iphonesimulator/pgAgent.app"
+ios_dev_dd  := "/private/tmp/pgAgent-ios-device-dd"
+ios_dev_app := ios_dev_dd + "/Build/Products/Debug-iphoneos/pgAgent.app"
+ios_archive := ios_dev_dd + "/pgAgent.xcarchive"
 mac_build   := env_var_or_default("APG_MAC_DERIVED_DATA", ".derivedData/macos")
 mac_app     := mac_build + "/Build/Products/Release/pgAgent.app"
 mac_debug_app := mac_build + "/Build/Products/Debug/pgAgent.app"
@@ -40,8 +43,19 @@ bootstrap: mac-bootstrap ios-bootstrap
 check:
     cargo check --all-targets
 
-# Run Rust + Swift tests.
-test: test-rust mac-test
+# Run Rust + Swift tests (Rust, macOS, and iOS-simulator unit tests).
+# Uses ios-test-or-skip so machines without an iOS simulator runtime can
+# still run the aggregate suite; `just ios-test` alone stays a hard failure.
+test: test-rust mac-test ios-test-or-skip
+
+# Gracefully degrade for the aggregate `test` target only: run ios-test when
+# an iPhone simulator runtime exists, otherwise skip with a clear message.
+ios-test-or-skip:
+    @if xcrun simctl list devices available 2>/dev/null | grep -q 'iPhone'; then \
+        just ios-test; \
+    else \
+        echo "SKIPPED: no iPhone simulator runtime installed — skipping ios-test"; \
+    fi
 
 test-rust:
     cargo test --all-targets
@@ -54,7 +68,7 @@ fmt:
 lint:
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
-    @command -v swift-format >/dev/null 2>&1 && (swift-format lint -r Sources Tests PgAgentApp PgAgentMobile PgAgentWidgets || xcrun swift-format lint -r Sources Tests PgAgentApp PgAgentMobile PgAgentWidgets) 2>/dev/null || echo "⚠️ swift-format not installed; skipping Swift lint"
+    @command -v swift-format >/dev/null 2>&1 && (swift-format lint -r Sources Tests PgAgentApp PgAgentShared PgAgentMobile PgAgentWidgets PgAgentMobileWidgets PgAgentFileProvider PgAgentShareExtension PgAgentShortcutsExtension || xcrun swift-format lint -r Sources Tests PgAgentApp PgAgentShared PgAgentMobile PgAgentWidgets PgAgentMobileWidgets PgAgentFileProvider PgAgentShareExtension PgAgentShortcutsExtension) 2>/dev/null || echo "⚠️ swift-format not installed; skipping Swift lint"
 
 # Local equivalent of CI checks that don't need signing certs.
 ci-local: check test-rust mac-ci-build ios-ci-build
@@ -170,22 +184,22 @@ mac-run-dev:
     killall chronod >/dev/null 2>&1 || true
     open {{mac_debug_app}}
 
-# xcodebuild test — runs the framework scheme (pure-Swift unit tests over
-# PgAgentMacOS models + helpers) and the app scheme (FFI integration tests
-# that exercise the uniffi bindings inside the app's process).
+# xcodebuild test — single pass over the AllTests-macOS aggregate scheme:
+# PgAgentMacOSTests (pure-Swift unit tests over PgAgentMacOS models +
+# helpers) and PgAgentAppTests (FFI integration tests that exercise the
+# uniffi bindings inside the app's process). PgAgentAppTests hosts inside
+# the entitled app, so keep ad-hoc signing (CODE_SIGN_IDENTITY="-").
+# Signing vars honor the environment so the documented local workaround
+# `CODE_SIGNING_ALLOWED=NO just mac-test` still applies.
 mac-test:
     @just _ensure-xcodeproj
     xcodebuild test \
         -project {{xcode_proj}} \
-        -scheme {{mac_fw}} \
-        -destination 'platform=macOS'
-    xcodebuild test \
-        -project {{xcode_proj}} \
-        -scheme {{mac_scheme}} \
+        -scheme AllTests-macOS \
         -destination 'platform=macOS' \
-        CODE_SIGN_IDENTITY="-" \
-        CODE_SIGNING_REQUIRED=YES \
-        CODE_SIGNING_ALLOWED=YES
+        CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}" \
+        CODE_SIGNING_REQUIRED="${CODE_SIGNING_REQUIRED:-YES}" \
+        CODE_SIGNING_ALLOWED="${CODE_SIGNING_ALLOWED:-YES}"
 
 # Verify the .app's signature & Gatekeeper status.
 mac-verify:
@@ -318,6 +332,22 @@ ios-sim-build:
         CODE_SIGN_IDENTITY="-" \
         build
 
+# Run the iOS unit tests (PgAgentMobileTests) on an iPhone simulator. Resolves a
+# booted sim if there is one, else the first available iPhone, and boots it.
+ios-test:
+    @just _ensure-xcodeproj
+    @just _ios-sim-rust Debug
+    @rust_arch="$(uname -m)"; \
+    udid="$(bash scripts/sim_select.sh iPhone)"; \
+    xcodebuild test \
+        -project {{xcode_proj}} \
+        -scheme {{ios_scheme}} \
+        -destination "platform=iOS Simulator,id=$udid" \
+        -derivedDataPath {{ios_sim_dd}} \
+        ARCHS="$rust_arch" \
+        ONLY_ACTIVE_ARCH=YES \
+        CODE_SIGNING_ALLOWED=NO
+
 # Build, install, and launch on an iPad simulator. Pass a simulator name
 # fragment if you want a specific iPad, e.g. `just run-on-ipad "iPad Pro"`.
 run-on-ipad name="":
@@ -326,19 +356,7 @@ run-on-ipad name="":
     bundle="{{ios_bundle}}"; \
     name="{{name}}"; \
     test -d "$app" || (echo "iOS simulator app not found: $app"; exit 1); \
-    if [ -n "$name" ]; then \
-        udid="$(xcrun simctl list devices available | grep 'iPad' | grep -F "$name" | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
-    else \
-        udid="$(xcrun simctl list devices available | grep 'iPad' | grep 'Booted' | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
-        if [ -z "$udid" ]; then \
-            udid="$(xcrun simctl list devices available | grep 'iPad' | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
-        fi; \
-    fi; \
-    test -n "$udid" || (echo "No available iPad simulator found"; xcrun simctl list devices available; exit 1); \
-    if ! xcrun simctl list devices | grep "$udid" | grep -q 'Booted'; then \
-        xcrun simctl boot "$udid" || true; \
-        xcrun simctl bootstatus "$udid" -b; \
-    fi; \
+    udid="$(bash scripts/sim_select.sh iPad "$name")"; \
     open -a Simulator; \
     xcrun simctl install "$udid" "$app"; \
     xcrun simctl launch "$udid" "$bundle"; \
@@ -352,23 +370,54 @@ run-on-iphone name="":
     bundle="{{ios_bundle}}"; \
     name="{{name}}"; \
     test -d "$app" || (echo "iOS simulator app not found: $app"; exit 1); \
-    if [ -n "$name" ]; then \
-        udid="$(xcrun simctl list devices available | grep 'iPhone' | grep -F "$name" | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
-    else \
-        udid="$(xcrun simctl list devices available | grep 'iPhone' | grep 'Booted' | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
-        if [ -z "$udid" ]; then \
-            udid="$(xcrun simctl list devices available | grep 'iPhone' | sed -nE 's/.*\(([0-9A-F-]{36})\).*/\1/p' | head -n1 || true)"; \
-        fi; \
-    fi; \
-    test -n "$udid" || (echo "No available iPhone simulator found"; xcrun simctl list devices available; exit 1); \
-    if ! xcrun simctl list devices | grep "$udid" | grep -q 'Booted'; then \
-        xcrun simctl boot "$udid" || true; \
-        xcrun simctl bootstatus "$udid" -b; \
-    fi; \
+    udid="$(bash scripts/sim_select.sh iPhone "$name")"; \
     open -a Simulator; \
     xcrun simctl install "$udid" "$app"; \
     xcrun simctl launch "$udid" "$bundle"; \
     echo "Launched pgAgent on iPhone simulator $udid"
+
+# Build, install, and launch on a *physical* iPhone/iPad connected over USB or
+# Wi-Fi. `run-on-iphone` targets the simulator; this targets real hardware.
+# Pass a device-name fragment to pick one, e.g. `just run-on-device Excalibur`.
+# Requires a paired device (see `xcrun devicectl list devices`) and a signing
+# team (DEVELOPMENT_TEAM in project.yml). The build auto-provisions.
+run-on-device name="":
+    @just _ensure-xcodeproj
+    @just _ios-device-rust Debug
+    xcodebuild \
+        -project {{xcode_proj}} \
+        -scheme {{ios_scheme}} \
+        -configuration Debug \
+        -destination 'generic/platform=iOS' \
+        -derivedDataPath {{ios_dev_dd}} \
+        -allowProvisioningUpdates \
+        ARCHS=arm64 \
+        build
+    @app="{{ios_dev_app}}"; \
+    bundle="{{ios_bundle}}"; \
+    name="{{name}}"; \
+    test -d "$app" || (echo "iOS device app not found: $app"; exit 1); \
+    uuid='[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'; \
+    devices="$(xcrun devicectl list devices)"; \
+    if [ -n "$name" ]; then \
+        rows="$(printf '%s\n' "$devices" | grep -F "$name" || true)"; \
+    else \
+        rows="$(printf '%s\n' "$devices" | grep -iE 'iPhone|iPad' || true)"; \
+    fi; \
+    reachable="$(printf '%s\n' "$rows" | grep -v 'unavailable' | grep -oE "$uuid" | head -n1 || true)"; \
+    if [ -z "$reachable" ]; then \
+        if printf '%s\n' "$rows" | grep -q 'unavailable'; then \
+            echo "Device is paired but unavailable. Unlock the iPhone, keep it plugged in (or on the same Wi-Fi), trust this Mac, then retry."; \
+        else \
+            echo "No paired iPhone/iPad found. Connect a device and check 'xcrun devicectl list devices'."; \
+        fi; \
+        printf '%s\n' "$devices"; exit 1; \
+    fi; \
+    device="$reachable"; \
+    echo "Installing on device $device …"; \
+    xcrun devicectl device install app --device "$device" "$app"; \
+    xcrun devicectl device process launch --device "$device" "$bundle"; \
+    echo "Launched pgAgent on device $device"
 
 # Build the iOS app for a connected device or archive workflow.
 ios-build config="Debug":
@@ -379,15 +428,55 @@ ios-build config="Debug":
         -scheme {{ios_scheme}} \
         -configuration {{config}} \
         -destination 'generic/platform=iOS' \
-        -derivedDataPath /private/tmp/pgAgent-ios-device-dd \
+        -derivedDataPath {{ios_dev_dd}} \
         ARCHS=arm64 \
         build
 
+# Archive the iOS app for TestFlight / App Store (Release, device arm64).
+# Requires a signing team (DEVELOPMENT_TEAM in project.yml); auto-provisions.
+ios-archive:
+    @just _ensure-xcodeproj
+    @just _ios-device-rust Release
+    xcodebuild archive \
+        -project {{xcode_proj}} \
+        -scheme {{ios_scheme}} \
+        -configuration Release \
+        -destination 'generic/platform=iOS' \
+        -derivedDataPath {{ios_dev_dd}} \
+        -archivePath {{ios_archive}} \
+        -allowProvisioningUpdates \
+        ARCHS=arm64
+    @echo "Archive ready: {{ios_archive}}"
+
+# Upload the archive from `just ios-archive` to App Store Connect (TestFlight).
+# One-time manual prerequisite: an app record for {{ios_bundle}} must exist in
+# App Store Connect. Auth is either your Xcode-signed-in Apple ID (default) or,
+# for CI/headless, an App Store Connect API key:
+#   ASC_KEY_ID=<key id> ASC_KEY_ISSUER_ID=<issuer uuid> just ios-upload
+# with the .p8 at ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8
+# (or point ASC_KEY_PATH at it explicitly).
+ios-upload:
+    @archive="{{ios_archive}}"; \
+    test -d "$archive" || (echo "No archive at $archive — run 'just ios-archive' first"; exit 1); \
+    auth=(); \
+    if [ -n "${ASC_KEY_ID:-}" ] && [ -n "${ASC_KEY_ISSUER_ID:-}" ]; then \
+        auth+=(-authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_KEY_ISSUER_ID"); \
+        if [ -n "${ASC_KEY_PATH:-}" ]; then auth+=(-authenticationKeyPath "$ASC_KEY_PATH"); fi; \
+    fi; \
+    xcodebuild -exportArchive \
+        -archivePath "$archive" \
+        -exportOptionsPlist scripts/export_options_appstore.plist \
+        -exportPath "{{ios_dev_dd}}/export" \
+        -allowProvisioningUpdates \
+        ${auth[@]+"${auth[@]}"}
+
+# Archive + upload in one go.
+ios-testflight: ios-archive ios-upload
+
 # Clean only iOS build outputs.
 ios-clean:
-    rm -rf {{ios_sim_dd}} /private/tmp/pgAgent-ios-device-dd
-    rm -rf target/ios target/universal-ios
-    rm -rf target/aarch64-apple-ios target/aarch64-apple-ios-sim target/x86_64-apple-ios
+    rm -rf {{ios_sim_dd}} {{ios_dev_dd}}
+    rm -rf target/ios
     @echo "✅ iOS build artifacts cleaned"
 
 
@@ -396,7 +485,7 @@ ios-clean:
 _ensure-xcodeproj:
     @if [ ! -d {{xcode_proj}} ] || \
         [ project.yml -nt {{xcode_proj}}/project.pbxproj ] || \
-        find PgAgentApp PgAgentMobile PgAgentWidgets PgAgentMobileWidgets Sources Tests -name '*.swift' -newer {{xcode_proj}}/project.pbxproj | grep -q .; then \
+        find PgAgentApp PgAgentShared PgAgentMobile PgAgentWidgets PgAgentMobileWidgets Sources Tests -name '*.swift' -newer {{xcode_proj}}/project.pbxproj | grep -q .; then \
         just mac-gen; \
     fi
 
