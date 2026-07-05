@@ -36,6 +36,10 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
     let title: String
     let detail: String
     let createdAt: Date
+    /// Root blocker pid for blocked-locks alerts (roadmap 1.2 deep link).
+    /// Optional and backward-compatible: old hubs simply omit it, old
+    /// receivers ignore it (Codable decodeIfPresent / optional CKRecord field).
+    let blockerPid: Int32?
 
     var id: String { alertId }
 
@@ -69,6 +73,16 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
 
     var localAlertKey: String { Self.localAlertKey(forAlertId: alertId) }
 
+    /// The FleetAlertKind rawValue baked into a relay alertId
+    /// ("instanceId:kind:bucket") — the last component of the local alert
+    /// key. Used to route a notification tap when the push's recordFields
+    /// were truncated. Nil when the id has no kind component.
+    static func kind(forAlertId alertId: String) -> String? {
+        let key = localAlertKey(forAlertId: alertId)
+        guard let idx = key.lastIndex(of: ":") else { return nil }
+        return String(key[key.index(after: idx)...])
+    }
+
     // MARK: - From the shared alert engine
 
     init(alert: FleetAlert, at date: Date = Date()) {
@@ -80,13 +94,15 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
             kind: alert.kind.rawValue,
             title: alert.title,
             detail: alert.body,
-            createdAt: date
+            createdAt: date,
+            blockerPid: alert.blockerPid
         )
     }
 
     init(
         alertId: String, instanceId: String, instanceName: String, severity: String,
-        kind: String, title: String, detail: String, createdAt: Date
+        kind: String, title: String, detail: String, createdAt: Date,
+        blockerPid: Int32? = nil
     ) {
         self.alertId = alertId
         self.instanceId = instanceId
@@ -96,6 +112,7 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
         self.title = title
         self.detail = detail
         self.createdAt = createdAt
+        self.blockerPid = blockerPid
     }
 
     static func severity(for kind: FleetAlertKind) -> String {
@@ -116,6 +133,7 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
         static let title = "title"
         static let detail = "detail"
         static let createdAt = "createdAt"
+        static let blockerPid = "blockerPid"
     }
 
     /// Record name IS the alertId, so `.ifServerRecordUnchanged` turns hub
@@ -131,6 +149,11 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
         record[Field.title] = title
         record[Field.detail] = detail
         record[Field.createdAt] = createdAt
+        // Optional field: absent (not null) when there is no blocker pid, so
+        // records from pre-1.2 hubs and pidless alerts look identical.
+        if let blockerPid {
+            record[Field.blockerPid] = Int64(blockerPid)
+        }
         return record
     }
 
@@ -147,7 +170,8 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
             kind: (record[Field.kind] as? String) ?? FleetAlertKind.longRunning.rawValue,
             title: title,
             detail: (record[Field.detail] as? String) ?? "",
-            createdAt: (record[Field.createdAt] as? Date) ?? record.creationDate ?? Date()
+            createdAt: (record[Field.createdAt] as? Date) ?? record.creationDate ?? Date(),
+            blockerPid: (record[Field.blockerPid] as? Int64).flatMap { Int32(exactly: $0) }
         )
     }
 }

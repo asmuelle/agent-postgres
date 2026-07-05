@@ -19,8 +19,10 @@ import PgAgentMacOS
 //   1. Dedupes against the local BGAppRefresh monitor — the alertId's
 //      instance:kind prefix is inserted into FleetBackgroundMonitor's firing
 //      set, so the next local poll treats the condition as already-notified.
-//   2. Routes notification taps to the affected instance via
-//      MobileAlertRouter (full lock-chain deep link is slice 1.2).
+//   2. Routes notification taps to the *problem*, not just the instance:
+//      MobileAlertRouter carries (instanceId, alert kind, optional blocker
+//      pid) so a lock-contention tap lands on the lock-chain tab with the
+//      offending session highlighted (roadmap 1.2).
 // =============================================================================
 
 extension Notification.Name {
@@ -28,12 +30,27 @@ extension Notification.Name {
     static let pgFleetHubAlertReceived = Notification.Name("pgFleetHubAlertReceived")
 }
 
-/// Pending deep-link route. The root view observes this and selects the
-/// instance when a notification is tapped.
+/// Where a tapped alert should land: the affected instance, plus enough
+/// context to open the most relevant tab of the instance detail —
+/// blocked/deadlock kinds go to the lock chain (with the root blocker
+/// highlighted when known), slow/busy kinds to the activity list, offline
+/// to the fleet overview.
+struct MobileAlertRoute: Equatable, Sendable {
+    let instanceId: String
+    let kind: FleetAlertKind?
+    /// Root blocker pid from the alert payload, when the hub captured one.
+    /// Nil is fine — the lock view falls back to highlighting the current
+    /// root blocker after a fresh fetch (highlight-by-refetch).
+    let blockerPid: Int32?
+}
+
+/// Pending deep-link route. The root view observes this, presents the fleet
+/// monitor, and MobileFleetMonitorView consumes the route by pushing the
+/// instance detail on the right tab.
 @MainActor
 final class MobileAlertRouter: ObservableObject {
     static let shared = MobileAlertRouter()
-    @Published var pendingInstanceId: String?
+    @Published var pendingRoute: MobileAlertRoute?
 }
 
 @MainActor
@@ -98,18 +115,66 @@ final class HubAlertReceiver: NSObject, ObservableObject {
         return .newData
     }
 
-    /// Instance id for routing, from a push's userInfo.
-    nonisolated static func instanceId(fromPushUserInfo userInfo: [AnyHashable: Any]) -> String? {
+    /// Deep-link route from a hub push's userInfo (CloudKit envelope), or nil
+    /// when the payload isn't a hub alert.
+    nonisolated static func route(fromPushUserInfo userInfo: [AnyHashable: Any]) -> MobileAlertRoute? {
         guard let dictionary = userInfo as? [String: Any],
               let note = CKNotification(fromRemoteNotificationDictionary: dictionary),
               let query = note as? CKQueryNotification
         else { return nil }
-        if let explicit = query.recordFields?["instanceId"] as? String { return explicit }
-        guard let alertId = query.recordID?.recordName else { return nil }
-        // alertId = "<instanceId>:<kind>:<bucket>" — strip the two suffixes.
-        let localKey = FleetAlertPayload.localAlertKey(forAlertId: alertId)
-        guard let idx = localKey.lastIndex(of: ":") else { return nil }
-        return String(localKey[..<idx])
+
+        let fields = query.recordFields
+        let alertId = query.recordID?.recordName
+
+        let instanceId: String? = (fields?["instanceId"] as? String) ?? alertId.flatMap { id in
+            // alertId = "<instanceId>:<kind>:<bucket>" — strip the two suffixes.
+            let localKey = FleetAlertPayload.localAlertKey(forAlertId: id)
+            guard let idx = localKey.lastIndex(of: ":") else { return nil }
+            return String(localKey[..<idx])
+        }
+        guard let instanceId else { return nil }
+
+        let kindRaw = (fields?["kind"] as? String) ?? alertId.flatMap(FleetAlertPayload.kind(forAlertId:))
+        return MobileAlertRoute(
+            instanceId: instanceId,
+            kind: kindRaw.flatMap(FleetAlertKind.init(rawValue:)),
+            blockerPid: (fields?["blockerPid"] as? NSNumber)?.int32Value
+        )
+    }
+
+    /// Deep-link route from a local BGAppRefresh notification's userInfo
+    /// (FleetBackgroundMonitor stamps the keys directly), or nil.
+    nonisolated static func route(fromLocalUserInfo userInfo: [AnyHashable: Any]) -> MobileAlertRoute? {
+        guard let instanceId = userInfo["instanceId"] as? String else { return nil }
+        return MobileAlertRoute(
+            instanceId: instanceId,
+            kind: (userInfo["kind"] as? String).flatMap(FleetAlertKind.init(rawValue:)),
+            blockerPid: (userInfo["blockerPid"] as? NSNumber)?.int32Value
+        )
+    }
+
+    // MARK: - Notification category (explicit "View" action)
+
+    /// The FLEET_ALERT category both the hub push (subscription info.category)
+    /// and local BGAppRefresh alerts are stamped with. One explicit "View"
+    /// action — destructive fixes deliberately do NOT appear here: killing a
+    /// backend must go through the in-app preview + biometric flow.
+    nonisolated static let viewActionIdentifier = "PG_FLEET_ALERT_VIEW"
+
+    nonisolated static func registerNotificationCategories(
+        center: UNUserNotificationCenter = .current()
+    ) {
+        let view = UNNotificationAction(
+            identifier: viewActionIdentifier,
+            title: "View",
+            options: [.foreground]
+        )
+        let category = UNNotificationCategory(
+            identifier: FleetAlertCloudKit.notificationCategory,
+            actions: [view],
+            intentIdentifiers: []
+        )
+        center.setNotificationCategories([category])
     }
 }
 
@@ -121,14 +186,22 @@ extension HubAlertReceiver: UNUserNotificationCenterDelegate {
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        // Default tap and the explicit "View" action route identically; a
+        // dismissed notification routes nowhere.
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier
+            || response.actionIdentifier == Self.viewActionIdentifier
+        else {
+            completionHandler()
+            return
+        }
         let userInfo = response.notification.request.content.userInfo
         // Hub push? Parse the CloudKit envelope. Local BGAppRefresh alert?
-        // FleetBackgroundMonitor stamps instanceId into userInfo directly.
-        let instanceId = Self.instanceId(fromPushUserInfo: userInfo)
-            ?? (userInfo["instanceId"] as? String)
-        if let instanceId {
+        // FleetBackgroundMonitor stamps the route keys into userInfo directly.
+        let route = Self.route(fromPushUserInfo: userInfo)
+            ?? Self.route(fromLocalUserInfo: userInfo)
+        if let route {
             Task { @MainActor in
-                MobileAlertRouter.shared.pendingInstanceId = instanceId
+                MobileAlertRouter.shared.pendingRoute = route
             }
         }
         completionHandler()
@@ -152,6 +225,7 @@ final class MobileAppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = HubAlertReceiver.shared
+        HubAlertReceiver.registerNotificationCategories()
         Task { await HubAlertReceiver.shared.refreshIfEnabled() }
         return true
     }

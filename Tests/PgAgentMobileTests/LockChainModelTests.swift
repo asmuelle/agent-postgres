@@ -64,4 +64,44 @@ final class LockChainModelTests: XCTestCase {
         let edges = [LockEdge(waiterPid: 10, blockerPid: 10, relation: nil, mode: "m")]
         XCTAssertTrue(lockWaitGroups(from: edges).isEmpty)
     }
+
+    // MARK: - Post-action verification outcome
+
+    private func groups(_ edges: [LockEdge]) -> [LockWaitGroup] {
+        lockWaitGroups(from: edges)
+    }
+
+    func testOutcomeClearedWhenBlockerAndWaitersGone() {
+        let outcome = blockerResolutionOutcome(
+            blockerPid: 10, formerWaiterPids: [20, 21], groupsAfter: []
+        )
+        XCTAssertEqual(outcome, .cleared(released: 2))
+    }
+
+    func testOutcomeClearedIgnoresUnrelatedContention() {
+        // Some other chain existing afterwards doesn't tarnish the verdict as
+        // long as OUR former waiters are running again.
+        let after = groups([LockEdge(waiterPid: 90, blockerPid: 80, relation: nil, mode: "m")])
+        let outcome = blockerResolutionOutcome(
+            blockerPid: 10, formerWaiterPids: [20], groupsAfter: after
+        )
+        XCTAssertEqual(outcome, .cleared(released: 1))
+    }
+
+    func testOutcomePartialWhenFormerWaitersStillWaiting() {
+        // Blocker 10 is gone, but waiter 20 is now stuck behind 30.
+        let after = groups([LockEdge(waiterPid: 20, blockerPid: 30, relation: nil, mode: "m")])
+        let outcome = blockerResolutionOutcome(
+            blockerPid: 10, formerWaiterPids: [20, 21], groupsAfter: after
+        )
+        XCTAssertEqual(outcome, .partiallyCleared(stillWaiting: 1))
+    }
+
+    func testOutcomeStillPresentWhenBlockerHeadsAGroup() {
+        let after = groups([LockEdge(waiterPid: 20, blockerPid: 10, relation: nil, mode: "m")])
+        let outcome = blockerResolutionOutcome(
+            blockerPid: 10, formerWaiterPids: [20], groupsAfter: after
+        )
+        XCTAssertEqual(outcome, .blockerStillPresent)
+    }
 }

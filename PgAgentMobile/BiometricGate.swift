@@ -5,8 +5,10 @@ import LocalAuthentication
 // BiometricGate — a Face/Touch ID (passcode-fallback) speed bump in front of
 // destructive Fleet Monitor actions: terminating a backend and VACUUM FULL.
 // Killing a prod connection from a phone is exactly the fat-finger risk worth a
-// biometric confirm. Non-destructive actions (cancel query, VACUUM ANALYZE)
-// never call this.
+// biometric confirm. Non-destructive maintenance (VACUUM ANALYZE) never calls
+// this; the lock-chain "Resolve…" flow gates BOTH of its levels (cancel query
+// and terminate backend) — on that screen even a cancel is an intervention
+// against someone else's production session.
 // =============================================================================
 enum BiometricGate {
     /// Require device-owner authentication (biometrics, falling back to device

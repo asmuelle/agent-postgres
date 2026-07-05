@@ -27,6 +27,9 @@ struct PostgresAuditRecord: Codable, Sendable {
         case insertRow = "insert_row"
         case deleteRows = "delete_rows"
         case transaction
+        // Guarded on-call fixes (roadmap 1.2 alert → action loop).
+        case cancelBackend = "cancel_backend"
+        case terminateBackend = "terminate_backend"
     }
 
     let ts: Date

@@ -18,6 +18,10 @@ struct FleetInstanceHealth: Identifiable, Sendable, Equatable {
     var blockedLockCount: Int
     var errorMessage: String?
     var lastUpdated: Date?
+    /// Head of the biggest lock wait chain at poll time, when one exists —
+    /// threaded into blocked-locks alerts so a notification tap can land on
+    /// the offending session (roadmap 1.2). Nil when nothing is blocked.
+    var rootBlockerPid: Int32? = nil
 
     /// Most severe condition first — drives the card's status colour.
     enum Severity { case offline, blocked, slow, busy, healthy }
@@ -41,6 +45,31 @@ struct FleetInstanceHealth: Identifiable, Sendable, Equatable {
             lastUpdated: nil
         )
     }
+}
+
+/// Pick the "root blocker" — the pid worth resolving first — from raw
+/// (waiter, blocker) lock-wait pairs: the blocker with the most distinct
+/// waiters, preferring blockers that are not themselves waiting on someone
+/// else (killing a mid-chain pid only moves the contention up one level).
+/// Ties break toward the smaller pid so the choice is deterministic.
+/// Self-pairs (a backend "blocking itself") are ignored.
+func fleetRootBlockerPid(waitPairs: [(waiterPid: Int32, blockerPid: Int32)]) -> Int32? {
+    let pairs = waitPairs.filter { $0.waiterPid != $0.blockerPid }
+    guard !pairs.isEmpty else { return nil }
+
+    let waiterPids = Set(pairs.map(\.waiterPid))
+    var waitersByBlocker: [Int32: Set<Int32>] = [:]
+    for pair in pairs {
+        waitersByBlocker[pair.blockerPid, default: []].insert(pair.waiterPid)
+    }
+
+    return waitersByBlocker.min { lhs, rhs in
+        let lhsIsRoot = !waiterPids.contains(lhs.key)
+        let rhsIsRoot = !waiterPids.contains(rhs.key)
+        if lhsIsRoot != rhsIsRoot { return lhsIsRoot }
+        if lhs.value.count != rhs.value.count { return lhs.value.count > rhs.value.count }
+        return lhs.key < rhs.key
+    }?.key
 }
 
 enum FleetFormat {

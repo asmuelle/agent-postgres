@@ -98,9 +98,19 @@ final class FleetBackgroundMonitor {
         content.title = alert.title
         content.body = alert.body
         content.sound = .default
-        // Route notification taps to the affected instance (HubAlertReceiver
-        // is the shared UNUserNotificationCenter delegate).
-        content.userInfo = ["instanceId": alert.profileId]
+        // Same category as hub pushes → same explicit "View" action.
+        content.categoryIdentifier = FleetAlertCloudKit.notificationCategory
+        // Route notification taps to the affected instance AND the specific
+        // problem (kind + optional blocker pid) — HubAlertReceiver is the
+        // shared UNUserNotificationCenter delegate and parses these keys.
+        var userInfo: [String: Any] = [
+            "instanceId": alert.profileId,
+            "kind": alert.kind.rawValue,
+        ]
+        if let blockerPid = alert.blockerPid {
+            userInfo["blockerPid"] = NSNumber(value: blockerPid)
+        }
+        content.userInfo = userInfo
         let request = UNNotificationRequest(identifier: alert.id, content: content, trigger: nil)
         try? await UNUserNotificationCenter.current().add(request)
     }

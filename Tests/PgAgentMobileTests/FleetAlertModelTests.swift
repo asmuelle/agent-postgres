@@ -8,11 +8,15 @@ final class FleetAlertModelTests: XCTestCase {
 
     private let names = ["p1": "Prod", "p2": "Stage"]
 
-    private func health(_ id: String, reachable: Bool = true, slow: Int = 0, blocked: Int = 0) -> FleetInstanceHealth {
+    private func health(
+        _ id: String, reachable: Bool = true, slow: Int = 0, blocked: Int = 0,
+        rootBlockerPid: Int32? = nil
+    ) -> FleetInstanceHealth {
         FleetInstanceHealth(
             profileId: id, reachable: reachable,
             activeBackends: slow, longRunningCount: slow, blockedLockCount: blocked,
-            errorMessage: reachable ? nil : "down", lastUpdated: nil
+            errorMessage: reachable ? nil : "down", lastUpdated: nil,
+            rootBlockerPid: rootBlockerPid
         )
     }
 
@@ -82,6 +86,34 @@ final class FleetAlertModelTests: XCTestCase {
         )
         let result = evaluateFleetAlerts(healths: [down], names: names, thresholds: thresholds, previouslyFiring: [])
         XCTAssertEqual(result.newAlerts.map(\.id), ["p1:unreachable"])
+    }
+
+    func testBlockedAlertCarriesRootBlockerPid() {
+        let result = evaluateFleetAlerts(
+            healths: [health("p1", blocked: 2, rootBlockerPid: 4242)],
+            names: names, thresholds: .defaults, previouslyFiring: []
+        )
+        XCTAssertEqual(result.newAlerts.map(\.id), ["p1:blockedLocks"])
+        XCTAssertEqual(result.newAlerts.first?.blockerPid, 4242)
+    }
+
+    func testBlockedAlertWithoutSnapshotPidHasNilBlockerPid() {
+        let result = evaluateFleetAlerts(
+            healths: [health("p1", blocked: 1)],
+            names: names, thresholds: .defaults, previouslyFiring: []
+        )
+        XCTAssertNil(result.newAlerts.first?.blockerPid)
+    }
+
+    func testNonLockAlertsNeverCarryBlockerPid() {
+        // A stale rootBlockerPid in the health snapshot must not leak into a
+        // slow-query alert — the pid only means something for blockedLocks.
+        let result = evaluateFleetAlerts(
+            healths: [health("p1", slow: 2, rootBlockerPid: 4242)],
+            names: names, thresholds: .defaults, previouslyFiring: []
+        )
+        XCTAssertEqual(result.newAlerts.map(\.id), ["p1:longRunning"])
+        XCTAssertNil(result.newAlerts.first?.blockerPid)
     }
 
     func testMultipleInstancesAndConditions() {

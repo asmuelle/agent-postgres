@@ -87,16 +87,21 @@ struct MobileContentView: View {
                 .environmentObject(profileStore)
         }
         // Alert-notification deep link: tapping a fleet alert (Mac-hub push or
-        // local BGAppRefresh notification) routes to the affected instance.
+        // local BGAppRefresh notification) lands on the monitoring surface.
+        // This view only presents the fleet monitor; MobileFleetMonitorView
+        // consumes the route by pushing the instance detail on the tab that
+        // matches the alert kind (locks / activity / fleet overview).
         // `initial: true` also consumes a route set before the view existed
         // (cold launch from a notification).
-        .onChange(of: alertRouter.pendingInstanceId, initial: true) { _, pendingId in
-            guard let pendingId,
-                  profileStore.profiles.contains(where: { $0.id == pendingId })
-            else { return }
-            showingFleetMonitor = false
-            selectedProfileId = pendingId
-            alertRouter.pendingInstanceId = nil
+        .onChange(of: alertRouter.pendingRoute, initial: true) { _, route in
+            guard let route else { return }
+            guard profileStore.profiles.contains(where: { $0.id == route.instanceId }) else {
+                // Profile was deleted since the alert fired — drop the route
+                // so it can't fire against an unrelated future selection.
+                alertRouter.pendingRoute = nil
+                return
+            }
+            showingFleetMonitor = true
         }
         // Properties sheet removed to present all node details directly in the main query workspace pane.
     }

@@ -77,6 +77,10 @@ final class FleetHealthStore: ObservableObject {
                 return now - Double(start) >= threshold
             }.count
             let blocked = locks.filter { $0.blockedByPid != nil || !$0.granted }.count
+            let waitPairs = locks.compactMap { lock -> (waiterPid: Int32, blockerPid: Int32)? in
+                guard let blocker = lock.blockedByPid else { return nil }
+                return (waiterPid: lock.pid, blockerPid: blocker)
+            }
 
             health[profile.id] = FleetInstanceHealth(
                 profileId: profile.id,
@@ -85,7 +89,8 @@ final class FleetHealthStore: ObservableObject {
                 longRunningCount: longRunning,
                 blockedLockCount: blocked,
                 errorMessage: nil,
-                lastUpdated: Date()
+                lastUpdated: Date(),
+                rootBlockerPid: fleetRootBlockerPid(waitPairs: waitPairs)
             )
         } catch {
             health[profile.id] = FleetInstanceHealth(

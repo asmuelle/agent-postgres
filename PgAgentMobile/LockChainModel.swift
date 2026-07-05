@@ -82,3 +82,36 @@ func lockWaitGroups(from edges: [LockEdge]) -> [LockWaitGroup] {
         return lhs.blockerPid < rhs.blockerPid
     }
 }
+
+// MARK: - Post-action verification (roadmap 1.2)
+
+/// What a re-poll of the lock chain says about a cancel/terminate that just
+/// ran against `blockerPid`.
+enum BlockerResolutionOutcome: Equatable, Sendable {
+    /// Blocker gone and none of its former waiters are still waiting.
+    case cleared(released: Int)
+    /// Blocker gone, but some former waiters are still stuck (typically on a
+    /// deeper chain that has now surfaced).
+    case partiallyCleared(stillWaiting: Int)
+    /// The blocker still heads a wait group — a cancel may not have taken
+    /// effect (yet), or the backend ignored it.
+    case blockerStillPresent
+}
+
+/// Pure verdict for the post-action banner: compare the pre-action snapshot
+/// (blocker + its direct waiters) against the freshly fetched wait groups.
+func blockerResolutionOutcome(
+    blockerPid: Int32,
+    formerWaiterPids: Set<Int32>,
+    groupsAfter: [LockWaitGroup]
+) -> BlockerResolutionOutcome {
+    if groupsAfter.contains(where: { $0.blockerPid == blockerPid }) {
+        return .blockerStillPresent
+    }
+    let waitingNow = Set(groupsAfter.flatMap(\.waiters).map(\.pid))
+    let stillWaiting = formerWaiterPids.intersection(waitingNow).count
+    if stillWaiting == 0 {
+        return .cleared(released: formerWaiterPids.count)
+    }
+    return .partiallyCleared(stillWaiting: stillWaiting)
+}

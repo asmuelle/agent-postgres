@@ -11,8 +11,11 @@ import PgAgentMacOS
 struct MobileFleetMonitorView: View {
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @StateObject private var store = FleetHealthStore.withWidgetPublishing()
+    @ObservedObject private var alertRouter = MobileAlertRouter.shared
     @Environment(\.dismiss) private var dismiss
     @State private var showingSettings = false
+    /// Non-nil pushes the instance detail — set by tapped-alert deep links.
+    @State private var routedDetail: RoutedInstanceDetail?
 
     /// How often the fleet glance auto-refreshes.
     private static let refreshInterval: Duration = .seconds(5)
@@ -71,6 +74,34 @@ struct MobileFleetMonitorView: View {
             .sheet(isPresented: $showingSettings) {
                 MobileMonitorSettingsView()
             }
+            // Tapped-alert deep link: consume the pending route and land on
+            // the most relevant tab of the instance detail. Offline alerts
+            // stay on this fleet overview (the card already shows the error).
+            // `initial: true` covers a route set before this sheet existed.
+            .onChange(of: alertRouter.pendingRoute, initial: true) { _, route in
+                guard let route else { return }
+                guard let profile = profileStore.profiles.first(where: { $0.id == route.instanceId })
+                else { return } // root view validates + clears invalid routes
+                alertRouter.pendingRoute = nil
+                if let kind = route.kind, kind != .unreachable {
+                    routedDetail = RoutedInstanceDetail(
+                        profile: profile, kind: kind, blockerPid: route.blockerPid
+                    )
+                } else if route.kind == nil {
+                    // Kind unknown (old hub / truncated push) — still land on
+                    // the instance, defaulting to the activity tab.
+                    routedDetail = RoutedInstanceDetail(
+                        profile: profile, kind: .longRunning, blockerPid: nil
+                    )
+                }
+            }
+            .navigationDestination(item: $routedDetail) { detail in
+                MobileInstanceDetailView(
+                    profile: detail.profile,
+                    alertKind: detail.kind,
+                    alertBlockerPid: detail.blockerPid
+                )
+            }
             .task {
                 // Poll until the sheet is dismissed (task is cancelled on teardown).
                 while !Task.isCancelled {
@@ -96,6 +127,26 @@ struct MobileFleetMonitorView: View {
                 .padding(.horizontal, 40)
         }
         .frame(maxHeight: .infinity)
+    }
+}
+
+// MARK: - Alert deep-link destination
+
+/// navigationDestination payload for a tapped alert: which instance, which
+/// alert kind (drives the initial tab), and the blocker pid when known.
+private struct RoutedInstanceDetail: Hashable {
+    let profile: PostgresProfile
+    let kind: FleetAlertKind
+    let blockerPid: Int32?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.profile.id == rhs.profile.id && lhs.kind == rhs.kind && lhs.blockerPid == rhs.blockerPid
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(profile.id)
+        hasher.combine(kind)
+        hasher.combine(blockerPid)
     }
 }
 

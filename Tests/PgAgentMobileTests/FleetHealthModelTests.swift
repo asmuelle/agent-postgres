@@ -71,6 +71,66 @@ final class FleetHealthModelTests: XCTestCase {
         XCTAssertEqual(FleetFormat.age(sinceEpoch: 1_050, now: now), "0s")
     }
 
+    // MARK: - Root blocker selection (alert deep-link target)
+
+    func testRootBlockerNilWhenNoWaitPairs() {
+        XCTAssertNil(fleetRootBlockerPid(waitPairs: []))
+    }
+
+    func testRootBlockerIgnoresSelfPairs() {
+        XCTAssertNil(fleetRootBlockerPid(waitPairs: [(waiterPid: 10, blockerPid: 10)]))
+    }
+
+    func testRootBlockerPicksMostWaiters() {
+        let pid = fleetRootBlockerPid(waitPairs: [
+            (waiterPid: 20, blockerPid: 11),
+            (waiterPid: 21, blockerPid: 12),
+            (waiterPid: 22, blockerPid: 12),
+        ])
+        XCTAssertEqual(pid, 12)
+    }
+
+    func testRootBlockerPrefersHeadOfChainOverMidChain() {
+        // 30 blocks two sessions but is itself waiting on 10 — killing 30
+        // only moves the contention up, so 10 (the true head) wins even
+        // with fewer direct waiters.
+        let pid = fleetRootBlockerPid(waitPairs: [
+            (waiterPid: 20, blockerPid: 30),
+            (waiterPid: 21, blockerPid: 30),
+            (waiterPid: 30, blockerPid: 10),
+        ])
+        XCTAssertEqual(pid, 10)
+    }
+
+    func testRootBlockerDeduplicatesRepeatedWaiterPairs() {
+        // The same waiter appearing twice (two lock rows) must not double-count.
+        let pid = fleetRootBlockerPid(waitPairs: [
+            (waiterPid: 20, blockerPid: 11),
+            (waiterPid: 20, blockerPid: 11),
+            (waiterPid: 21, blockerPid: 12),
+            (waiterPid: 22, blockerPid: 12),
+        ])
+        XCTAssertEqual(pid, 12)
+    }
+
+    func testRootBlockerTieBreaksTowardSmallerPid() {
+        let pid = fleetRootBlockerPid(waitPairs: [
+            (waiterPid: 20, blockerPid: 14),
+            (waiterPid: 21, blockerPid: 13),
+        ])
+        XCTAssertEqual(pid, 13)
+    }
+
+    func testRootBlockerDeadlockCycleStillPicksDeterministically() {
+        // Pure cycle: everyone is a waiter, nobody is a clean head — falls
+        // back to waiter count, then smaller pid.
+        let pid = fleetRootBlockerPid(waitPairs: [
+            (waiterPid: 10, blockerPid: 11),
+            (waiterPid: 11, blockerPid: 10),
+        ])
+        XCTAssertEqual(pid, 10)
+    }
+
     // MARK: - Helpers
 
     private func makeHealth(active: Int, long: Int, blocked: Int) -> FleetInstanceHealth {

@@ -35,7 +35,9 @@ enum FleetAlertSubscription {
         // Keep the payload small (CloudKit caps desiredKeys); everything else
         // is re-fetchable via the record ID, and the record name IS the
         // alertId anyway.
-        info.desiredKeys = ["alertId", "instanceId", "kind"]
+        // blockerPid (optional) rides along so a lock-contention tap can
+        // deep-link straight to the offending session without a fetch.
+        info.desiredKeys = ["alertId", "instanceId", "kind", "blockerPid"]
         subscription.notificationInfo = info
 
         _ = try await container.privateCloudDatabase.save(subscription)

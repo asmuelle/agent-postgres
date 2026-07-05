@@ -45,6 +45,18 @@ final class FleetAlertRelayTests: XCTestCase {
         XCTAssertEqual(Set(ids).count, 3)
     }
 
+    func testKindParsedFromAlertId() {
+        let at = Date(timeIntervalSince1970: 1_000_000)
+        let alertId = FleetAlertPayload.deterministicId(instanceId: "prof-1", kind: "blockedLocks", at: at)
+        // Routing fallback when a push arrives without recordFields: the kind
+        // baked into the deterministic id must round-trip.
+        XCTAssertEqual(FleetAlertPayload.kind(forAlertId: alertId), "blockedLocks")
+    }
+
+    func testKindParseRejectsMalformedId() {
+        XCTAssertNil(FleetAlertPayload.kind(forAlertId: "no-colons-here"))
+    }
+
     func testLocalAlertKeyDropsBucketAndMatchesLocalAlertId() {
         let at = Date(timeIntervalSince1970: 1_000_000)
         let alertId = FleetAlertPayload.deterministicId(instanceId: "prof-1", kind: "longRunning", at: at)
@@ -82,6 +94,19 @@ final class FleetAlertRelayTests: XCTestCase {
         )
     }
 
+    func testPayloadCarriesBlockerPidFromAlert() {
+        let alert = FleetAlert(
+            profileId: "prof-9", profileName: "Prod", kind: .blockedLocks,
+            title: "t", body: "b", blockerPid: 31_337
+        )
+        XCTAssertEqual(FleetAlertPayload(alert: alert).blockerPid, 31_337)
+        // And stays nil when the alert engine had no chain snapshot.
+        let pidless = FleetAlert(
+            profileId: "prof-9", profileName: "Prod", kind: .blockedLocks, title: "t", body: "b"
+        )
+        XCTAssertNil(FleetAlertPayload(alert: pidless).blockerPid)
+    }
+
     func testSeverityMapping() {
         XCTAssertEqual(FleetAlertPayload.severity(for: .blockedLocks), "critical")
         XCTAssertEqual(FleetAlertPayload.severity(for: .unreachable), "critical")
@@ -99,10 +124,13 @@ final class FleetAlertRelayTests: XCTestCase {
             kind: "blockedLocks",
             title: "Prod EU: lock contention",
             detail: "2 backends blocked on locks.",
-            createdAt: Date(timeIntervalSince1970: 3_000_000)
+            createdAt: Date(timeIntervalSince1970: 3_000_000),
+            blockerPid: 4242
         )
 
         let record = payload.toRecord()
+        // blockerPid rides as Int64 (CloudKit's integer type).
+        XCTAssertEqual(record["blockerPid"] as? Int64, 4242)
         XCTAssertEqual(record.recordType, "FleetAlert")
         // Record name == alertId is what makes .ifServerRecordUnchanged a
         // dedupe rather than a duplicate.
@@ -141,5 +169,20 @@ final class FleetAlertRelayTests: XCTestCase {
         XCTAssertEqual(payload.alertId, "prof-1:longRunning:7")
         XCTAssertEqual(payload.localAlertKey, "prof-1:longRunning")
         XCTAssertEqual(payload.instanceName, "prof-1")
+    }
+
+    func testPayloadWithoutBlockerPidStaysBackwardCompatible() throws {
+        // A record from a pre-1.2 hub simply lacks the field — decode must
+        // yield nil, and encode must not write a null placeholder.
+        let record = CKRecord(
+            recordType: "FleetAlert",
+            recordID: CKRecord.ID(recordName: "prof-1:blockedLocks:7")
+        )
+        record["instanceId"] = "prof-1"
+        record["title"] = "Prod: lock contention"
+
+        let payload = try XCTUnwrap(FleetAlertPayload(record: record))
+        XCTAssertNil(payload.blockerPid)
+        XCTAssertNil(payload.toRecord()["blockerPid"])
     }
 }

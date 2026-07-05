@@ -36,6 +36,10 @@ struct FleetAlert: Identifiable, Equatable, Sendable {
     let kind: FleetAlertKind
     let title: String
     let body: String
+    /// Root blocker of the lock chain for `.blockedLocks` alerts, when the
+    /// health snapshot captured one — lets a notification tap deep-link to
+    /// the offending session. Nil for other kinds.
+    var blockerPid: Int32? = nil
 
     /// Stable per (instance, condition) so the same ongoing problem doesn't
     /// re-notify on every poll — see `evaluateFleetAlerts`.
@@ -59,9 +63,15 @@ func evaluateFleetAlerts(
     for health in healths {
         let name = names[health.profileId] ?? health.profileId
 
-        func consider(_ kind: FleetAlertKind, active: Bool, title: String, body: String) {
+        func consider(
+            _ kind: FleetAlertKind, active: Bool, title: String, body: String,
+            blockerPid: Int32? = nil
+        ) {
             guard active else { return }
-            let alert = FleetAlert(profileId: health.profileId, profileName: name, kind: kind, title: title, body: body)
+            let alert = FleetAlert(
+                profileId: health.profileId, profileName: name, kind: kind,
+                title: title, body: body, blockerPid: blockerPid
+            )
             firingNow.insert(alert.id)
             if !previouslyFiring.contains(alert.id) {
                 newAlerts.append(alert)
@@ -90,7 +100,8 @@ func evaluateFleetAlerts(
             .blockedLocks,
             active: thresholds.blockedLockAlert > 0 && health.blockedLockCount >= thresholds.blockedLockAlert,
             title: "\(name): lock contention",
-            body: "\(health.blockedLockCount) backend\(health.blockedLockCount == 1 ? "" : "s") blocked on locks."
+            body: "\(health.blockedLockCount) backend\(health.blockedLockCount == 1 ? "" : "s") blocked on locks.",
+            blockerPid: health.rootBlockerPid
         )
     }
 
