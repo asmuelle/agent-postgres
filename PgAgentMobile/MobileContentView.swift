@@ -47,6 +47,7 @@ struct MobileContentView: View {
     @State private var showingProUpgrade = false
     @State private var showingCSVImport = false
     @State private var showingFleetMonitor = false
+    @State private var showingProviderImport = false
 
     var body: some View {
         Group {
@@ -84,6 +85,10 @@ struct MobileContentView: View {
         }
         .sheet(isPresented: $showingFleetMonitor) {
             MobileFleetMonitorView()
+                .environmentObject(profileStore)
+        }
+        .sheet(isPresented: $showingProviderImport) {
+            MobileProviderImportView()
                 .environmentObject(profileStore)
         }
         // Alert-notification deep link: tapping a fleet alert (Mac-hub push or
@@ -147,6 +152,11 @@ struct MobileContentView: View {
                         Label("Fleet Monitor", systemImage: "waveform.path.ecg")
                     }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showingProviderImport = true } label: {
+                        Label("Add from Provider", systemImage: "cloud")
+                    }
+                }
             }
         } detail: {
             if let profileId = selectedProfileId,
@@ -191,6 +201,7 @@ struct MobileContentView: View {
                 onAddProfile: handleAddProfile,
                 onEditProfile: { p in editingProfile = p },
                 onShowCSVImport: { showingCSVImport = true },
+                onShowProviderImport: { showingProviderImport = true },
                 onShowProUpgrade: { showingProUpgrade = true },
                 onShowMonitor: { showingFleetMonitor = true }
             )
@@ -260,6 +271,7 @@ struct MobileConnectionListView: View {
     var onAddProfile: () -> Void
     var onEditProfile: (PostgresProfile) -> Void
     var onShowCSVImport: () -> Void
+    var onShowProviderImport: () -> Void
     var onShowProUpgrade: () -> Void
     var onShowMonitor: () -> Void
 
@@ -324,8 +336,15 @@ struct MobileConnectionListView: View {
                     Button(action: onShowMonitor) {
                         Label("Fleet Monitor", systemImage: "waveform.path.ecg")
                     }
-                    Button(action: onShowCSVImport) {
-                        Label("Import CSV", systemImage: "square.and.arrow.down")
+                    Menu {
+                        Button(action: onShowCSVImport) {
+                            Label("Import CSV", systemImage: "square.and.arrow.down")
+                        }
+                        Button(action: onShowProviderImport) {
+                            Label("Add from Provider…", systemImage: "cloud")
+                        }
+                    } label: {
+                        Label("Import", systemImage: "square.and.arrow.down")
                     }
                     Button(action: onAddProfile) {
                         Label("Add Profile", systemImage: "plus")

@@ -22,9 +22,16 @@ struct SidebarView: View {
     @StateObject var connectionManager = PostgresConnectionManager.shared
 
     @State private var showNewPostgresConnection = false
+    @State private var showProviderImport = false
+    @State private var showLocalConfigImport = false
     @State var search = ""
     @State private var editingPostgresProfile: PostgresEditTarget?
     @State private var detailsExpanded = true
+
+    // First-run local detection (roadmap 2.1): only probed while the
+    // profile list is empty; a hit offers a one-click localhost profile.
+    @State private var localPostgresDetected = false
+    @State private var localProbeCompleted = false
 
     // Tree Expansion States
     @State private var serversExpanded = true
@@ -92,6 +99,12 @@ struct SidebarView: View {
                 existingProfile: target.profile
             )
         }
+        .sheet(isPresented: $showProviderImport) {
+            PostgresProviderImportView(store: postgresStore)
+        }
+        .sheet(isPresented: $showLocalConfigImport) {
+            PostgresLocalConfigImportView(store: postgresStore)
+        }
         .onChange(of: selectedNodeId) { newValue in
             if let id = newValue {
                 if let found = findNodeAcrossStores(id: id) {
@@ -139,16 +152,28 @@ struct SidebarView: View {
 
                 Spacer(minLength: 0)
 
-                Button {
-                    showNewPostgresConnection = true
+                Menu {
+                    Button("New Connection…") {
+                        showNewPostgresConnection = true
+                    }
+                    Button("Add from Provider…") {
+                        showProviderImport = true
+                    }
+                    Button("Import from ~/.pgpass…") {
+                        showLocalConfigImport = true
+                    }
                 } label: {
                     Image(systemName: "plus")
                         .font(MidnightMacDesign.FontToken.label)
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
+                } primaryAction: {
+                    showNewPostgresConnection = true
                 }
-                .buttonStyle(.plain)
-                .help("Add new Postgres connection")
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Add new Postgres connection (long-press for provider and ~/.pgpass import)")
             }
 
             HStack(spacing: 6) {
@@ -417,7 +442,47 @@ struct SidebarView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
+
+            HStack(spacing: 8) {
+                Button("Add from Provider…") { showProviderImport = true }
+                Button("Import ~/.pgpass…") { showLocalConfigImport = true }
+            }
+            .buttonStyle(.link)
+            .font(MidnightMacDesign.FontToken.caption)
+
+            if localPostgresDetected {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Local PostgreSQL detected")
+                            .font(MidnightMacDesign.FontToken.caption.weight(.semibold))
+                    }
+                    Text("Something is listening on 127.0.0.1:5432.")
+                        .font(MidnightMacDesign.FontToken.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Connect to localhost") {
+                        let profile = LocalPostgresDetector.makeLocalhostProfile()
+                        postgresStore.saveOrUpdate(profile)
+                        // Open the editor so user/database are one edit away
+                        // if the defaults don't match their local setup.
+                        editingPostgresProfile = PostgresEditTarget(profile: profile)
+                        localPostgresDetected = false
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
         }
         .padding(.vertical, 8)
+        .task {
+            // Probe once per sidebar lifetime, and only while there are no
+            // profiles at all (this view only renders in that state, but the
+            // guard keeps a race with an import from re-offering it).
+            guard !localProbeCompleted, postgresStore.profiles.isEmpty else { return }
+            localProbeCompleted = true
+            localPostgresDetected = await LocalPostgresDetector.probe()
+        }
     }
 }

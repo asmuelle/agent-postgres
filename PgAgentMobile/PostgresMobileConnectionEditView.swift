@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct PostgresMobileConnectionEditView: View {
     @Environment(\.dismiss) private var dismiss
@@ -20,6 +21,12 @@ struct PostgresMobileConnectionEditView: View {
     @State private var color: String? = nil
     @State private var environment: PostgresEnvironment = .unspecified
     @State private var isReadOnly = false
+
+    // Paste-to-connect (roadmap 2.1). The clipboard is only read when the
+    // user taps the paste button — probing on appear would fire iOS's
+    // paste-permission toast every time the sheet opens.
+    @State private var pasteFeedback: String?
+    @State private var pasteFeedbackIsError = false
 
     private var isEditing: Bool { profile != nil }
 
@@ -50,6 +57,41 @@ struct PostgresMobileConnectionEditView: View {
                         )
                         .padding(.horizontal)
                     }
+
+                    // Section 0: Paste-to-connect quick fill
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("QUICK FILL")
+                            .font(MidnightMobileDesign.FontToken.captionStrong)
+                            .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
+                            .padding(.leading, 4)
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Button(action: applyClipboardConnectionString) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "doc.on.clipboard")
+                                    Text("Paste URL or DSN from clipboard")
+                                        .font(MidnightMobileDesign.FontToken.label)
+                                    Spacer()
+                                }
+                                .foregroundStyle(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .midnightMobileMinimumTapTarget()
+
+                            Text(pasteFeedback ?? "Fills the form from a postgres:// URL or a host=… dbname=… string. Passwords go to the field below and are saved to your keychain.")
+                                .font(MidnightMobileDesign.FontToken.caption)
+                                .foregroundStyle(
+                                    pasteFeedback == nil
+                                        ? MidnightMobileDesign.ColorToken.secondaryText
+                                        : (pasteFeedbackIsError ? Color.red : Color.green)
+                                )
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding()
+                        .midnightMobileCard()
+                    }
+                    .padding(.horizontal)
 
                     // Section 1: Connection Details
                     VStack(alignment: .leading, spacing: 10) {
@@ -270,6 +312,41 @@ struct PostgresMobileConnectionEditView: View {
             return "Require TLS but skip certificate verification (encrypts the wire, not authenticates the server)."
         case .verifyFull:
             return "Require TLS and validate the server certificate against the system trust store. Recommended for production."
+        }
+    }
+
+    // MARK: - Paste-to-connect
+
+    private func applyClipboardConnectionString() {
+        // UIPasteboard.general.string triggers the system paste toast —
+        // acceptable here because the user explicitly tapped "Paste".
+        guard let text = UIPasteboard.general.string,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            pasteFeedback = "Clipboard is empty."
+            pasteFeedbackIsError = true
+            return
+        }
+        do {
+            let parsed = try PostgresConnectionURL.parse(text)
+            host = parsed.host
+            port = String(parsed.port)
+            database = parsed.database
+            user = parsed.user
+            if let tlsMode = parsed.tls { tls = tlsMode }
+            if let pw = parsed.password {
+                // Staged only: save() writes it to the keychain.
+                password = pw
+                savePasswordToKeychain = true
+            }
+            if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                name = parsed.suggestedName
+            }
+            pasteFeedback = "Form filled from clipboard."
+            pasteFeedbackIsError = false
+        } catch {
+            pasteFeedback = error.localizedDescription
+            pasteFeedbackIsError = true
         }
     }
 

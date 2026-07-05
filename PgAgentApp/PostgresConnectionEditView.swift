@@ -41,6 +41,13 @@ struct PostgresConnectionEditView: View {
     @State private var saveError: String?
     @State private var showNewSsh = false
 
+    // Paste-to-connect (roadmap 2.1): a URL/DSN pasted here fills the form;
+    // the extracted password is staged in `password` and lands in the
+    // keychain on Save via the normal path — never in the profile.
+    @State private var pasteInput: String = ""
+    @State private var pasteError: String?
+    @State private var clipboardCandidate: PostgresConnectionURL?
+
     private let logger = Logger(subsystem: "com.mc-ssh", category: "postgres-edit")
 
     init(
@@ -74,6 +81,39 @@ struct PostgresConnectionEditView: View {
                 .padding(.top, 16)
 
             Form {
+                Section("Quick fill") {
+                    if let candidate = clipboardCandidate {
+                        Button {
+                            apply(parsed: candidate)
+                            clipboardCandidate = nil
+                        } label: {
+                            Label(
+                                "Use connection from clipboard (\(candidate.user.isEmpty ? candidate.host : "\(candidate.user)@\(candidate.host)"))",
+                                systemImage: "doc.on.clipboard"
+                            )
+                        }
+                        .help("Your clipboard holds a Postgres connection string — click to fill the form.")
+                    }
+                    HStack(spacing: 8) {
+                        TextField(
+                            "Paste URL or DSN (postgres://… or host=… dbname=…)",
+                            text: $pasteInput
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        Button("Fill Form") { applyPasteInput() }
+                            .disabled(pasteInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if let pasteError {
+                        Text(pasteError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text("Passwords in the string are placed in the field below and saved to your keychain — never stored in the profile.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Identity") {
                     TextField("Display name", text: $name)
                         .textFieldStyle(.roundedBorder)
@@ -214,7 +254,10 @@ struct PostgresConnectionEditView: View {
             .padding()
         }
         .frame(minWidth: 540, minHeight: 620)
-        .onAppear { populateFromExisting() }
+        .onAppear {
+            populateFromExisting()
+            probeClipboardForConnectionString()
+        }
         .sheet(isPresented: $showNewSsh) {
             ConnectionEditView(storeManager: sshStore, existingProfile: nil, initialKind: .ssh)
         }
@@ -246,6 +289,53 @@ struct PostgresConnectionEditView: View {
             && UInt16(port) != nil
             && !database.trimmingCharacters(in: .whitespaces).isEmpty
             && !user.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    // MARK: - Paste-to-connect
+
+    /// macOS only offers the clipboard hint when creating a new connection
+    /// (an existing profile's fields shouldn't be one accidental click from
+    /// being overwritten). Reading NSPasteboard has no permission toast on
+    /// macOS, so probing on appear is fine here (unlike iOS).
+    private func probeClipboardForConnectionString() {
+        guard !isEditing else { return }
+        guard let text = NSPasteboard.general.string(forType: .string),
+              let parsed = try? PostgresConnectionURL.parse(text)
+        else { return }
+        clipboardCandidate = parsed
+    }
+
+    private func applyPasteInput() {
+        pasteError = nil
+        do {
+            apply(parsed: try PostgresConnectionURL.parse(pasteInput))
+        } catch {
+            pasteError = error.localizedDescription
+        }
+    }
+
+    private func apply(parsed: PostgresConnectionURL) {
+        pasteError = nil
+        host = parsed.host
+        port = String(parsed.port)
+        database = parsed.database
+        user = parsed.user
+        if let tlsMode = parsed.tls { tls = tlsMode }
+        if let appName = parsed.applicationName, !appName.isEmpty {
+            applicationName = appName
+        }
+        if let timeout = parsed.connectTimeoutSecs {
+            connectTimeoutSecs = String(timeout)
+        }
+        if let pw = parsed.password {
+            // Staged only: written to the keychain by save(), never to disk.
+            password = pw
+            savePasswordToKeychain = true
+        }
+        if trimmedName.isEmpty {
+            name = parsed.suggestedName
+        }
+        pasteInput = ""
     }
 
     // MARK: - Actions
