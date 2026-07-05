@@ -22,6 +22,7 @@ struct CommandPaletteItem: Identifiable {
         case connections = "Connections"
         case tables = "Tables & Views"
         case saved = "Saved Queries"
+        case snippets = "Snippets"
         case actions = "Actions"
     }
 
@@ -118,6 +119,26 @@ enum CommandPaletteItems {
                     }
                 ))
             }
+
+            // Snippets — inserted into the active query tab's editor at the
+            // caret (the tab view forwards to its editor's snippet channel),
+            // starting the placeholder tab-stop session.
+            for snippet in PostgresSnippetsStore.shared.all() {
+                items.append(CommandPaletteItem(
+                    id: "snippet:\(snippet.id.uuidString)",
+                    title: snippet.title,
+                    subtitle: "Snippet · insert into editor",
+                    systemImage: "curlybraces",
+                    section: .snippets,
+                    action: {
+                        NotificationCenter.default.post(
+                            name: .postgresInsertSnippetActiveTab,
+                            object: nil,
+                            userInfo: ["body": snippet.body]
+                        )
+                    }
+                ))
+            }
         }
 
         items.append(contentsOf: actionItems(selectedProfileId: selectedProfileId))
@@ -188,6 +209,10 @@ enum CommandPaletteItems {
 extension Notification.Name {
     /// Ask the frontmost query tab to open its visual EXPLAIN sheet.
     static let postgresExplainActiveTab = Notification.Name("postgresExplainActiveTab")
+    /// Ask the frontmost query tab to insert a snippet body into its editor
+    /// at the caret. `userInfo["body"]` carries the raw snippet text.
+    static let postgresInsertSnippetActiveTab =
+        Notification.Name("postgresInsertSnippetActiveTab")
 }
 
 // MARK: - Palette view

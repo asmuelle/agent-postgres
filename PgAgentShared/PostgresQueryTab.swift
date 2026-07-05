@@ -61,6 +61,48 @@ struct PostgresPendingEdit: Sendable {
     let rowId: String
 }
 
+/// Outcome of one statement in a multi-statement script run. The summary
+/// fields (elapsed, counts, error) are always kept; the full `result` is
+/// retained only for the most recent `PostgresScriptRun.maxRetainedResults`
+/// statements so a 100-statement script can't pin 100 result sets in memory.
+struct PostgresScriptStatementOutcome: Identifiable, @unchecked Sendable {
+    /// 0-based position in the script — doubles as the identity (a run's
+    /// outcomes are immutable once produced).
+    let index: Int
+    /// Short uppercase keyword preview ("SELECT", "INSERT", …) for the chip.
+    let preview: String
+    /// Collapsed one-line statement text (capped) for tooltips.
+    let statementText: String
+    let elapsed: TimeInterval
+    /// Rows returned, for row-returning statements; `nil` otherwise.
+    let rowCount: Int?
+    let rowsAffected: UInt64?
+    /// Non-nil marks the failing statement (scripts stop on first error).
+    let errorMessage: String?
+    /// Full result set while retained; dropped (with `resultDropped` set)
+    /// once the retention window moves past this statement.
+    var result: FfiPgExecutionResult?
+    var resultDropped: Bool = false
+
+    var id: Int { index }
+}
+
+/// Per-statement outcomes of the tab's most recent script run (2+
+/// statements). `nil` for single-statement runs — those look exactly as
+/// before.
+struct PostgresScriptRun: @unchecked Sendable {
+    var statements: [PostgresScriptStatementOutcome]
+    /// Which statement's result the grid currently shows.
+    var selectedIndex: Int
+    /// How many statements the script contains in total — on a failed run,
+    /// `statements` holds only the executed prefix, and the strip can say
+    /// "stopped at 3 of 7".
+    var totalCount: Int
+    /// How many full result sets a run may keep in memory at once;
+    /// older statements keep only their summary line.
+    static let maxRetainedResults = 10
+}
+
 enum TabKind: Hashable, Sendable {
     case query
     case routine(schema: String, name: String, signature: String)
@@ -131,6 +173,10 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     /// shows it (double-click in the sidebar). Consumed exactly once
     /// via `consumeAutoRun(forTab:)`.
     var pendingAutoRun: Bool
+    /// Per-statement outcomes of the last script run (2+ top-level
+    /// statements). Drives the summary strip above the results grid;
+    /// cleared whenever a single-statement run starts.
+    var scriptRun: PostgresScriptRun? = nil
     /// Monotonically increasing revision of the displayed result rows.
     /// Bumped by the store on every mutation that changes what the
     /// results grid should render (new result, page append, cell
@@ -505,6 +551,41 @@ final class PostgresQueryTabsStore: ObservableObject {
         mutate(id: id) { $0.errorCharOffset = clamped }
     }
 
+    /// Set the error underline at an absolute 0-based character offset into
+    /// the tab's current editor text. Used by the script path, which knows
+    /// each statement's offset in the full script and can therefore map a
+    /// per-statement server error position itself. `nil` clears.
+    func setAbsoluteErrorOffset(_ offset: Int?, forTab id: UUID) {
+        guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let count = tabs[idx].sql.count
+        let clamped = offset.flatMap { ($0 >= 0 && $0 <= count) ? $0 : nil }
+        mutate(id: id) { $0.errorCharOffset = clamped }
+    }
+
+    // MARK: - Script runs (multi-statement)
+
+    /// Replace (or clear) the tab's script-run summary. Passing outcomes
+    /// does not touch `lastResult` — use `selectScriptStatement` for that.
+    func setScriptRun(_ run: PostgresScriptRun?, forTab id: UUID) {
+        mutate(id: id) { $0.scriptRun = run }
+    }
+
+    /// Point the results grid at one statement of the script run: updates
+    /// the strip selection and swaps `lastResult` to that statement's
+    /// retained result (or `nil` when it errored / was dropped from the
+    /// retention window — the strip shows why).
+    func selectScriptStatement(_ index: Int, forTab id: UUID) {
+        mutate(id: id) { tab in
+            guard var run = tab.scriptRun, run.statements.indices.contains(index) else { return }
+            run.selectedIndex = index
+            tab.scriptRun = run
+            tab.lastResult = run.statements[index].result
+            tab.paginationError = nil
+            tab.isLoadingMore = false
+            tab.resultsRevision &+= 1
+        }
+    }
+
     /// Place AI-generated SQL into the editor and remember it verbatim, so
     /// `run` can enforce `PgReadOnlyGuard` on unmodified AI output before it
     /// reaches `pgExecute`.
@@ -550,6 +631,9 @@ final class PostgresQueryTabsStore: ObservableObject {
     func setResult(_ result: FfiPgExecutionResult?, forTab id: UUID) {
         mutate(id: id) {
             $0.lastResult = result
+            // A direct (single-statement) result supersedes any script-run
+            // strip left over from a previous multi-statement run.
+            $0.scriptRun = nil
             $0.paginationError = nil
             $0.isLoadingMore = false
             $0.resultsRevision &+= 1

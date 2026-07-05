@@ -25,9 +25,21 @@ import SwiftUI
 // here (avoids double-execution).
 // =============================================================================
 
+extension Notification.Name {
+    /// Ask a `PostgresSQLEditor` to insert a snippet body at the caret and
+    /// start its placeholder session. `userInfo`: `channel` (the target
+    /// editor's `snippetChannel`) and `body` (raw snippet text with
+    /// `${n:default}` markup). Editors without a matching channel ignore it.
+    static let pgSQLEditorInsertSnippet = Notification.Name("pgSQLEditorInsertSnippet")
+}
+
 struct PostgresSQLEditor: NSViewRepresentable {
     @Binding var text: String
     var isEditable: Bool = true
+    /// Identity for snippet-insertion routing (the owning query tab's id
+    /// string). `nil` — the default for other hosts of this editor — opts
+    /// out of snippet notifications entirely.
+    var snippetChannel: String? = nil
     /// 0-based character offset (into `text`) to underline as the last query
     /// error location, or `nil` for none. Mapped from the server's position.
     var errorCharOffset: Int?
@@ -96,6 +108,9 @@ struct PostgresSQLEditor: NSViewRepresentable {
         // sync during edits). Old caret offsets are meaningless against the new
         // text, so place the caret at end-of-document.
         if textView.string != text {
+            // A wholesale replacement invalidates any snippet tab-stop
+            // ranges — end the session before the text changes under it.
+            textView.endSnippetSession()
             textView.string = text
             let end = (text as NSString).length
             textView.setSelectedRange(NSRange(location: end, length: 0))
@@ -134,9 +149,34 @@ struct PostgresSQLEditor: NSViewRepresentable {
         /// Last-applied error-underline offset, so `updateNSView` can detect
         /// changes; cleared the moment the user edits.
         var errorCharOffset: Int?
+        private var snippetObserver: NSObjectProtocol?
 
         init(_ parent: PostgresSQLEditor) {
             self.parent = parent
+            super.init()
+            // Snippet insertion requests are broadcast (the popover and the
+            // command palette don't hold a reference to the NSTextView);
+            // the channel id routes them to the right editor instance.
+            snippetObserver = NotificationCenter.default.addObserver(
+                forName: .pgSQLEditorInsertSnippet,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                guard let self,
+                      let channel = self.parent.snippetChannel,
+                      (note.userInfo?["channel"] as? String) == channel,
+                      let body = note.userInfo?["body"] as? String,
+                      let textView = self.textView,
+                      textView.isEditable
+                else { return }
+                textView.insertSnippet(PostgresSnippetPlaceholders.parse(body))
+            }
+        }
+
+        deinit {
+            if let snippetObserver {
+                NotificationCenter.default.removeObserver(snippetObserver)
+            }
         }
 
         func textDidChange(_ notification: Notification) {
@@ -238,8 +278,140 @@ final class PgSQLTextView: NSTextView {
 
     private var pendingCompletion: DispatchWorkItem?
 
+    // MARK: - Snippet placeholder session
+
+    /// Live tab-stop state for the most recent snippet insertion. Ranges
+    /// are absolute UTF-16 locations in the buffer, maintained across
+    /// edits by `shouldChangeText`. One session at a time — inserting a
+    /// new snippet replaces any active session.
+    private struct SnippetSession {
+        var stops: [NSRange]
+        var current: Int
+        var finalCursor: Int?
+    }
+
+    private var snippetSession: SnippetSession?
+
     deinit {
         pendingCompletion?.cancel()
+    }
+
+    /// Insert an expanded snippet at the caret (replacing any selection),
+    /// then select the first tab stop. Tab / ⇧Tab move between stops while
+    /// the session is active; Esc — or tabbing past the last stop — ends it
+    /// (the caret then lands on `$0` when the snippet defined one).
+    func insertSnippet(_ parsed: PostgresParsedSnippet) {
+        snippetSession = nil
+        let replaceRange = selectedRange()
+        let base = replaceRange.location
+        // Goes through the normal editing pipeline: undoable, fires
+        // shouldChangeText/didChangeText, and lands in the SwiftUI binding
+        // via the delegate's textDidChange.
+        insertText(parsed.text, replacementRange: replaceRange)
+
+        let stops = parsed.tabStops.map {
+            NSRange(location: base + $0.location, length: $0.length)
+        }
+        let finalCursor = parsed.finalCursorUTF16.map { base + $0 }
+        let target: NSRange
+        if let first = stops.first {
+            snippetSession = SnippetSession(stops: stops, current: 0, finalCursor: finalCursor)
+            target = first
+        } else {
+            target = NSRange(
+                location: finalCursor ?? base + (parsed.text as NSString).length,
+                length: 0
+            )
+        }
+        setSelectedRange(target)
+        // The insertion usually comes from a popover / palette that holds
+        // first responder; take it (back) so Tab lands here. Deferred one
+        // runloop turn so the dismissing popover can't steal it right back.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self)
+            self.setSelectedRange(target)
+            self.scrollRangeToVisible(target)
+        }
+    }
+
+    func endSnippetSession() {
+        snippetSession = nil
+    }
+
+    /// Move to the stop `delta` away from the current one. Advancing past
+    /// the last stop jumps to `$0` (or stays put) and ends the session;
+    /// moving before the first clamps.
+    private func moveSnippetStop(by delta: Int) {
+        guard var session = snippetSession else { return }
+        let next = session.current + delta
+        if next >= session.stops.count {
+            let end = session.finalCursor
+                ?? session.stops.last.map { $0.location + $0.length }
+            snippetSession = nil
+            if let end {
+                let clamped = min(end, (string as NSString).length)
+                setSelectedRange(NSRange(location: clamped, length: 0))
+            }
+            return
+        }
+        session.current = max(0, next)
+        snippetSession = session
+        let range = session.stops[session.current]
+        setSelectedRange(range)
+        scrollRangeToVisible(range)
+    }
+
+    /// Keep tab-stop ranges in sync with edits. Typing inside the current
+    /// stop grows/shrinks it; edits before a stop shift it; an edit that
+    /// overlaps any *other* stop (multi-line paste, undo of the insertion
+    /// itself) invalidates the session rather than guessing.
+    override func shouldChangeText(
+        in affectedCharRange: NSRange,
+        replacementString: String?
+    ) -> Bool {
+        let allowed = super.shouldChangeText(
+            in: affectedCharRange, replacementString: replacementString
+        )
+        guard allowed, var session = snippetSession else { return allowed }
+
+        let delta = ((replacementString ?? "") as NSString).length - affectedCharRange.length
+        let affectedEnd = affectedCharRange.location + affectedCharRange.length
+        var invalidated = false
+
+        for i in session.stops.indices {
+            let stop = session.stops[i]
+            let stopEnd = stop.location + stop.length
+            if i == session.current,
+               affectedCharRange.location >= stop.location,
+               affectedEnd <= stopEnd {
+                session.stops[i].length += delta
+            } else if affectedEnd <= stop.location {
+                session.stops[i].location += delta
+            } else if affectedCharRange.location >= stopEnd {
+                // Entirely after this stop — unaffected.
+            } else {
+                invalidated = true
+                break
+            }
+        }
+
+        if invalidated {
+            snippetSession = nil
+            return allowed
+        }
+        if let finalCursor = session.finalCursor {
+            if affectedEnd <= finalCursor {
+                session.finalCursor = finalCursor + delta
+            } else if affectedCharRange.location < finalCursor {
+                // Edit swallowed the final-cursor position; approximate to
+                // the end of the replacement.
+                session.finalCursor = affectedCharRange.location
+                    + ((replacementString ?? "") as NSString).length
+            }
+        }
+        snippetSession = session
+        return allowed
     }
 
     /// The word being completed: the identifier run immediately before the
@@ -256,6 +428,26 @@ final class PgSQLTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        // Snippet placeholder session: Tab advances, ⇧Tab goes back, Esc
+        // deactivates (consumed so it doesn't also trigger completion).
+        // Only while a session is active — otherwise Tab stays a tab.
+        if snippetSession != nil {
+            if event.keyCode == 48 { // Tab
+                if modifiers.isEmpty {
+                    moveSnippetStop(by: 1)
+                    return
+                }
+                if modifiers == [.shift] {
+                    moveSnippetStop(by: -1)
+                    return
+                }
+            }
+            if event.keyCode == 53 { // Esc
+                endSnippetSession()
+                return
+            }
+        }
 
         // Ctrl-Space: explicit completion trigger.
         if modifiers == [.control], event.charactersIgnoringModifiers == " " {

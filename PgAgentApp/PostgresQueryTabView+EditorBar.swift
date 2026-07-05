@@ -20,6 +20,7 @@ extension PostgresQueryTabView {
                     get: { tab.sql },
                     set: { store.setSQL($0, forTab: tab.id) }
                 ),
+                snippetChannel: tab.id.uuidString,
                 errorCharOffset: tab.errorCharOffset,
                 completionCatalog: {
                     guard let store = PostgresConnectionManager.shared.schemaStores[profileId],
@@ -94,6 +95,31 @@ extension PostgresQueryTabView {
                             store.setSQL(entry.sql, forTab: tab.id)
                         },
                         onDismiss: { savedOpen = false }
+                    )
+                }
+
+                Button {
+                    snippetsOpen.toggle()
+                } label: {
+                    Label("Snippets", systemImage: "curlybraces")
+                }
+                .help("Snippet library — insert at the caret, Tab between placeholders")
+                .popover(isPresented: $snippetsOpen, arrowEdge: .bottom) {
+                    PostgresSnippetsPopover(
+                        onInsert: { snippet in
+                            // Route through the editor's snippet channel so
+                            // the NSTextView inserts at the caret and starts
+                            // the placeholder session (not a text replace).
+                            NotificationCenter.default.post(
+                                name: .pgSQLEditorInsertSnippet,
+                                object: nil,
+                                userInfo: [
+                                    "channel": tab.id.uuidString,
+                                    "body": snippet.body,
+                                ]
+                            )
+                        },
+                        onDismiss: { snippetsOpen = false }
                     )
                 }
 

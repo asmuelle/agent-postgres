@@ -88,12 +88,23 @@ struct PostgresServerSort: Equatable {
 }
 
 /// A cell the user asked to inspect (right-click → "Show value…"). The host
-/// presents a viewer; `typeName` lets it pretty-print JSON/JSONB.
+/// presents a viewer; `typeName` lets it pretty-print JSON/JSONB. The
+/// addressing fields (`typeOid`, row/column indices, `rowId`) let the host
+/// offer in-place editing for json/jsonb cells through the same cell-update
+/// pipeline the grid uses; they default to "not addressable".
 struct PostgresCellInspection: Identifiable {
     let id = UUID()
     let columnName: String
     let typeName: String
     let value: String?
+    /// Postgres type OID — drives the affinity check for JSON editing.
+    var typeOid: UInt32 = 0
+    /// Index into `result.rows` (the data row, not the display row).
+    var rowIndex: Int = -1
+    /// Index into `result.columns` (hidden `__pg_*` columns included).
+    var columnIndex: Int = -1
+    /// The row's ctid from the hidden `__pg_rowid__` column, when present.
+    var rowId: String? = nil
 }
 
 /// Navigation request bubbled from the grid's FK menu items to the

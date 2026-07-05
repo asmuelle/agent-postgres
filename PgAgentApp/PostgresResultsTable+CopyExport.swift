@@ -26,10 +26,19 @@ extension PostgresResultsTable.Coordinator {
         else { return }
         let cells = result.rows[dataRow].cells
         let value = colIdx < cells.count ? cells[colIdx] : nil
+        // Row identity for the JSON edit path: the ctid from the hidden
+        // rowid column, when this result carries one.
+        let rowId: String? = result.columns
+            .firstIndex(where: { $0.name == POSTGRES_ROWID_COLUMN })
+            .flatMap { idx in idx < cells.count ? cells[idx] : nil }
         onInspectCell(PostgresCellInspection(
             columnName: result.columns[colIdx].name,
             typeName: result.columns[colIdx].typeName,
-            value: value
+            value: value,
+            typeOid: result.columns[colIdx].typeOid,
+            rowIndex: dataRow,
+            columnIndex: colIdx,
+            rowId: rowId
         ))
     }
 

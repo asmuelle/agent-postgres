@@ -12,6 +12,156 @@ import SwiftUI
 extension PostgresQueryTabView {
     @ViewBuilder
     func resultsArea(for tab: PostgresQueryTab) -> some View {
+        // Script runs (2+ statements) get a per-statement summary strip
+        // above whatever the selected statement shows. Single-statement
+        // runs render exactly as before (scriptRun is nil).
+        if let run = tab.scriptRun {
+            VStack(spacing: 0) {
+                scriptStrip(for: tab, run: run)
+                Divider()
+                if let selected = run.statements.indices.contains(run.selectedIndex)
+                    ? run.statements[run.selectedIndex] : nil {
+                    if let error = selected.errorMessage {
+                        scriptMessagePanel(
+                            systemImage: "xmark.octagon.fill",
+                            tint: .red,
+                            title: "Statement \(selected.index + 1) failed",
+                            message: error
+                        )
+                    } else if selected.resultDropped {
+                        scriptMessagePanel(
+                            systemImage: "tray.full",
+                            tint: .secondary,
+                            title: "Result no longer in memory",
+                            message: "Only the last \(PostgresScriptRun.maxRetainedResults) result sets of a script are kept. This statement returned \(selected.rowCount.map(String.init) ?? "—") row(s) in \(Self.formatScriptElapsed(selected.elapsed)). Re-run the statement alone to see its rows."
+                        )
+                    } else {
+                        resultsAreaCore(for: tab)
+                    }
+                } else {
+                    resultsAreaCore(for: tab)
+                }
+            }
+        } else {
+            resultsAreaCore(for: tab)
+        }
+    }
+
+    // MARK: - Script strip (per-statement summary)
+
+    @ViewBuilder
+    private func scriptStrip(for tab: PostgresQueryTab, run: PostgresScriptRun) -> some View {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(run.statements) { outcome in
+                        scriptChip(
+                            outcome,
+                            isSelected: outcome.index == run.selectedIndex
+                        ) {
+                            store.selectScriptStatement(outcome.index, forTab: tab.id)
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+            }
+            if run.statements.count < run.totalCount {
+                Text(isRunning(tab)
+                     ? "\(run.statements.count)/\(run.totalCount)"
+                     : "stopped at \(run.statements.count) of \(run.totalCount)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.trailing, 10)
+                    .help(isRunning(tab)
+                          ? "Statements executed so far"
+                          : "Execution stopped on the first error; the remaining statements did not run.")
+            }
+        }
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.8))
+    }
+
+    @ViewBuilder
+    private func scriptChip(
+        _ outcome: PostgresScriptStatementOutcome,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if outcome.errorMessage != nil {
+                    Image(systemName: "xmark.octagon.fill")
+                        .foregroundStyle(.red)
+                }
+                Text("#\(outcome.index + 1) \(outcome.preview)")
+                    .font(.caption.weight(isSelected ? .semibold : .regular))
+                Text(Self.formatScriptElapsed(outcome.elapsed))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if let rows = outcome.rowCount {
+                    Text(rows == 1 ? "1 row" : "\(rows) rows")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                } else if outcome.errorMessage == nil, let affected = outcome.rowsAffected {
+                    Text("\(affected) affected")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected
+                          ? Color.accentColor.opacity(0.18)
+                          : Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(
+                        outcome.errorMessage != nil
+                            ? Color.red.opacity(0.55)
+                            : (isSelected ? Color.accentColor.opacity(0.6) : Color.clear),
+                        lineWidth: 1
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(outcome.errorMessage ?? outcome.statementText)
+    }
+
+    @ViewBuilder
+    private func scriptMessagePanel(
+        systemImage: String,
+        tint: Color,
+        title: String,
+        message: String
+    ) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.title2)
+                .foregroundStyle(tint)
+            Text(title).font(.headline)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+                .frame(maxWidth: 520)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(16)
+    }
+
+    static func formatScriptElapsed(_ seconds: TimeInterval) -> String {
+        if seconds < 1.0 { return String(format: "%.0f ms", seconds * 1_000) }
+        if seconds < 60 { return String(format: "%.2f s", seconds) }
+        return String(format: "%.0f s", seconds)
+    }
+
+    @ViewBuilder
+    private func resultsAreaCore(for tab: PostgresQueryTab) -> some View {
         if let r = tab.lastResult {
             // Treat "no visible columns" as no result set. The hidden
             // `__pg_rowid__` column never counts on its own.

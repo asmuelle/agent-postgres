@@ -45,6 +45,7 @@ struct PostgresQueryTabView: View {
     @State private var runTask: Task<Void, Never>? = nil
     @State var historyOpen: Bool = false
     @State var savedOpen: Bool = false
+    @State var snippetsOpen: Bool = false
     @State var explainPlanOpen: Bool = false
     @State var exportProgress: PostgresExportProgressState? = nil
     @State var exportCancel = ExportCancelToken()
@@ -120,6 +121,22 @@ struct PostgresQueryTabView: View {
                               !tab.sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         else { return }
                         explainPlanOpen = true
+                    }
+                    // Command palette's snippet items — forward to this tab's
+                    // editor channel so the NSTextView layer inserts at the
+                    // caret and starts the placeholder session.
+                    .onReceive(
+                        NotificationCenter.default.publisher(for: .postgresInsertSnippetActiveTab)
+                    ) { note in
+                        guard let body = note.userInfo?["body"] as? String else { return }
+                        NotificationCenter.default.post(
+                            name: .pgSQLEditorInsertSnippet,
+                            object: nil,
+                            userInfo: [
+                                "channel": tabId.uuidString,
+                                "body": body,
+                            ]
+                        )
                     }
                     // Auto-run for sidebar double-click / "Open Data":
                     // the id re-fires the task whenever the flag flips
@@ -280,7 +297,10 @@ struct PostgresQueryTabView: View {
             .frame(minWidth: 850, minHeight: 600)
         }
         .sheet(item: $inspectedCell) { cell in
-            PostgresCellInspectorView(inspection: cell)
+            PostgresCellInspectorView(
+                inspection: cell,
+                editContext: inspectorEditContext(for: cell, tab: tab)
+            )
         }
     }
 
@@ -360,6 +380,17 @@ struct PostgresQueryTabView: View {
                 connectionId: connectionId,
                 sql: trimmed
             )
+            return
+        }
+
+        // Scripts (2+ top-level statements) execute statement-by-statement so
+        // each statement gets its own timing, result set, and read-only/audit
+        // treatment. Splitting runs on the *editor* text so per-statement
+        // offsets map straight onto the error underline. Single statements
+        // stay byte-identical with the old path (`trimmed` is what executes).
+        let statements = PostgresStatementSplitter.split(tab.sql)
+        if statements.count >= 2 {
+            executeScript(tabId: tab.id, connectionId: connectionId, statements: statements)
             return
         }
 
@@ -455,5 +486,206 @@ struct PostgresQueryTabView: View {
             )
         }
         runTask?.cancel()
+    }
+
+    // MARK: - Script execution (multi-statement)
+
+    /// Run a 2+-statement script sequentially through the same
+    /// `BridgeManager.pgExecute` bridge the single-statement path uses —
+    /// which is precisely what keeps the read-only classifier and the write
+    /// audit log applying *per statement*. Stops on the first error,
+    /// keeping the completed prefix's outcomes. Only the last
+    /// `PostgresScriptRun.maxRetainedResults` result sets stay in memory;
+    /// earlier statements keep a summary line only.
+    private func executeScript(
+        tabId: UUID,
+        connectionId: String,
+        statements: [PostgresScriptStatement]
+    ) {
+        runTask?.cancel()
+        let startedAll = Date()
+        store.setExecState(.running(startedAt: startedAll), forTab: tabId)
+        store.setErrorPosition(nil, forTab: tabId)
+        store.setScriptRun(nil, forTab: tabId)
+        resultFilter = ""
+
+        let storeRef = store
+        let sessionId = tabId.uuidString
+        let pageSize = store.pageSize
+        let total = statements.count
+        let scriptText = statements.map(\.text).joined(separator: ";\n")
+        runTask = Task { @MainActor in
+            var outcomes: [PostgresScriptStatementOutcome] = []
+            var retained: [Int] = [] // outcome indices still holding a result
+
+            // Nested funcs don't inherit the closure's @MainActor isolation;
+            // annotate explicitly so the store calls stay main-actor.
+            @MainActor func publish(selecting index: Int) {
+                storeRef.setScriptRun(
+                    PostgresScriptRun(
+                        statements: outcomes,
+                        selectedIndex: index,
+                        totalCount: total
+                    ),
+                    forTab: tabId
+                )
+                storeRef.selectScriptStatement(index, forTab: tabId)
+            }
+
+            for (i, statement) in statements.enumerated() {
+                let started = Date()
+                do {
+                    var result = try await BridgeManager.shared.pgExecute(
+                        connectionId: connectionId,
+                        sessionId: sessionId,
+                        sql: statement.text,
+                        pageSize: pageSize
+                    )
+                    let elapsed = Date().timeIntervalSince(started)
+                    guard !Task.isCancelled else {
+                        storeRef.setExecState(
+                            .cancelled(elapsed: Date().timeIntervalSince(startedAll)),
+                            forTab: tabId
+                        )
+                        return
+                    }
+                    // Each subsequent execute on this session supersedes the
+                    // previous statement's cursor server-side, so only the
+                    // final statement may keep a live "Load more" handle.
+                    if i < total - 1 { result.cursorId = nil }
+                    let hasVisibleColumns = result.columns.contains {
+                        !$0.name.hasPrefix("__pg_")
+                    }
+                    outcomes.append(PostgresScriptStatementOutcome(
+                        index: i,
+                        preview: Self.statementPreview(statement.text),
+                        statementText: Self.collapsed(statement.text),
+                        elapsed: elapsed,
+                        rowCount: hasVisibleColumns ? result.rows.count : nil,
+                        rowsAffected: result.rowsAffected,
+                        errorMessage: nil,
+                        result: result
+                    ))
+                    retained.append(outcomes.count - 1)
+                    if retained.count > PostgresScriptRun.maxRetainedResults {
+                        let dropIndex = retained.removeFirst()
+                        outcomes[dropIndex].result = nil
+                        outcomes[dropIndex].resultDropped = true
+                    }
+                    storeRef.applyTransactionEffect(
+                        sql: statement.text, error: nil, tabId: tabId
+                    )
+                    // Progressive display: the strip and grid advance as
+                    // statements complete, so long scripts show progress.
+                    publish(selecting: i)
+                } catch {
+                    let bridgeError = error as? PostgresBridgeError
+                        ?? .other(error.localizedDescription)
+                    let elapsed = Date().timeIntervalSince(started)
+                    let message = bridgeError.errorDescription ?? "Statement failed"
+                    outcomes.append(PostgresScriptStatementOutcome(
+                        index: i,
+                        preview: Self.statementPreview(statement.text),
+                        statementText: Self.collapsed(statement.text),
+                        elapsed: elapsed,
+                        rowCount: nil,
+                        rowsAffected: nil,
+                        errorMessage: message,
+                        result: nil
+                    ))
+                    storeRef.applyTransactionEffect(
+                        sql: statement.text, error: bridgeError, tabId: tabId
+                    )
+                    // Map the server's 1-based position inside *this*
+                    // statement onto the full editor text for the underline.
+                    if let position = bridgeError.serverError?.position, position >= 1 {
+                        storeRef.setAbsoluteErrorOffset(
+                            statement.startCharOffset + Int(position) - 1,
+                            forTab: tabId
+                        )
+                    }
+                    publish(selecting: i)
+                    storeRef.setExecState(
+                        .failed(
+                            message: "Statement \(i + 1) of \(total): \(message)",
+                            elapsed: Date().timeIntervalSince(startedAll)
+                        ),
+                        forTab: tabId
+                    )
+                    logger.error(
+                        "script statement \(i + 1)/\(total) failed: \(message, privacy: .public)"
+                    )
+                    return
+                }
+            }
+
+            storeRef.setExecState(
+                .completed(elapsed: Date().timeIntervalSince(startedAll), atTime: Date()),
+                forTab: tabId
+            )
+            // One history entry for the whole script, like the old bulk path.
+            let rowsReturned = outcomes.last?.rowCount
+            PostgresHistoryStore.shared.record(
+                profileId: profileId,
+                sql: scriptText,
+                durationMs: UInt32(min(
+                    Date().timeIntervalSince(startedAll) * 1000, Double(UInt32.max)
+                )),
+                rowsReturned: rowsReturned
+            )
+        }
+    }
+
+    /// Uppercase leading-keyword preview for a script chip ("SELECT",
+    /// "CREATE INDEX" → "CREATE", …). Falls back to a text prefix for
+    /// statements starting with something unlexable.
+    private static func statementPreview(_ sql: String) -> String {
+        let keyword = PostgresQueryTab.leadingKeyword(of: sql)
+        if !keyword.isEmpty { return keyword }
+        return String(collapsed(sql).prefix(16))
+    }
+
+    /// One-line, whitespace-collapsed statement text capped for tooltips.
+    private static func collapsed(_ sql: String) -> String {
+        let joined = sql
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return joined.count > 200 ? String(joined.prefix(200)) + "…" : joined
+    }
+
+    // MARK: - Cell inspector editing
+
+    /// Build the inspector's edit context when — and only when — the
+    /// inspected cell is writable JSON: the tab has an edit target, the row
+    /// carries a ctid, the column's affinity is json/jsonb, and the profile
+    /// is not read-only (the bridge re-checks read-only as defense in
+    /// depth). Saves go through `runCellUpdate`, the same pipeline the grid
+    /// uses, so batch mode staging and the write audit keep working.
+    func inspectorEditContext(
+        for cell: PostgresCellInspection,
+        tab: PostgresQueryTab
+    ) -> PostgresCellInspectorEditContext? {
+        guard tab.editTarget != nil,
+              let rowId = cell.rowId, !rowId.isEmpty,
+              cell.rowIndex >= 0, cell.columnIndex >= 0,
+              !cell.typeName.isEmpty,
+              PostgresColumnAffinity.from(typeOid: cell.typeOid) == .json,
+              !(profile?.isReadOnly ?? false)
+        else { return nil }
+        return PostgresCellInspectorEditContext(onSave: { newValue, complete in
+            runCellUpdate(
+                edit: PostgresCellEdit(
+                    rowIndex: cell.rowIndex,
+                    columnIndex: cell.columnIndex,
+                    columnName: cell.columnName,
+                    columnType: cell.typeName,
+                    newValue: newValue,
+                    rowId: rowId
+                ),
+                tab: tab,
+                complete: complete
+            )
+        })
     }
 }
