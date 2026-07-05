@@ -46,25 +46,26 @@ system tools). iOS target builds but is not yet on the App Store.
 
 ---
 
-## Phase 0 — Foundation hardening (now → +4 weeks)
+## Phase 0 — Foundation hardening — ✅ SHIPPED 2026-07-05
 
 Goal: a tree we can ship from weekly. Mostly complete as of 2026-07-04 review-fix pass.
 
 | Slice | Work | Status |
 |---|---|---|
-| 0.1 | Fix all 2026-07-04 review findings (insert-row CAST bug, biometric gate stub, entitlements, CI iOS job, collector locks, etc.) | In progress — see review session |
-| 0.2 | `src/ffi.rs` module split (`src/ffi/` by domain) — every panic here is an app crash; 5k-line file is the biggest stability liability | Planned |
-| 0.3 | Split `PostgresQueryTabView` (2.3k lines), `PostgresResultsTable` (2k), `SidebarView` (1.7k) into focused files; extract export pipeline | Planned |
-| 0.4 | Per-tab invalidation for `PostgresQueryTabsStore` (stop full-array diffs of 50k-row results on unrelated tab updates) | Planned |
-| 0.5 | Shared-directory source split for `PgAgentMobile` (kill the per-file target list drift class) | Planned |
-| 0.6 | TestFlight pipeline: archive + upload lane in `justfile` (`just ios-archive`, `just ios-upload`), App Store Connect app record, internal TestFlight group | Planned |
+| 0.1 | Fix all 2026-07-04 review findings (insert-row CAST bug, biometric gate stub, entitlements, CI iOS job, collector locks, etc.) | ✅ Done (commits ce6194c…a834b35) |
+| 0.2 | `src/ffi.rs` module split (`src/ffi/` by domain) — every panic here is an app crash; 5k-line file is the biggest stability liability | ✅ Done |
+| 0.3 | Split `PostgresQueryTabView` (2.3k lines), `PostgresResultsTable` (2k), `SidebarView` (1.7k) into focused files; extract export pipeline | ✅ Done |
+| 0.4 | Per-tab invalidation for `PostgresQueryTabsStore` (stop full-array diffs of 50k-row results on unrelated tab updates) | ✅ Done |
+| 0.5 | Shared-directory source split for `PgAgentMobile` (kill the per-file target list drift class) | ✅ Done |
+| 0.6 | TestFlight pipeline: archive + upload lane in `justfile` (`just ios-archive`, `just ios-upload`), App Store Connect app record, internal TestFlight group | ✅ Done |
 
-Exit criteria: CI green incl. iOS job; no file > 800 lines in touched areas;
+Exit criteria met 2026-07-05 (remaining manual step: App Store Connect app
+record for com.pgagent.mobile). Original criteria: CI green incl. iOS job; no file > 800 lines in touched areas;
 TestFlight build installable on a real device.
 
 ---
 
-## Phase 1 — The on-call story (weeks 2–10) · **category-defining**
+## Phase 1 — The on-call story — ✅ SHIPPED 2026-07-05 (code complete; CloudKit portal setup pending, see docs/cloudkit-setup.md)
 
 Goal: the demo — push arrives, open iPhone, see blocking query, Face ID, kill it.
 
