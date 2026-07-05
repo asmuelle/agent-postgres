@@ -121,7 +121,7 @@ Exit criteria: full on-call demo recordable as the App Store preview video.
 
 ---
 
-## Phase 2 — Funnel: onboarding + editor credibility (weeks 8–16)
+## Phase 2 — Funnel: onboarding + editor credibility — ✅ SHIPPED 2026-07-05
 
 Goal: first-run-to-first-query < 60 seconds; Postico defectors don't bounce.
 
