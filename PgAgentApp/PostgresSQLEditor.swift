@@ -6,8 +6,18 @@ import SwiftUI
 //
 // Replaces the bare SwiftUI TextEditor on the most-used surface in the
 // workspace with an NSTextView that has SQL syntax highlighting and
-// schema-aware word completion (keywords + types + functions + live
-// table/column/schema identifiers from PgSchemaStore).
+// schema-aware completion driven by `SQLCompletionEngine` (context-sensitive:
+// tables after FROM/JOIN, columns after `alias.` / in WHERE, keywords
+// elsewhere; nothing inside strings or comments).
+//
+// Completion presentation deliberately stays on NSTextView's *native*
+// machinery (`complete(_:)` + the `textView(_:completions:…)` delegate)
+// rather than a custom panel: it gives list navigation, insertion, ⎋/typing
+// dismissal and — critically — zero key stealing while hidden, all for free,
+// and it matches how completion already behaved in this editor. The engine
+// supplies context-aware, pre-quoted candidates; the popup just displays
+// them. Triggers: typing 2+ identifier chars (debounced ~150 ms), `.` after
+// an identifier, and Ctrl-Space / Esc explicitly.
 //
 // ⌘↵ (run) and ⌘. (cancel) stay handled by the hidden SwiftUI buttons in the
 // parent's overlay — those register as window-level key equivalents and fire
@@ -21,12 +31,16 @@ struct PostgresSQLEditor: NSViewRepresentable {
     /// 0-based character offset (into `text`) to underline as the last query
     /// error location, or `nil` for none. Mapped from the server's position.
     var errorCharOffset: Int?
-    /// Live identifier candidates (table / column / schema / function names).
-    /// Evaluated lazily, only when the user triggers completion, so it always
-    /// reflects whatever the browser has loaded so far. `@MainActor` because it
-    /// reads the main-actor PgSchemaStore; the completion delegate runs on the
-    /// main actor, so this is always satisfied.
-    var identifiers: @MainActor () -> [String]
+    /// Snapshot of the loaded schema metadata for completion. Evaluated
+    /// lazily (and cached briefly) when the user triggers completion, so it
+    /// always reflects whatever the browser has loaded so far. `@MainActor`
+    /// because it reads the main-actor PgSchemaStore; the completion
+    /// delegate runs on the main actor, so this is always satisfied.
+    var completionCatalog: @MainActor () -> SQLCompletionCatalog
+    /// Called when the current statement references a relation whose columns
+    /// aren't loaded yet — the owner may ask PgSchemaStore to fetch them so
+    /// the *next* completion has columns. Optional; default no-op.
+    var requestColumns: @MainActor (_ schema: String, _ table: String) -> Void = { _, _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -112,11 +126,11 @@ struct PostgresSQLEditor: NSViewRepresentable {
         var parent: PostgresSQLEditor
         weak var textView: PgSQLTextView?
 
-        // Completion fires on most keystrokes, and `identifiers()` scans all
-        // loaded schema state — so cache it and refresh at most once a second
-        // rather than rescanning per keystroke.
-        private var cachedIdentifiers: [String] = []
-        private var lastIdentifierRefresh: Date = .distantPast
+        // Snapshotting the catalog walks all loaded schema state, and
+        // completion fires on most keystrokes — so cache it briefly rather
+        // than rebuilding per keystroke.
+        private var cachedCatalog = SQLCompletionCatalog.empty
+        private var lastCatalogRefresh: Date = .distantPast
         /// Last-applied error-underline offset, so `updateNSView` can detect
         /// changes; cleared the moment the user edits.
         var errorCharOffset: Int?
@@ -138,36 +152,40 @@ struct PostgresSQLEditor: NSViewRepresentable {
             applyHighlighting()
         }
 
-        /// Schema-aware completion: SQL vocabulary + live identifiers,
-        /// prefix-matched against the partial word, case-insensitively.
+        /// Schema-aware completion via `SQLCompletionEngine`: the engine
+        /// classifies the cursor context from the full text and returns
+        /// ranked, insertion-ready candidates (identifiers pre-quoted).
         func textView(
             _ textView: NSTextView,
             completions words: [String],
             forPartialWordRange charRange: NSRange,
             indexOfSelectedItem index: UnsafeMutablePointer<Int>?
         ) -> [String] {
-            let partial = (textView.string as NSString).substring(with: charRange).lowercased()
-            guard partial.count >= 1 else { return [] }
-
             let now = Date()
-            if now.timeIntervalSince(lastIdentifierRefresh) > 1.0 {
-                cachedIdentifiers = parent.identifiers()
-                lastIdentifierRefresh = now
+            if now.timeIntervalSince(lastCatalogRefresh) > 1.0 {
+                cachedCatalog = parent.completionCatalog()
+                lastCatalogRefresh = now
             }
 
-            var seen = Set<String>()
-            let matches = (PostgresSQLSyntax.completionVocabulary + cachedIdentifiers)
-                .filter { candidate in
-                    let lower = candidate.lowercased()
-                    return lower != partial
-                        && lower.hasPrefix(partial)
-                        && seen.insert(lower).inserted
+            let result = SQLCompletionEngine.complete(
+                sql: textView.string,
+                cursorUTF16: charRange.location + charRange.length,
+                catalog: cachedCatalog
+            )
+
+            // Statement references relations whose columns aren't cached →
+            // ask the owner to prefetch them, and drop the catalog cache so
+            // the next trigger picks the loaded columns up.
+            if !result.relationsNeedingColumns.isEmpty {
+                lastCatalogRefresh = .distantPast
+                for rel in result.relationsNeedingColumns {
+                    parent.requestColumns(rel.schema, rel.name)
                 }
-                .sorted { $0.lowercased() < $1.lowercased() }
+            }
 
             // Don't pre-select a row, so fast typing can't accidentally accept.
             index?.pointee = -1
-            return Array(matches.prefix(60))
+            return result.items.map(\.insertText)
         }
 
         func applyHighlighting() {
@@ -203,27 +221,89 @@ struct PostgresSQLEditor: NSViewRepresentable {
     }
 }
 
-/// NSTextView that pops the completion list as the user types an identifier.
+/// NSTextView that pops the completion list as the user types.
+///
+/// Triggers:
+///   - 2+ identifier characters in the current word → debounced ~150 ms so a
+///     fast burst of keystrokes schedules one popup, not five.
+///   - `.` typed right after an identifier → member completion (columns of
+///     the alias/table, relations of the schema), same debounce.
+///   - Ctrl-Space → immediate explicit trigger (Esc keeps working natively).
+///
+/// While the completion list is hidden this view adds no key handling beyond
+/// scheduling — AppKit's completion session owns navigation keys only while
+/// its window is visible.
 final class PgSQLTextView: NSTextView {
+    private static let completionDebounce: TimeInterval = 0.15
+
+    private var pendingCompletion: DispatchWorkItem?
+
+    deinit {
+        pendingCompletion?.cancel()
+    }
+
+    /// The word being completed: the identifier run immediately before the
+    /// caret. Overridden so behavior is deterministic (AppKit's default uses
+    /// linguistic word boundaries) and so an empty range right after `alias.`
+    /// still opens a completion session listing all columns.
+    override var rangeForUserCompletion: NSRange {
+        let caret = selectedRange().location
+        let ns = string as NSString
+        guard caret <= ns.length else { return NSRange(location: NSNotFound, length: 0) }
+        let start = currentWordStart(before: caret)
+        return NSRange(location: start, length: caret - start)
+    }
+
     override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        // Ctrl-Space: explicit completion trigger.
+        if modifiers == [.control], event.charactersIgnoringModifiers == " " {
+            pendingCompletion?.cancel()
+            complete(self)
+            return
+        }
+
         super.keyDown(with: event)
 
-        // Only auto-suggest on a plain identifier keystroke (no modifiers),
-        // once the current word is at least two characters — enough signal to
-        // be useful without flickering on every single letter. Esc still works
-        // as the manual trigger.
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Any keystroke supersedes a previously scheduled popup.
+        pendingCompletion?.cancel()
+        pendingCompletion = nil
+
+        // Only auto-suggest on plain typing (no command/control modifiers).
         guard modifiers.isEmpty || modifiers == [.shift],
               let chars = event.charactersIgnoringModifiers,
               chars.count == 1,
-              let scalar = chars.unicodeScalars.first,
-              CharacterSet.alphanumerics.contains(scalar) || scalar == "_"
+              let scalar = chars.unicodeScalars.first
         else { return }
 
         let caret = selectedRange().location
-        if caret - currentWordStart(before: caret) >= 2 {
-            complete(self)
+
+        if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
+            // ≥2 chars of the current word — enough signal to be useful
+            // without flickering on every first letter.
+            guard caret - currentWordStart(before: caret) >= 2 else { return }
+            scheduleCompletion()
+        } else if scalar == "." {
+            // `alias.` / `schema.` member completion — only when the dot
+            // follows an identifier character (so `1.5` and `...` stay quiet;
+            // the engine re-checks context anyway).
+            let ns = string as NSString
+            guard caret >= 2, caret <= ns.length else { return }
+            guard let prev = Unicode.Scalar(UInt32(ns.character(at: caret - 2))),
+                  CharacterSet.alphanumerics.contains(prev) || prev == "_" || prev == "\""
+            else { return }
+            scheduleCompletion()
         }
+    }
+
+    private func scheduleCompletion() {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.window != nil else { return }
+            self.complete(nil)
+        }
+        pendingCompletion = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.completionDebounce, execute: work)
     }
 
     private func currentWordStart(before location: Int) -> Int {

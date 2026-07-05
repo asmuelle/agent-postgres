@@ -111,6 +111,16 @@ struct PostgresQueryTabView: View {
                         resultFilter = ""
                         inspectedCell = nil
                     }
+                    // Command palette's "Explain Last Query" — only the active
+                    // tab's view exists, so this can't double-present.
+                    .onReceive(
+                        NotificationCenter.default.publisher(for: .postgresExplainActiveTab)
+                    ) { _ in
+                        guard connectionId != nil,
+                              !tab.sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        else { return }
+                        explainPlanOpen = true
+                    }
                     // Auto-run for sidebar double-click / "Open Data":
                     // the id re-fires the task whenever the flag flips
                     // on; `consumeAutoRun` clears it so re-renders

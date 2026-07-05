@@ -350,7 +350,15 @@ struct PostgresRoutineEditorView: View {
                 ),
                 isEditable: true,
                 errorCharOffset: errorOffset,
-                identifiers: { schemaStore?.completionIdentifiers ?? [] }
+                completionCatalog: {
+                    guard let schemaStore, let database else { return .empty }
+                    return schemaStore.completionCatalog(database: database)
+                },
+                requestColumns: { schema, table in
+                    guard let database else { return }
+                    schemaStore?.requestColumnsIfIdle(
+                        database: database, schema: schema, table: table)
+                }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 

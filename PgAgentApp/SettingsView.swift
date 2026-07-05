@@ -3,6 +3,24 @@ import SwiftUI
 import PgAgentMacOS
 import UniformTypeIdentifiers
 
+/// Identity of one Settings tab — lets other surfaces (e.g. the command
+/// palette's "Open Audit Log") deep-link into a specific pane via
+/// `SettingsPanelRouter`.
+enum SettingsTab: Hashable {
+    case appearance, sync, monitoringHub, network, credentials
+    case advancedAuth, audit, license, privacy
+}
+
+/// Tiny router so programmatic openers can select a Settings tab before
+/// (or after) the window is on screen. The Settings scene reads it as its
+/// TabView selection.
+@MainActor
+final class SettingsPanelRouter: ObservableObject {
+    static let shared = SettingsPanelRouter()
+    @Published var selectedTab: SettingsTab = .appearance
+    private init() {}
+}
+
 /// Settings panel with Terminal, Appearance, Credentials, License, and Privacy tabs.
 struct SettingsView: View {
     @AppStorage("defaultColumns") private var defaultColumns = 80
@@ -30,36 +48,47 @@ struct SettingsView: View {
     @State private var syncStatus: String?
     @State private var syncError: String?
 
+    @ObservedObject private var panelRouter = SettingsPanelRouter.shared
+
     var body: some View {
-        TabView {
+        TabView(selection: $panelRouter.selectedTab) {
             appearanceSettings
                 .tabItem { Label("Appearance", systemImage: "paintbrush") }
+                .tag(SettingsTab.appearance)
 
             syncSettings
                 .tabItem { Label("Sync", systemImage: "icloud") }
+                .tag(SettingsTab.sync)
 
             FleetHubSettingsView()
                 .tabItem { Label("Monitoring Hub", systemImage: "antenna.radiowaves.left.and.right") }
+                .tag(SettingsTab.monitoringHub)
 
             if FeatureFlags.networkPolish.isEnabled {
                 NetworkPolishSettingsView()
                     .tabItem { Label("Network", systemImage: "network") }
+                    .tag(SettingsTab.network)
             }
 
             credentialsSettings
                 .tabItem { Label("Credentials", systemImage: "key") }
+                .tag(SettingsTab.credentials)
 
             AdvancedAuthenticationView()
                 .tabItem { Label("Advanced Auth", systemImage: "lock.shield") }
+                .tag(SettingsTab.advancedAuth)
 
             AuditLogSettingsView()
                 .tabItem { Label("Audit", systemImage: "list.bullet.rectangle") }
+                .tag(SettingsTab.audit)
 
             licenseSettings
                 .tabItem { Label("License", systemImage: "seal") }
+                .tag(SettingsTab.license)
 
             privacySettings
                 .tabItem { Label("Privacy", systemImage: "lock.shield") }
+                .tag(SettingsTab.privacy)
         }
         .frame(width: 660, height: 560)
         .confirmationDialog(

@@ -130,6 +130,9 @@ struct PostgresWorkspaceView: View {
             if let node = userInfo["node"] as? PgSchemaNode {
                 queryStore.openPropertyTab(node: node)
             }
+        case "blank":
+            // Command palette's "New Query Tab".
+            queryStore.openBlankTab()
         case "sql":
             // Context-menu generated SQL (DROP / TRUNCATE / VACUUM …)
             // arrives here as a pre-filled tab; the user reviews and

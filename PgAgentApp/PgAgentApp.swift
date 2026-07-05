@@ -32,6 +32,15 @@ struct PgAgentApp: App {
                     layoutManager.toggleSidebar()
                 }
                 .keyboardShortcut("b", modifiers: .command)
+
+                Divider()
+
+                // Menu-discoverable ⌘K entry; ContentView hosts the overlay
+                // and listens for this event on the bus.
+                Button("Command Palette…") {
+                    PgAgentEventBus.shared.events.send(.showCommandPalette)
+                }
+                .keyboardShortcut("k", modifiers: .command)
             }
         }
 

@@ -28,6 +28,11 @@ struct ContentView: View {
     @State private var selectedNode: PgSchemaNode? = nil
     @State private var activeConnectionId: String? = nil
     @State private var activeSchemaStore: PgSchemaStore? = nil
+    /// ⌘K command palette. Items are snapshotted when the palette opens —
+    /// cheap reads of already-loaded stores, rebuilt on every open so the
+    /// list always reflects current connections/tables/saved queries.
+    @State private var isCommandPaletteVisible = false
+    @State private var commandPaletteItems: [CommandPaletteItem] = []
 
     var body: some View {
         HSplitView {
@@ -52,6 +57,50 @@ struct ContentView: View {
             )
         }
         .frame(minWidth: 900, minHeight: 600)
+        .overlay {
+            if isCommandPaletteVisible {
+                commandPaletteOverlay
+            }
+        }
+        .onReceive(PgAgentEventBus.shared.events) { event in
+            guard case .showCommandPalette = event else { return }
+            toggleCommandPalette()
+        }
+    }
+
+    // MARK: - Command palette
+
+    private var commandPaletteOverlay: some View {
+        ZStack(alignment: .top) {
+            // Dim + click-away scrim behind the panel.
+            Color.black.opacity(0.18)
+                .ignoresSafeArea()
+                .onTapGesture { isCommandPaletteVisible = false }
+            CommandPaletteView(
+                items: commandPaletteItems,
+                onDismiss: { isCommandPaletteVisible = false }
+            )
+            .padding(.top, 88)
+        }
+        .transition(.opacity)
+    }
+
+    private func toggleCommandPalette() {
+        if isCommandPaletteVisible {
+            isCommandPaletteVisible = false
+            return
+        }
+        commandPaletteItems = CommandPaletteItems.build(
+            selectedProfileId: selectedPostgresProfileId,
+            selectProfile: { profile in
+                selectedPostgresProfileId = profile.id
+                selectedNode = nil
+                Task {
+                    await PostgresConnectionManager.shared.connectIfNeeded(profile: profile)
+                }
+            }
+        )
+        isCommandPaletteVisible = true
     }
 }
 

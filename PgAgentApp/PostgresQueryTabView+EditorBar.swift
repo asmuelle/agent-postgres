@@ -21,9 +21,16 @@ extension PostgresQueryTabView {
                     set: { store.setSQL($0, forTab: tab.id) }
                 ),
                 errorCharOffset: tab.errorCharOffset,
-                identifiers: {
-                    PostgresConnectionManager.shared
-                        .schemaStores[profileId]?.completionIdentifiers ?? []
+                completionCatalog: {
+                    guard let store = PostgresConnectionManager.shared.schemaStores[profileId],
+                          let database = profile?.database
+                    else { return .empty }
+                    return store.completionCatalog(database: database)
+                },
+                requestColumns: { schema, table in
+                    guard let database = profile?.database else { return }
+                    PostgresConnectionManager.shared.schemaStores[profileId]?
+                        .requestColumnsIfIdle(database: database, schema: schema, table: table)
                 }
             )
             .background(Color(NSColor.textBackgroundColor))
