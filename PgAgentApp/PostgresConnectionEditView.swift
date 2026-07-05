@@ -25,6 +25,8 @@ struct PostgresConnectionEditView: View {
     @State private var tls: PostgresTlsMode = .prefer
     @State private var applicationName: String = "mc-ssh"
     @State private var color: String? = nil
+    @State private var environment: PostgresEnvironment = .unspecified
+    @State private var isReadOnly: Bool = false
 
     @State private var useTunnel: Bool = false
     @State private var tunnelSshProfileId: String? = nil
@@ -84,13 +86,21 @@ struct PostgresConnectionEditView: View {
                         .textFieldStyle(.roundedBorder)
                     TextField("User", text: $user)
                         .textFieldStyle(.roundedBorder)
-                    Picker("Environment Highlight", selection: $color) {
-                        Text("None / Default").tag(String?.none)
-                        Text("Production (Red)").tag(Optional("production"))
-                        Text("Development (Green)").tag(Optional("development"))
-                        Text("Testing / Staging (Yellow)").tag(Optional("testing"))
+                }
+
+                Section("Safety") {
+                    Picker("Environment", selection: $environment) {
+                        ForEach(PostgresEnvironment.allCases, id: \.self) { env in
+                            Text(env.displayName).tag(env)
+                        }
                     }
                     .pickerStyle(.menu)
+                    .help("Production connections get an unmissable red badge in the sidebar and query tabs.")
+                    Toggle("Read-only connection", isOn: $isReadOnly)
+                        .help("Blocks INSERT/UPDATE/DELETE/DDL from this app; SELECT/EXPLAIN only")
+                    Text("Blocks INSERT/UPDATE/DELETE/DDL from this app; SELECT/EXPLAIN only. Enforced at the engine bridge, not just the UI.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Authentication") {
@@ -249,6 +259,10 @@ struct PostgresConnectionEditView: View {
         user = p.user
         tls = p.tls
         color = p.color
+        // `effectiveEnvironment` folds in the legacy color-based highlight,
+        // so profiles tagged before the enum existed show their real value.
+        environment = p.effectiveEnvironment
+        isReadOnly = p.isReadOnly
         applicationName = p.applicationName ?? ""
         connectTimeoutSecs = p.connectTimeoutSecs.map(String.init) ?? "10"
         maxPoolSize = p.maxPoolSize.map(String.init) ?? ""
@@ -329,7 +343,9 @@ struct PostgresConnectionEditView: View {
             createdAt: existingProfile?.createdAt ?? Date(),
             lastConnected: existingProfile?.lastConnected,
             color: color,
-            notes: notes.trimmingCharacters(in: .whitespaces).isEmpty ? nil : notes
+            notes: notes.trimmingCharacters(in: .whitespaces).isEmpty ? nil : notes,
+            environment: environment,
+            isReadOnly: isReadOnly
         )
 
         if savePasswordToKeychain && !password.isEmpty {

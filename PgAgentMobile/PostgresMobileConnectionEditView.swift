@@ -18,6 +18,8 @@ struct PostgresMobileConnectionEditView: View {
     @State private var folderPath = ""
     @State private var errorText: String?
     @State private var color: String? = nil
+    @State private var environment: PostgresEnvironment = .unspecified
+    @State private var isReadOnly = false
 
     private var isEditing: Bool { profile != nil }
 
@@ -107,27 +109,39 @@ struct PostgresMobileConnectionEditView: View {
                     }
                     .padding(.horizontal)
 
-                    // Section 1.5: Environment Highlight
+                    // Section 1.5: Safety (environment tag + read-only mode)
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("ENVIRONMENT HIGHLIGHT")
+                        Text("SAFETY")
                             .font(MidnightMobileDesign.FontToken.captionStrong)
                             .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
                             .padding(.leading, 4)
 
                         VStack(spacing: 14) {
                             HStack {
-                                Text("Highlight Style")
+                                Text("Environment")
                                     .font(MidnightMobileDesign.FontToken.label)
                                 Spacer()
-                                Picker("Environment", selection: $color) {
-                                    Text("None / Default").tag(String?.none)
-                                    Text("Production (Red)").tag(Optional("production"))
-                                    Text("Development (Green)").tag(Optional("development"))
-                                    Text("Testing / Staging (Yellow)").tag(Optional("testing"))
+                                Picker("Environment", selection: $environment) {
+                                    ForEach(PostgresEnvironment.allCases, id: \.self) { env in
+                                        Text(env.displayName).tag(env)
+                                    }
                                 }
                                 .pickerStyle(.menu)
                                 .tint(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
                             }
+
+                            Divider().background(MidnightMobileDesign.ColorToken.separator)
+
+                            Toggle(isOn: $isReadOnly) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Read-only connection")
+                                        .font(MidnightMobileDesign.FontToken.label)
+                                    Text("Blocks INSERT/UPDATE/DELETE/DDL from this app; SELECT/EXPLAIN only")
+                                        .font(MidnightMobileDesign.FontToken.caption)
+                                        .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
+                                }
+                            }
+                            .tint(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
                         }
                         .padding()
                         .midnightMobileCard()
@@ -268,6 +282,10 @@ struct PostgresMobileConnectionEditView: View {
         user = p.user
         tls = p.tls
         color = p.color
+        // `effectiveEnvironment` folds in the legacy color-based highlight,
+        // so profiles tagged before the enum existed show their real value.
+        environment = p.effectiveEnvironment
+        isReadOnly = p.isReadOnly
         notes = p.notes ?? ""
         folderPath = p.folderPath ?? ""
 
@@ -301,7 +319,9 @@ struct PostgresMobileConnectionEditView: View {
             createdAt: profile?.createdAt ?? Date(),
             lastConnected: profile?.lastConnected,
             color: color,
-            notes: notes.isEmpty ? nil : notes
+            notes: notes.isEmpty ? nil : notes,
+            environment: environment,
+            isReadOnly: isReadOnly
         )
 
         // Save password if checking keychain

@@ -39,6 +39,22 @@ struct MobileInstanceDetailView: View {
             MidnightColors.primaryBackground.ignoresSafeArea()
 
             VStack(spacing: 0) {
+                // Environment badge + read-only lock in the detail header —
+                // an on-call responder should never wonder whether the
+                // instance they're staring at is production.
+                if profile.effectiveEnvironment != .unspecified || profile.isReadOnly {
+                    HStack(spacing: 8) {
+                        PostgresEnvironmentBadge(profile: profile)
+                        Text("\(profile.host):\(profile.port)/\(profile.database)")
+                            .font(MidnightMobileDesign.FontToken.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                }
+
                 Picker("View", selection: $selectedTab) {
                     ForEach(Tab.allCases, id: \.self) { tab in
                         Label(tab.title, systemImage: tab.icon).tag(tab)

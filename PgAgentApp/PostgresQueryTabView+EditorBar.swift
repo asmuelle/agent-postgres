@@ -145,6 +145,12 @@ extension PostgresQueryTabView {
     @ViewBuilder
     func statusBar(for tab: PostgresQueryTab) -> some View {
         HStack(spacing: 12) {
+            // Environment badge + read-only lock: pinned in the status
+            // strip so it stays visible whatever the editor/results
+            // split looks like. PRODUCTION renders as a loud red capsule.
+            if let p = profile {
+                PostgresEnvironmentBadge(profile: p)
+            }
             statusBadge(for: tab)
             if case .failed(let msg, _) = tab.execState, aiAvailable, let conn = connectionId {
                 Button {

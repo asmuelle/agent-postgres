@@ -12,6 +12,12 @@ import Foundation
 // like `WITH x AS (DELETE FROM t ...) SELECT ...`.
 //
 // Pure string logic, no FFI dependency — exhaustively unit-tested.
+//
+// Lexing (literal/comment stripping, tokenizing) is shared with
+// `PostgresStatementClassifier` (PgAgentShared), which enforces
+// per-connection read-only mode at the bridge layer. This guard is
+// stricter on top: single statement only, and a wider forbidden-keyword
+// set (SET/BEGIN/PREPARE/... are refused outright for AI-issued SQL).
 // =============================================================================
 
 enum PgReadOnlyGuard {
@@ -89,129 +95,17 @@ enum PgReadOnlyGuard {
         (try? validate(sql)) != nil
     }
 
-    // MARK: - Lexing helpers
+    // MARK: - Lexing helpers (delegated to the shared classifier)
 
     /// Replace the *contents* of string literals, quoted identifiers,
     /// dollar-quoted bodies, and comments with spaces, preserving overall
     /// length-ish structure so statement separators outside them survive.
     static func stripLiteralsAndComments(_ sql: String) -> String {
-        var out = ""
-        out.reserveCapacity(sql.count)
-        let chars = Array(sql)
-        var i = 0
-        let n = chars.count
-
-        while i < n {
-            let c = chars[i]
-
-            // Line comment: -- ... end-of-line
-            if c == "-", i + 1 < n, chars[i + 1] == "-" {
-                while i < n, chars[i] != "\n" { i += 1 }
-                continue
-            }
-
-            // Block comment: /* ... */ (Postgres allows nesting)
-            if c == "/", i + 1 < n, chars[i + 1] == "*" {
-                var depth = 1
-                i += 2
-                while i < n, depth > 0 {
-                    if chars[i] == "/", i + 1 < n, chars[i + 1] == "*" {
-                        depth += 1; i += 2
-                    } else if chars[i] == "*", i + 1 < n, chars[i + 1] == "/" {
-                        depth -= 1; i += 2
-                    } else {
-                        i += 1
-                    }
-                }
-                out.append(" ")
-                continue
-            }
-
-            // Single-quoted string: '...'; '' is an escaped quote.
-            if c == "'" {
-                i += 1
-                while i < n {
-                    if chars[i] == "'" {
-                        if i + 1 < n, chars[i + 1] == "'" { i += 2; continue }
-                        i += 1; break
-                    }
-                    i += 1
-                }
-                out.append(" ")
-                continue
-            }
-
-            // Double-quoted identifier: "..."; "" is an escaped quote.
-            if c == "\"" {
-                i += 1
-                while i < n {
-                    if chars[i] == "\"" {
-                        if i + 1 < n, chars[i + 1] == "\"" { i += 2; continue }
-                        i += 1; break
-                    }
-                    i += 1
-                }
-                out.append(" ")
-                continue
-            }
-
-            // Dollar-quoted string: $tag$ ... $tag$ (tag may be empty).
-            if c == "$", let tag = dollarTag(chars, at: i) {
-                i += tag.count // advance past opening $tag$
-                while i < n {
-                    if chars[i] == "$", matchesTag(chars, at: i, tag: tag) {
-                        i += tag.count
-                        break
-                    }
-                    i += 1
-                }
-                out.append(" ")
-                continue
-            }
-
-            out.append(c)
-            i += 1
-        }
-        return out
-    }
-
-    /// If a dollar-quote opener starts at `idx`, return its full delimiter
-    /// (e.g. `$$` or `$body$`) as an array slice's string; otherwise `nil`.
-    private static func dollarTag(_ chars: [Character], at idx: Int) -> [Character]? {
-        guard chars[idx] == "$" else { return nil }
-        var j = idx + 1
-        var tagBody: [Character] = []
-        while j < chars.count, chars[j] != "$" {
-            let ch = chars[j]
-            // Tag chars are letters, digits, or underscore; anything else means
-            // this isn't a dollar-quote opener.
-            guard ch == "_" || ch.isLetter || ch.isNumber else { return nil }
-            tagBody.append(ch)
-            j += 1
-        }
-        guard j < chars.count, chars[j] == "$" else { return nil }
-        return ["$"] + tagBody + ["$"]
-    }
-
-    private static func matchesTag(_ chars: [Character], at idx: Int, tag: [Character]) -> Bool {
-        guard idx + tag.count <= chars.count else { return false }
-        for k in 0..<tag.count where chars[idx + k] != tag[k] { return false }
-        return true
+        PostgresStatementClassifier.stripLiteralsAndComments(sql)
     }
 
     /// Split into uppercased word tokens (letters, digits, underscore).
     static func tokenize(_ s: String) -> [String] {
-        var tokens: [String] = []
-        var current = ""
-        for ch in s {
-            if ch == "_" || ch.isLetter || ch.isNumber {
-                current.append(ch)
-            } else if !current.isEmpty {
-                tokens.append(current.uppercased())
-                current = ""
-            }
-        }
-        if !current.isEmpty { tokens.append(current.uppercased()) }
-        return tokens
+        PostgresStatementClassifier.tokenize(s)
     }
 }

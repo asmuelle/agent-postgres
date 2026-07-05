@@ -353,24 +353,6 @@ struct MobileConnectionListView: View {
         .frame(maxHeight: .infinity)
     }
     
-    private func environmentBadgeColor(_ profile: PostgresProfile) -> Color? {
-        switch profile.color {
-        case "production": return .red
-        case "development": return .green
-        case "testing": return .yellow
-        default: return nil
-        }
-    }
-
-    private func environmentBadgeLabel(_ profile: PostgresProfile) -> String? {
-        switch profile.color {
-        case "production": return "PROD"
-        case "development": return "DEV"
-        case "testing": return "TEST"
-        default: return nil
-        }
-    }
-
     @ViewBuilder
     private func profileRow(_ profile: PostgresProfile) -> some View {
         let status = statusStore.statusByProfile[profile.id] ?? .disconnected
@@ -390,20 +372,8 @@ struct MobileConnectionListView: View {
                         Text(profile.name)
                             .font(MidnightMobileDesign.FontToken.label)
                             .foregroundStyle(.primary)
-                        
-                        if let envColor = environmentBadgeColor(profile), let envLabel = environmentBadgeLabel(profile) {
-                            Text(envLabel)
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(envColor)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(envColor.opacity(0.12))
-                                .cornerRadius(4)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(envColor.opacity(0.25), lineWidth: 0.5)
-                                )
-                        }
+
+                        PostgresEnvironmentBadge(profile: profile, compact: true)
                     }
                     Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
                         .font(MidnightMobileDesign.FontToken.caption)
@@ -429,7 +399,10 @@ struct MobileConnectionListView: View {
                             auth: profile.auth,
                             tls: profile.tls,
                             folderPath: profile.folderPath,
-                            notes: profile.notes
+                            color: profile.color,
+                            notes: profile.notes,
+                            environment: profile.environment,
+                            isReadOnly: profile.isReadOnly
                         )
                         profileStore.saveOrUpdate(dup)
                     } label: {

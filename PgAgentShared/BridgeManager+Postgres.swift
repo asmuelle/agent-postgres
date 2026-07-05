@@ -53,10 +53,15 @@ enum PostgresBridgeError: Error, LocalizedError {
     case notConnected(String)
     /// A server-side error carrying PostgreSQL's structured fields.
     case database(PostgresServerError)
+    /// Blocked locally: the profile is marked read-only and the statement
+    /// (or grid DML) would write. Never reaches the server.
+    case readOnlyConnection
     case other(String)
 
     var errorDescription: String? {
         switch self {
+        case .readOnlyConnection:
+            return "This connection is read-only (set in connection settings)."
         case .connect(let m):              return "Connection failed: \(m)"
         case .auth(let m):                 return "Authentication failed: \(m)"
         case .tls(let m):                  return "TLS error: \(m)"
@@ -164,6 +169,13 @@ extension BridgeManager {
             let connectionId: String = try await runOnUtilityQueuePg {
                 try rshellPgConnect(config: config)
             }
+            // Remember which profile owns this connection so the read-only
+            // guard and the write audit log can resolve it later — every
+            // Postgres connection on both platforms passes through here.
+            PostgresConnectionAuditRegistry.shared.register(
+                connectionId: connectionId,
+                profile: profile
+            )
             return connectionId
         } catch let err as FfiPgError {
             throw PostgresBridgeError.from(err)
@@ -178,6 +190,7 @@ extension BridgeManager {
         await runOnUtilityQueuePgVoid {
             _ = rshellPgDisconnect(connectionId: connectionId)
         }
+        PostgresConnectionAuditRegistry.shared.unregister(connectionId: connectionId)
     }
 
     func pgListDatabases(connectionId: String) async throws -> [FfiPgDatabase] {
@@ -252,19 +265,44 @@ extension BridgeManager {
     /// id is opaque — the UI typically uses the query tab's UUID
     /// string. Sessions are isolated: opening a cursor in session A
     /// doesn't affect session B's cursor on the same profile.
+    ///
+    /// Write statements (per `PostgresStatementClassifier`) are refused
+    /// here when the owning profile is marked read-only — defense in
+    /// depth under whatever the UI shows — and recorded in the local
+    /// write audit log either way (fire-and-forget; SELECTs are not
+    /// recorded to keep the log low-noise).
     func pgExecute(
         connectionId: String,
         sessionId: String,
         sql: String,
         pageSize: UInt32
     ) async throws -> FfiPgExecutionResult {
-        try await pgWrapping {
-            try rshellPgExecute(
+        let isWrite = !PostgresStatementClassifier.isReadOnly(sql)
+        let audit = isWrite
+            ? PostgresConnectionAuditRegistry.shared.context(for: connectionId)
+            : nil
+        if isWrite {
+            try await Self.throwIfReadOnly(
                 connectionId: connectionId,
-                sessionId: sessionId,
-                sql: sql,
-                pageSize: pageSize
+                auditing: audit, action: .execute, statement: sql
             )
+        }
+        do {
+            let result = try await pgWrapping {
+                try rshellPgExecute(
+                    connectionId: connectionId,
+                    sessionId: sessionId,
+                    sql: sql,
+                    pageSize: pageSize
+                )
+            }
+            Self.audit(audit, action: .execute, statement: sql,
+                       error: nil, rowsAffected: result.rowsAffected)
+            return result
+        } catch {
+            Self.audit(audit, action: .execute, statement: sql,
+                       error: Self.message(for: error), rowsAffected: nil)
+            throw error
         }
     }
 
@@ -340,17 +378,33 @@ extension BridgeManager {
         newValue: String?,
         rowId: String
     ) async throws -> FfiPgUpdateResult {
-        try await pgWrapping {
-            try rshellPgUpdateCell(
-                connectionId: connectionId,
-                sessionId: sessionId,
-                schema: schema,
-                table: table,
-                column: column,
-                columnType: columnType,
-                newValue: newValue,
-                rowId: rowId
-            )
+        let audit = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
+        let described =
+            "UPDATE \(schema).\(table) SET \(column) = \(newValue ?? "NULL") -- ctid \(rowId)"
+        try await Self.throwIfReadOnly(
+            connectionId: connectionId,
+            auditing: audit, action: .updateCell, statement: described
+        )
+        do {
+            let result = try await pgWrapping {
+                try rshellPgUpdateCell(
+                    connectionId: connectionId,
+                    sessionId: sessionId,
+                    schema: schema,
+                    table: table,
+                    column: column,
+                    columnType: columnType,
+                    newValue: newValue,
+                    rowId: rowId
+                )
+            }
+            Self.audit(audit, action: .updateCell, statement: described,
+                       error: nil, rowsAffected: result.rowsAffected)
+            return result
+        } catch {
+            Self.audit(audit, action: .updateCell, statement: described,
+                       error: Self.message(for: error), rowsAffected: nil)
+            throw error
         }
     }
 
@@ -391,15 +445,31 @@ extension BridgeManager {
         inputs: [FfiPgInsertColumn],
         returnColumns: [String]
     ) async throws -> FfiPgInsertedRow {
-        try await pgWrapping {
-            try rshellPgInsertRow(
-                connectionId: connectionId,
-                sessionId: sessionId,
-                schema: schema,
-                table: table,
-                inputs: inputs,
-                returnColumns: returnColumns
-            )
+        let audit = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
+        let described =
+            "INSERT INTO \(schema).\(table) (\(inputs.map(\.name).joined(separator: ", ")))"
+        try await Self.throwIfReadOnly(
+            connectionId: connectionId,
+            auditing: audit, action: .insertRow, statement: described
+        )
+        do {
+            let result = try await pgWrapping {
+                try rshellPgInsertRow(
+                    connectionId: connectionId,
+                    sessionId: sessionId,
+                    schema: schema,
+                    table: table,
+                    inputs: inputs,
+                    returnColumns: returnColumns
+                )
+            }
+            Self.audit(audit, action: .insertRow, statement: described,
+                       error: nil, rowsAffected: 1)
+            return result
+        } catch {
+            Self.audit(audit, action: .insertRow, statement: described,
+                       error: Self.message(for: error), rowsAffected: nil)
+            throw error
         }
     }
 
@@ -413,14 +483,29 @@ extension BridgeManager {
         table: String,
         rowIds: [String]
     ) async throws -> FfiPgUpdateResult {
-        try await pgWrapping {
-            try rshellPgDeleteRows(
-                connectionId: connectionId,
-                sessionId: sessionId,
-                schema: schema,
-                table: table,
-                rowIds: rowIds
-            )
+        let audit = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
+        let described = "DELETE FROM \(schema).\(table) -- \(rowIds.count) row(s) by ctid"
+        try await Self.throwIfReadOnly(
+            connectionId: connectionId,
+            auditing: audit, action: .deleteRows, statement: described
+        )
+        do {
+            let result = try await pgWrapping {
+                try rshellPgDeleteRows(
+                    connectionId: connectionId,
+                    sessionId: sessionId,
+                    schema: schema,
+                    table: table,
+                    rowIds: rowIds
+                )
+            }
+            Self.audit(audit, action: .deleteRows, statement: described,
+                       error: nil, rowsAffected: result.rowsAffected)
+            return result
+        } catch {
+            Self.audit(audit, action: .deleteRows, statement: described,
+                       error: Self.message(for: error), rowsAffected: nil)
+            throw error
         }
     }
 
@@ -466,22 +551,102 @@ extension BridgeManager {
     /// Begin / commit / roll back a transaction on the tab's session. The
     /// session pins its pooled connection across the transaction, so the same
     /// `sessionId` must run the statements inside it.
+    ///
+    /// Transaction control is audited but *not* blocked on read-only
+    /// profiles: BEGIN/COMMIT around SELECTs is harmless, and any write
+    /// inside the transaction is refused per-statement by `pgExecute`.
     func pgBegin(connectionId: String, sessionId: String) async throws {
-        try await pgWrapping {
+        try await auditedTransaction(connectionId: connectionId, statement: "BEGIN") {
             try rshellPgBegin(connectionId: connectionId, sessionId: sessionId)
         }
     }
 
     func pgCommit(connectionId: String, sessionId: String) async throws {
-        try await pgWrapping {
+        try await auditedTransaction(connectionId: connectionId, statement: "COMMIT") {
             try rshellPgCommit(connectionId: connectionId, sessionId: sessionId)
         }
     }
 
     func pgRollback(connectionId: String, sessionId: String) async throws {
-        try await pgWrapping {
+        try await auditedTransaction(connectionId: connectionId, statement: "ROLLBACK") {
             try rshellPgRollback(connectionId: connectionId, sessionId: sessionId)
         }
+    }
+
+    private func auditedTransaction(
+        connectionId: String,
+        statement: String,
+        _ work: @escaping () throws -> Void
+    ) async throws {
+        let audit = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
+        do {
+            try await pgWrapping(work)
+            Self.audit(audit, action: .transaction, statement: statement,
+                       error: nil, rowsAffected: nil)
+        } catch {
+            Self.audit(audit, action: .transaction, statement: statement,
+                       error: Self.message(for: error), rowsAffected: nil)
+            throw error
+        }
+    }
+
+    // MARK: - Read-only enforcement + write audit
+
+    /// Throws `PostgresBridgeError.readOnlyConnection` when the profile
+    /// that owns `connectionId` is currently marked read-only, recording
+    /// the refused attempt in the audit log first. The check reads the
+    /// *live* profile from `PostgresProfileStore`, so toggling read-only
+    /// in the editor applies to open connections immediately; if the
+    /// profile was deleted mid-session, the snapshot taken at connect
+    /// time decides. Unknown connections (not registered — shouldn't
+    /// happen, every connect passes through `pgConnect`) are not blocked:
+    /// failing closed here would break all query traffic on a bookkeeping
+    /// bug rather than protect anything.
+    fileprivate static func throwIfReadOnly(
+        connectionId: String,
+        auditing audit: PostgresConnectionAuditContext?,
+        action: PostgresAuditRecord.Action,
+        statement: String
+    ) async throws {
+        guard let ctx = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
+        else { return }
+        let isReadOnly = await MainActor.run {
+            PostgresProfileStore.shared.profile(withId: ctx.profileId)?.isReadOnly
+                ?? ctx.isReadOnlyAtConnect
+        }
+        if isReadOnly {
+            Self.audit(audit ?? ctx, action: action, statement: statement,
+                       error: "blocked: connection is read-only", rowsAffected: nil)
+            throw PostgresBridgeError.readOnlyConnection
+        }
+    }
+
+    /// Fire-and-forget audit append. Never blocks or fails the query
+    /// path — `PostgresAuditLog.record` logs its own failures.
+    fileprivate static func audit(
+        _ ctx: PostgresConnectionAuditContext?,
+        action: PostgresAuditRecord.Action,
+        statement: String,
+        error: String?,
+        rowsAffected: UInt64?
+    ) {
+        guard let ctx else { return }
+        Task.detached(priority: .utility) {
+            await PostgresAuditLog.shared.record(
+                profileName: ctx.profileName,
+                host: ctx.host,
+                database: ctx.database,
+                user: ctx.user,
+                action: action,
+                statement: statement,
+                error: error,
+                rowsAffected: rowsAffected
+            )
+        }
+    }
+
+    fileprivate static func message(for error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
     // MARK: - Internal helpers
@@ -543,3 +708,61 @@ private nonisolated(unsafe) let postgresQueue: DispatchQueue = {
         autoreleaseFrequency: .workItem
     )
 }()
+
+// =============================================================================
+// Connection → profile registry (read-only guard + audit metadata)
+// =============================================================================
+// The FFI surface identifies connections by opaque `connectionId`, but
+// read-only enforcement and the audit log need the owning profile. Every
+// connect on both platforms passes through `pgConnect(profile:)`, so this
+// registry is populated there and cleared on `pgDisconnect`. Lock-based
+// (not an actor) because lookups happen on the hot query path and must
+// not force an executor hop before the FFI call is even dispatched.
+// =============================================================================
+
+/// Immutable metadata snapshot taken at connect time. `isReadOnlyAtConnect`
+/// is only a fallback — the live profile store wins when the profile
+/// still exists (see `BridgeManager.throwIfReadOnly`).
+struct PostgresConnectionAuditContext: Sendable {
+    let profileId: String
+    let profileName: String
+    let host: String
+    let database: String
+    let user: String
+    let isReadOnlyAtConnect: Bool
+}
+
+final class PostgresConnectionAuditRegistry: @unchecked Sendable {
+    static let shared = PostgresConnectionAuditRegistry()
+
+    private let lock = NSLock()
+    private var contexts: [String: PostgresConnectionAuditContext] = [:]
+
+    private init() {}
+
+    func register(connectionId: String, profile: PostgresProfile) {
+        let ctx = PostgresConnectionAuditContext(
+            profileId: profile.id,
+            profileName: profile.name,
+            host: profile.host,
+            database: profile.database,
+            user: profile.user,
+            isReadOnlyAtConnect: profile.isReadOnly
+        )
+        lock.lock()
+        defer { lock.unlock() }
+        contexts[connectionId] = ctx
+    }
+
+    func unregister(connectionId: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        contexts.removeValue(forKey: connectionId)
+    }
+
+    func context(for connectionId: String) -> PostgresConnectionAuditContext? {
+        lock.lock()
+        defer { lock.unlock() }
+        return contexts[connectionId]
+    }
+}

@@ -97,13 +97,7 @@ struct PostgresQueryTabView: View {
     }
 
     private var environmentColor: Color? {
-        guard let p = profile else { return nil }
-        switch p.color {
-        case "production": return .red
-        case "development": return .green
-        case "testing": return .yellow
-        default: return nil
-        }
+        profile?.effectiveEnvironment.tint
     }
 
     var body: some View {

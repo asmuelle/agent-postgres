@@ -74,8 +74,12 @@ extension PostgresQueryTabView {
         // the hidden `__pg_rowid__` column. The grid hides that
         // column from display but uses it to identify rows on
         // commit.
+        // Read-only profiles additionally hide every write affordance
+        // (cell edit, insert, delete). The bridge would refuse the DML
+        // anyway — this just keeps the UI honest about it.
         let canEdit = tab.editTarget != nil
             && result.columns.contains(where: { $0.name == POSTGRES_ROWID_COLUMN })
+            && !(profile?.isReadOnly ?? false)
         // Full export is offered when there's any visible result —
         // even tabs without a cursor benefit (writes the in-memory
         // rows + skips the drain step). The menu validates by

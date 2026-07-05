@@ -49,6 +49,9 @@ struct SettingsView: View {
             AdvancedAuthenticationView()
                 .tabItem { Label("Advanced Auth", systemImage: "lock.shield") }
 
+            AuditLogSettingsView()
+                .tabItem { Label("Audit", systemImage: "list.bullet.rectangle") }
+
             licenseSettings
                 .tabItem { Label("License", systemImage: "seal") }
 

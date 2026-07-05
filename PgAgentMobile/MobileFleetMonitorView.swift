@@ -113,9 +113,12 @@ private struct InstanceHealthCard: View {
                 .shadow(color: statusColor.opacity(0.5), radius: 4)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(profile.name)
-                    .font(MidnightMobileDesign.FontToken.label)
-                    .foregroundStyle(.primary)
+                HStack(spacing: 6) {
+                    Text(profile.name)
+                        .font(MidnightMobileDesign.FontToken.label)
+                        .foregroundStyle(.primary)
+                    PostgresEnvironmentBadge(profile: profile, compact: true)
+                }
                 Text("\(profile.host):\(profile.port)/\(profile.database)")
                     .font(MidnightMobileDesign.FontToken.caption)
                     .foregroundStyle(.secondary)

@@ -348,48 +348,27 @@ struct SidebarView: View {
             }
         }()
 
-        let environmentBadgeColor: Color? = {
-            switch profile.color {
-            case "production": return .red
-            case "development": return .green
-            case "testing": return .yellow
-            default: return nil
-            }
-        }()
-
-        let environmentBadgeLabel: String? = {
-            switch profile.color {
-            case "production": return "PROD"
-            case "development": return "DEV"
-            case "testing": return "TEST"
-            default: return nil
-            }
-        }()
+        // Production is unmissable: the row name + server icon go red on
+        // top of the shared capsule badge. Other environments keep the
+        // default tint and rely on the subtle badge alone.
+        let environment = profile.effectiveEnvironment
+        let isProduction = environment == .production
 
         HStack(spacing: 8) {
             Image(systemName: "cylinder.split.1x2")
-                .foregroundStyle(.tint)
+                .foregroundStyle(isProduction ? AnyShapeStyle(Color.red) : AnyShapeStyle(.tint))
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(profile.name)
                         .font(MidnightMacDesign.FontToken.callout.weight(.medium))
-                        .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                        .foregroundStyle(
+                            isProduction ? Color.red
+                                : (isSelected ? Color.accentColor : Color.primary)
+                        )
                         .lineLimit(1)
 
-                    if let envColor = environmentBadgeColor, let envLabel = environmentBadgeLabel {
-                        Text(envLabel)
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(envColor)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(envColor.opacity(0.12))
-                            .cornerRadius(4)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(envColor.opacity(0.25), lineWidth: 0.5)
-                            )
-                    }
+                    PostgresEnvironmentBadge(profile: profile, compact: true)
                 }
                 Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
                     .font(MidnightMacDesign.FontToken.metadataMono)
