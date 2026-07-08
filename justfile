@@ -348,9 +348,10 @@ ios-test:
         ONLY_ACTIVE_ARCH=YES \
         CODE_SIGNING_ALLOWED=NO
 
-# Build, install, and launch on an iPad simulator. Pass a simulator name
-# fragment if you want a specific iPad, e.g. `just run-on-ipad "iPad Pro"`.
-run-on-ipad name="":
+# Build, install, and launch on an iPad *simulator*. Pass a simulator name
+# fragment if you want a specific iPad, e.g. `just run-on-ipad-sim "iPad Pro"`.
+# For a physical iPad, use `run-on-ipad`.
+run-on-ipad-sim name="":
     @just ios-sim-build
     @app="{{ios_sim_app}}"; \
     bundle="{{ios_bundle}}"; \
@@ -362,9 +363,10 @@ run-on-ipad name="":
     xcrun simctl launch "$udid" "$bundle"; \
     echo "Launched pgAgent on iPad simulator $udid"
 
-# Build, install, and launch on an iPhone simulator. Pass a simulator name
-# fragment if you want a specific iPhone, e.g. `just run-on-iphone "iPhone 16 Pro"`.
-run-on-iphone name="":
+# Build, install, and launch on an iPhone *simulator*. Pass a simulator name
+# fragment if you want a specific iPhone, e.g. `just run-on-iphone-sim "iPhone 16 Pro"`.
+# For a physical iPhone, use `run-on-iphone`.
+run-on-iphone-sim name="":
     @just ios-sim-build
     @app="{{ios_sim_app}}"; \
     bundle="{{ios_bundle}}"; \
@@ -376,12 +378,26 @@ run-on-iphone name="":
     xcrun simctl launch "$udid" "$bundle"; \
     echo "Launched pgAgent on iPhone simulator $udid"
 
+# Build, install, and launch on a *physical* iPad connected over USB or Wi-Fi.
+# For the iPad simulator, use `run-on-ipad-sim`. Pass a device-name fragment to
+# disambiguate, e.g. `just run-on-ipad Dashboard`.
+run-on-ipad name="Dashboard":
+    @just run-on-device "{{name}}" iPad
+
+# Build, install, and launch on a *physical* iPhone connected over USB or Wi-Fi.
+# For the iPhone simulator, use `run-on-iphone-sim`. Pass a device-name fragment
+# to disambiguate, e.g. `just run-on-iphone Excalibur`.
+run-on-iphone name="":
+    @just run-on-device "{{name}}" iPhone
+
 # Build, install, and launch on a *physical* iPhone/iPad connected over USB or
-# Wi-Fi. `run-on-iphone` targets the simulator; this targets real hardware.
-# Pass a device-name fragment to pick one, e.g. `just run-on-device Excalibur`.
-# Requires a paired device (see `xcrun devicectl list devices`) and a signing
-# team (DEVELOPMENT_TEAM in project.yml). The build auto-provisions.
-run-on-device name="":
+# Wi-Fi. `run-on-ipad` / `run-on-iphone` wrap this; the *-sim recipes target the
+# simulator. Pass a device-name fragment to pick one, e.g.
+# `just run-on-device Excalibur`, and optionally a device-kind filter used when
+# no name is given (defaults to any iPhone or iPad). Requires a paired device
+# (see `xcrun devicectl list devices`) and a signing team (DEVELOPMENT_TEAM in
+# project.yml). The build auto-provisions.
+run-on-device name="" kind="iPhone|iPad":
     @just _ensure-xcodeproj
     @just _ios-device-rust Debug
     xcodebuild \
@@ -402,7 +418,7 @@ run-on-device name="":
     if [ -n "$name" ]; then \
         rows="$(printf '%s\n' "$devices" | grep -F "$name" || true)"; \
     else \
-        rows="$(printf '%s\n' "$devices" | grep -iE 'iPhone|iPad' || true)"; \
+        rows="$(printf '%s\n' "$devices" | grep -iE '{{kind}}' || true)"; \
     fi; \
     reachable="$(printf '%s\n' "$rows" | grep -v 'unavailable' | grep -oE "$uuid" | head -n1 || true)"; \
     if [ -z "$reachable" ]; then \

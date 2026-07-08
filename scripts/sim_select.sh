@@ -1,6 +1,6 @@
 #!/bin/bash
 # Shared iOS-simulator selection helper for the justfile recipes
-# (ios-test, run-on-ipad, run-on-iphone).
+# (ios-test, run-on-ipad-sim, run-on-iphone-sim).
 #
 # Usage: sim_select.sh <family> [name-fragment]
 #   family        — device family grep, e.g. "iPhone" or "iPad"

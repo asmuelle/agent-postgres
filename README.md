@@ -35,7 +35,10 @@ just mac-build
 just mac-run
 
 # iPad simulator (boots a sim, installs, launches)
-just run-on-ipad "iPad Pro"
+just run-on-ipad-sim "iPad Pro"
+
+# Physical iPad connected over USB/Wi-Fi (auto-provisions, installs, launches)
+just run-on-ipad Dashboard
 
 # Full local CI pass
 just ci-local
