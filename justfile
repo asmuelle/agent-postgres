@@ -396,23 +396,16 @@ run-on-iphone name="":
 # `just run-on-device Excalibur`, and optionally a device-kind filter used when
 # no name is given (defaults to any iPhone or iPad). Requires a paired device
 # (see `xcrun devicectl list devices`) and a signing team (DEVELOPMENT_TEAM in
-# project.yml). The build auto-provisions.
+# project.yml). It resolves the connected device *first* and builds against that
+# specific device (not `generic/platform=iOS`) so `-allowProvisioningUpdates`
+# can auto-register brand-new hardware — a generic build cannot, and fails with
+# "provisioning profile cannot be installed on this device" on a new device.
 run-on-device name="" kind="iPhone|iPad":
     @just _ensure-xcodeproj
     @just _ios-device-rust Debug
-    xcodebuild \
-        -project {{xcode_proj}} \
-        -scheme {{ios_scheme}} \
-        -configuration Debug \
-        -destination 'generic/platform=iOS' \
-        -derivedDataPath {{ios_dev_dd}} \
-        -allowProvisioningUpdates \
-        ARCHS=arm64 \
-        build
     @app="{{ios_dev_app}}"; \
     bundle="{{ios_bundle}}"; \
     name="{{name}}"; \
-    test -d "$app" || (echo "iOS device app not found: $app"; exit 1); \
     uuid='[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'; \
     devices="$(xcrun devicectl list devices)"; \
     if [ -n "$name" ]; then \
@@ -420,20 +413,36 @@ run-on-device name="" kind="iPhone|iPad":
     else \
         rows="$(printf '%s\n' "$devices" | grep -iE '{{kind}}' || true)"; \
     fi; \
-    reachable="$(printf '%s\n' "$rows" | grep -v 'unavailable' | grep -oE "$uuid" | head -n1 || true)"; \
-    if [ -z "$reachable" ]; then \
+    row="$(printf '%s\n' "$rows" | grep -v 'unavailable' | head -n1)"; \
+    device="$(printf '%s\n' "$row" | grep -oE "$uuid" | head -n1 || true)"; \
+    if [ -z "$device" ]; then \
         if printf '%s\n' "$rows" | grep -q 'unavailable'; then \
-            echo "Device is paired but unavailable. Unlock the iPhone, keep it plugged in (or on the same Wi-Fi), trust this Mac, then retry."; \
+            echo "Device is paired but unavailable. Unlock it, keep it plugged in (or on the same Wi-Fi), trust this Mac, then retry."; \
         else \
             echo "No paired iPhone/iPad found. Connect a device and check 'xcrun devicectl list devices'."; \
         fi; \
         printf '%s\n' "$devices"; exit 1; \
     fi; \
-    device="$reachable"; \
+    devname="$(printf '%s\n' "$row" | awk -F'  +' '{print $1}')"; \
+    echo "Building for \"$devname\" ($device) …"; \
+    xcodebuild \
+        -project {{xcode_proj}} \
+        -scheme {{ios_scheme}} \
+        -configuration Debug \
+        -destination "platform=iOS,name=$devname" \
+        -derivedDataPath {{ios_dev_dd}} \
+        -allowProvisioningUpdates \
+        -allowProvisioningDeviceRegistration \
+        ARCHS=arm64 \
+        build; \
+    test -d "$app" || (echo "iOS device app not found: $app"; exit 1); \
     echo "Installing on device $device …"; \
     xcrun devicectl device install app --device "$device" "$app"; \
-    xcrun devicectl device process launch --device "$device" "$bundle"; \
-    echo "Launched pgAgent on device $device"
+    if ! xcrun devicectl device process launch --device "$device" "$bundle"; then \
+        echo "App installed, but launch failed — unlock \"$devname\" and keep it awake, then rerun (iOS refuses to launch apps on a locked device)."; \
+        exit 1; \
+    fi; \
+    echo "Launched pgAgent on \"$devname\" ($device)"
 
 # Build the iOS app for a connected device or archive workflow.
 ios-build config="Debug":
