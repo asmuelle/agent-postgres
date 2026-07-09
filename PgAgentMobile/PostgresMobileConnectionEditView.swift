@@ -23,6 +23,34 @@ struct PostgresMobileConnectionEditView: View {
     @State private var environment: PostgresEnvironment = .unspecified
     @State private var isReadOnly = false
 
+    // SSH tunnel (inline config — iOS has no separate SSH profile store).
+    @State private var useTunnel = false
+    @State private var sshHost = ""
+    @State private var sshPort = "22"
+    @State private var sshUser = ""
+    @State private var sshAuth: PostgresTunnelAuth = .password
+    @State private var sshPassword = ""
+    @State private var sshPrivateKey = ""
+    @State private var sshKeyPassphrase = ""
+    @State private var tunnelRemoteHost = "127.0.0.1"
+    @State private var tunnelRemotePort = ""
+    // Stable across edits so the Keychain account / live-connection cache key
+    // survives re-saves; generated once when the tunnel is first configured.
+    @State private var tunnelId = UUID().uuidString
+    // A key already lives in the Keychain (editing) — so the form needn't
+    // force a re-paste just to re-save unrelated fields.
+    @State private var hasStoredKey = false
+    // The tunnel's SSH keychain account when the sheet opened, so changing the
+    // SSH host/user/port on save can evict the now-orphaned secrets.
+    @State private var originalSshAccount: String?
+
+    // Advanced (parity with macOS): previously never set on iOS, so iOS-created
+    // profiles silently inherited defaults. Empty numeric fields inherit the
+    // shared PostgresProfile defaults.
+    @State private var applicationName = "mc-ssh"
+    @State private var connectTimeoutSecs = "10"
+    @State private var maxPoolSize = ""
+
     // Paste-to-connect (roadmap 2.1). The clipboard is only read when the
     // user taps the paste button — probing on appear would fire iOS's
     // paste-permission toast every time the sheet opens.
@@ -263,7 +291,7 @@ struct PostgresMobileConnectionEditView: View {
                                 Text("TLS Mode Hint")
                                     .font(MidnightMobileDesign.FontToken.captionStrong)
                                     .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
-                                Text(tlsHint)
+                                Text(tls.hint)
                                     .font(MidnightMobileDesign.FontToken.caption)
                                     .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -274,6 +302,14 @@ struct PostgresMobileConnectionEditView: View {
                         .midnightMobileCard()
                     }
                     .padding(.horizontal)
+
+                    // Section 3.5: SSH Tunnel
+                    sshTunnelSection
+                        .padding(.horizontal)
+
+                    // Section 3.6: Advanced
+                    advancedSection
+                        .padding(.horizontal)
 
                     // Section 4: Notes
                     VStack(alignment: .leading, spacing: 10) {
@@ -318,18 +354,194 @@ struct PostgresMobileConnectionEditView: View {
         }
     }
 
-    private var tlsHint: String {
-        switch tls {
-        case .disable:
-            return "No encryption. Only safe over a private network."
-        case .prefer:
-            return "Try TLS, fall back to plaintext."
-        case .require:
-            return "Require TLS but skip certificate verification (encrypts the wire, not authenticates the server)."
-        case .verifyFull:
-            return "Require TLS and validate the server certificate against the system trust store. Recommended for production."
+    private var accent: Color { Color(red: 0.15, green: 0.75, blue: 0.85) }
+
+    // MARK: - SSH Tunnel
+
+    private var keyStatusText: String {
+        if !sshPrivateKey.isEmpty { return "Private key ready (will be saved to Keychain)." }
+        if hasStoredKey { return "A private key is saved in your Keychain. Paste again to replace it." }
+        return "No private key yet. Paste a PEM/OpenSSH private key from the clipboard."
+    }
+
+    @ViewBuilder
+    private var sshTunnelSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SSH TUNNEL")
+                .font(MidnightMobileDesign.FontToken.captionStrong)
+                .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
+                .padding(.leading, 4)
+
+            VStack(spacing: 14) {
+                Toggle(isOn: $useTunnel) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Connect through an SSH tunnel")
+                            .font(MidnightMobileDesign.FontToken.label)
+                        Text("Reach a database that's only accessible from an SSH host (bastion/jump box).")
+                            .font(MidnightMobileDesign.FontToken.caption)
+                            .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
+                    }
+                }
+                .tint(accent)
+
+                if useTunnel {
+                    Divider().background(MidnightMobileDesign.ColorToken.separator)
+
+                    EditFormRow("SSH Host") {
+                        TextField("bastion.example.com", text: $sshHost)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+
+                    HStack(spacing: 16) {
+                        EditFormRow("SSH Port") {
+                            TextField("22", text: $sshPort)
+                                .keyboardType(.numberPad)
+                        }
+                        .frame(maxWidth: 100)
+
+                        EditFormRow("SSH Username") {
+                            TextField("deploy", text: $sshUser)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+                    }
+
+                    Divider().background(MidnightMobileDesign.ColorToken.separator)
+
+                    HStack {
+                        Text("Authentication")
+                            .font(MidnightMobileDesign.FontToken.label)
+                        Spacer()
+                        Picker("Authentication", selection: $sshAuth) {
+                            ForEach(PostgresTunnelAuth.allCases, id: \.self) { method in
+                                Text(method.displayName).tag(method)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(accent)
+                    }
+
+                    if sshAuth == .password {
+                        EditFormRow("SSH Password") {
+                            SecureField("Required", text: $sshPassword)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Button(action: applyClipboardPrivateKey) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "key.horizontal")
+                                    Text("Paste private key from clipboard")
+                                        .font(MidnightMobileDesign.FontToken.label)
+                                    Spacer()
+                                }
+                                .foregroundStyle(accent)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .midnightMobileMinimumTapTarget()
+
+                            if !sshPrivateKey.isEmpty || hasStoredKey {
+                                Button(role: .destructive, action: clearPrivateKey) {
+                                    Text("Remove private key")
+                                        .font(MidnightMobileDesign.FontToken.caption)
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            Text(keyStatusText)
+                                .font(MidnightMobileDesign.FontToken.caption)
+                                .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            EditFormRow("Key Passphrase (Optional)") {
+                                SecureField("Only if the key is encrypted", text: $sshKeyPassphrase)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    Divider().background(MidnightMobileDesign.ColorToken.separator)
+
+                    EditFormRow("Remote host (as seen from SSH host)") {
+                        TextField("127.0.0.1", text: $tunnelRemoteHost)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+
+                    EditFormRow("Remote port") {
+                        TextField(port.isEmpty ? "5432" : port, text: $tunnelRemotePort)
+                            .keyboardType(.numberPad)
+                    }
+                    .frame(maxWidth: 160)
+
+                    Text("The Postgres server as reachable from the SSH host — usually 127.0.0.1 and the database port. The SSH connection opens automatically using the credentials above when you connect.")
+                        .font(MidnightMobileDesign.FontToken.caption)
+                        .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding()
+            .midnightMobileCard()
         }
     }
+
+    @ViewBuilder
+    private var advancedSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("ADVANCED")
+                .font(MidnightMobileDesign.FontToken.captionStrong)
+                .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
+                .padding(.leading, 4)
+
+            VStack(spacing: 14) {
+                EditFormRow("Application name") {
+                    TextField("mc-ssh", text: $applicationName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+
+                Divider().background(MidnightMobileDesign.ColorToken.separator)
+
+                HStack(spacing: 16) {
+                    EditFormRow("Connect timeout (s)") {
+                        TextField("10", text: $connectTimeoutSecs)
+                            .keyboardType(.numberPad)
+                    }
+                    EditFormRow("Max pool size") {
+                        TextField("Default", text: $maxPoolSize)
+                            .keyboardType(.numberPad)
+                    }
+                }
+
+                Text("Max pool size caps concurrent server connections for this profile. Leave blank to use the app default; lower it on quota-strict managed providers.")
+                    .font(MidnightMobileDesign.FontToken.caption)
+                    .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding()
+            .midnightMobileCard()
+        }
+    }
+
+    private func applyClipboardPrivateKey() {
+        guard let text = UIPasteboard.general.string,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            pasteFeedback = "Clipboard is empty."
+            pasteFeedbackIsError = true
+            return
+        }
+        sshPrivateKey = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func clearPrivateKey() {
+        sshPrivateKey = ""
+        hasStoredKey = false
+    }
+
 
     // MARK: - Paste-to-connect
 
@@ -383,6 +595,33 @@ struct PostgresMobileConnectionEditView: View {
         folderPath = p.folderPath ?? ""
         syncPasswordViaICloud = p.syncPassword
 
+        applicationName = p.applicationName ?? ""
+        connectTimeoutSecs = p.connectTimeoutSecs.map(String.init) ?? ""
+        maxPoolSize = p.maxPoolSize.map(String.init) ?? ""
+
+        if let t = p.tunnel, t.isInline {
+            useTunnel = true
+            tunnelId = t.sshConnectionId
+            sshHost = t.sshHost ?? ""
+            sshPort = String(t.sshPort ?? 22)
+            sshUser = t.sshUser ?? ""
+            sshAuth = t.sshAuth ?? .password
+            tunnelRemoteHost = t.remoteHost
+            tunnelRemotePort = String(t.remotePort)
+
+            let account = t.sshKeychainAccount
+            originalSshAccount = account
+            if let account {
+                switch sshAuth {
+                case .password:
+                    sshPassword = KeychainManager.shared.loadPassword(kind: .sshPassword, account: account) ?? ""
+                case .privateKey:
+                    hasStoredKey = MobileSSHKeyStore.has(account: account)
+                    sshKeyPassphrase = KeychainManager.shared.loadPassword(kind: .sshKeyPassphrase, account: account) ?? ""
+                }
+            }
+        }
+
         switch p.auth {
         case .keychain:
             savePasswordToKeychain = true
@@ -399,6 +638,14 @@ struct PostgresMobileConnectionEditView: View {
             return
         }
 
+        let built = buildTunnel()
+        if let message = built.error {
+            errorText = message
+            return
+        }
+        let tunnel = built.tunnel
+
+        let trimmedAppName = applicationName.trimmingCharacters(in: .whitespacesAndNewlines)
         let auth: PostgresAuthMethod = savePasswordToKeychain ? .keychain : .ephemeralPassword(password)
         let updatedProfile = PostgresProfile(
             id: profile?.id ?? UUID().uuidString,
@@ -409,6 +656,10 @@ struct PostgresMobileConnectionEditView: View {
             user: user.trimmingCharacters(in: .whitespacesAndNewlines),
             auth: auth,
             tls: tls,
+            applicationName: trimmedAppName.isEmpty ? nil : trimmedAppName,
+            tunnel: tunnel,
+            connectTimeoutSecs: UInt64(connectTimeoutSecs.trimmingCharacters(in: .whitespaces)),
+            maxPoolSize: UInt32(maxPoolSize.trimmingCharacters(in: .whitespaces)),
             folderPath: folderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : folderPath.trimmingCharacters(in: .whitespacesAndNewlines),
             createdAt: profile?.createdAt ?? Date(),
             lastConnected: profile?.lastConnected,
@@ -419,32 +670,101 @@ struct PostgresMobileConnectionEditView: View {
             syncPassword: savePasswordToKeychain && syncPasswordViaICloud
         )
 
-        // Save password if checking keychain. The synchronizable variant
-        // writes to exactly one store and removes the other, so flipping
-        // the iCloud toggle migrates the secret.
-        if savePasswordToKeychain && !password.isEmpty {
-            KeychainManager.shared.savePassword(
-                kind: .postgresPassword,
-                account: updatedProfile.keychainAccount,
-                secret: password,
-                synchronizable: updatedProfile.syncPassword
-            )
-        } else if savePasswordToKeychain {
-            // No password re-entered — migrate whatever already exists.
-            KeychainManager.shared.setPasswordSynchronizable(
-                kind: .postgresPassword,
-                account: updatedProfile.keychainAccount,
-                synchronizable: updatedProfile.syncPassword
-            )
-        } else {
-            KeychainManager.shared.deletePassword(
-                kind: .postgresPassword,
-                account: updatedProfile.keychainAccount
-            )
-        }
+        KeychainManager.shared.persistPostgresPassword(
+            account: updatedProfile.keychainAccount,
+            password: password,
+            saveToKeychain: savePasswordToKeychain,
+            synchronizable: updatedProfile.syncPassword
+        )
+
+        persistTunnelSecrets(tunnel)
 
         onSave(updatedProfile)
         dismiss()
+    }
+
+    /// Build and validate the inline SSH tunnel from the form, or `nil` when
+    /// the tunnel is disabled. Returns a user-facing message on invalid input.
+    private func buildTunnel() -> (tunnel: PostgresTunnel?, error: String?) {
+        guard useTunnel else { return (nil, nil) }
+
+        let trimmedHost = sshHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedUser = sshUser.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remoteHost = tunnelRemoteHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remotePortText = tunnelRemotePort.trimmingCharacters(in: .whitespaces)
+
+        guard !trimmedHost.isEmpty, !trimmedUser.isEmpty, !remoteHost.isEmpty else {
+            return (nil, "SSH tunnel needs an SSH host, SSH username, and remote host.")
+        }
+        guard let sshPortValue = UInt16(sshPort.trimmingCharacters(in: .whitespaces)) else {
+            return (nil, "SSH port must be a valid number (0-65535).")
+        }
+        // Blank remote port defaults to the database port.
+        guard let remotePortValue = UInt16(remotePortText.isEmpty ? port : remotePortText) else {
+            return (nil, "Remote port must be a valid number (0-65535).")
+        }
+        if sshAuth == .password && sshPassword.isEmpty {
+            return (nil, "Enter the SSH password, or switch the tunnel to private-key auth.")
+        }
+        if sshAuth == .privateKey && sshPrivateKey.isEmpty && !hasStoredKey {
+            return (nil, "Paste an SSH private key, or switch the tunnel to password auth.")
+        }
+
+        return (PostgresTunnel(
+            sshConnectionId: tunnelId,
+            remoteHost: remoteHost,
+            remotePort: remotePortValue,
+            sshHost: trimmedHost,
+            sshPort: sshPortValue,
+            sshUser: trimmedUser,
+            sshAuth: sshAuth
+        ), nil)
+    }
+
+    /// Persist the tunnel's SSH secrets to the Keychain and evict any that the
+    /// user orphaned by disabling the tunnel, switching auth, or changing the
+    /// SSH endpoint (which moves the Keychain account).
+    private func persistTunnelSecrets(_ tunnel: PostgresTunnel?) {
+        let newAccount = tunnel?.sshKeychainAccount
+
+        if let old = originalSshAccount, old != newAccount {
+            // Migrate a stored private key the user didn't re-paste before the
+            // old account's secrets are evicted, so an endpoint edit never
+            // silently drops the key.
+            if let newAccount,
+               (tunnel?.sshAuth ?? .password) == .privateKey,
+               sshPrivateKey.isEmpty, hasStoredKey,
+               let existingPem = MobileSSHKeyStore.load(account: old)
+            {
+                MobileSSHKeyStore.save(pem: existingPem, account: newAccount)
+            }
+            KeychainManager.shared.deletePassword(kind: .sshPassword, account: old)
+            KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: old)
+            MobileSSHKeyStore.delete(account: old)
+        }
+
+        guard let tunnel, let account = tunnel.sshKeychainAccount else { return }
+
+        switch tunnel.sshAuth ?? .password {
+        case .password:
+            if !sshPassword.isEmpty {
+                KeychainManager.shared.savePassword(kind: .sshPassword, account: account, secret: sshPassword)
+            }
+            // Drop any key material left from a prior private-key config.
+            KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account)
+            MobileSSHKeyStore.delete(account: account)
+        case .privateKey:
+            if !sshPrivateKey.isEmpty {
+                MobileSSHKeyStore.save(pem: sshPrivateKey, account: account)
+            }
+            if sshKeyPassphrase.isEmpty {
+                KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account)
+            } else {
+                KeychainManager.shared.savePassword(kind: .sshKeyPassphrase, account: account, secret: sshKeyPassphrase)
+            }
+            // Drop any password left from a prior password config.
+            KeychainManager.shared.deletePassword(kind: .sshPassword, account: account)
+        }
     }
 }
 

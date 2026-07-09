@@ -54,6 +54,21 @@ enum PostgresTlsMode: String, Codable, Sendable, CaseIterable {
         case .verifyFull:  return "Verify-full"
         }
     }
+
+    /// One-line explanation shown under the TLS picker. Shared so the macOS
+    /// and iOS connection forms can't drift out of sync.
+    var hint: String {
+        switch self {
+        case .disable:
+            return "No encryption. Only safe over a private network."
+        case .prefer:
+            return "Try TLS, fall back to plaintext."
+        case .require:
+            return "Require TLS but skip certificate verification (encrypts the wire, not authenticates the server)."
+        case .verifyFull:
+            return "Require TLS and validate the server certificate against the system trust store. Recommended for production."
+        }
+    }
 }
 
 /// Semantic environment tag for a connection. Drives the badge treatment
@@ -86,14 +101,56 @@ enum PostgresEnvironment: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// SSH authentication method for an inline (iOS) tunnel. macOS tunnels never
+/// carry this — they inherit auth from the referenced SSH profile.
+enum PostgresTunnelAuth: String, Codable, Hashable, Sendable, CaseIterable {
+    case password
+    case privateKey
+
+    var displayName: String {
+        switch self {
+        case .password:   return "Password"
+        case .privateKey: return "Private Key"
+        }
+    }
+}
+
 /// Optional SSH tunnel descriptor stored on the profile.
-/// `sshConnectionId` references a live SSH connection in `ConnectionManager`
-/// at connect time — so the tunnel survives an SSH reconnect without
-/// editing the Postgres profile.
+///
+/// Two shapes share this type:
+///   • macOS references a saved SSH `ConnectionProfile`: `sshConnectionId` is
+///     that profile's id, and the inline `ssh*` fields stay nil.
+///   • iOS has no SSH connection store, so it stores the SSH endpoint inline
+///     (`sshHost`/`sshPort`/`sshUser`/`sshAuth`). There `sshConnectionId` is a
+///     synthetic id used only as a Keychain-account and live-connection cache
+///     key.
+///
+/// The live SSH connection is resolved at connect time — so the tunnel
+/// survives an SSH reconnect without editing the Postgres profile.
 struct PostgresTunnel: Codable, Hashable, Sendable {
     var sshConnectionId: String
     var remoteHost: String
     var remotePort: UInt16
+
+    // Inline SSH endpoint (iOS). Defaults keep the memberwise initializer and
+    // decoding of existing macOS profiles working unchanged.
+    var sshHost: String? = nil
+    var sshPort: UInt16? = nil
+    var sshUser: String? = nil
+    var sshAuth: PostgresTunnelAuth? = nil
+
+    /// True when the tunnel carries its own SSH endpoint (iOS inline config)
+    /// rather than referencing a saved SSH profile (macOS).
+    var isInline: Bool { sshHost != nil }
+
+    /// Keychain account for the inline SSH endpoint's credentials
+    /// (`user@host:port`, matching `ConnectionProfile.keychainAccount`).
+    /// Nil for macOS profile-reference tunnels. The resolver and the mobile
+    /// edit form both compute the account through here so they never diverge.
+    var sshKeychainAccount: String? {
+        guard let sshHost, let sshUser else { return nil }
+        return "\(sshUser)@\(sshHost):\(sshPort ?? 22)"
+    }
 }
 
 struct PostgresProfile: Codable, Identifiable, Hashable, Sendable {
@@ -441,8 +498,22 @@ extension PostgresProfile {
             connectTimeoutSecs: connectTimeoutSecs ?? 10,
             maxPoolSize: maxPoolSize,
             idleTimeoutSecs: idleTimeoutSecs,
-            minIdleConnections: minIdleConnections,
+            // Coalesce nil (the common case — the forms leave this unset) to 0
+            // so an idle-but-open profile releases its last connection instead
+            // of pinning one for the app's lifetime (the core default is 1).
+            // Applies to profiles saved before this field existed too, while
+            // still honouring an explicit value set in the editor. We do NOT
+            // lower maxPoolSize: each query tab holds a session lease for its
+            // lifetime, so a low ceiling would exhaust multi-tab workflows —
+            // the cross-profile fix is reference-counted release, not a smaller
+            // per-profile pool.
+            minIdleConnections: minIdleConnections ?? Self.defaultMinIdleConnections,
             profileId: id
         )
     }
+
+    /// Let an idle, open profile release its last connection (the core default
+    /// pins 1 for the app's lifetime). Combined with the idle timeout, an
+    /// unused profile fully disconnects and reconnects transparently on demand.
+    static let defaultMinIdleConnections: UInt32 = 0
 }

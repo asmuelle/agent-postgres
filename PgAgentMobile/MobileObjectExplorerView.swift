@@ -62,18 +62,24 @@ struct MobileObjectExplorerView: View {
                 selectedNode = nil
             }
         }
+        .onDisappear {
+            // Release every claim this sidebar holds so a torn-down explorer
+            // never strands connections.
+            for id in expandedServers {
+                connectionManager.release(profileId: id)
+            }
+            expandedServers.removeAll()
+        }
     }
 
     // MARK: - Header & Search
 
     private var headerView: some View {
+        // The title is supplied by the split view's `.navigationTitle`, so the
+        // header only carries its action buttons — no duplicate label here.
         HStack {
-            Text("Object Explorer")
-                .font(MidnightMobileDesign.FontToken.headline)
-                .foregroundStyle(.primary)
-            
             Spacer()
-            
+
             HStack(spacing: 12) {
                 Button(action: onShowCSVImport) {
                     Image(systemName: "square.and.arrow.down")
@@ -167,6 +173,24 @@ struct MobileObjectExplorerView: View {
         }
     }
 
+    // MARK: - Server claim lifecycle
+
+    /// The sidebar holds a connection claim for each expanded server, so the
+    /// shared manager keeps that profile connected while its tree is visible
+    /// and releases it (closing the pool if nothing else needs it) on collapse.
+    /// Idempotent per expansion state so it can't double-acquire/double-release.
+    private func setServerExpanded(_ profile: PostgresProfile, expanded: Bool) {
+        if expanded {
+            guard !expandedServers.contains(profile.id) else { return }
+            expandedServers.insert(profile.id)
+            Task { await connectionManager.acquire(profile: profile) }
+        } else {
+            guard expandedServers.contains(profile.id) else { return }
+            expandedServers.remove(profile.id)
+            connectionManager.release(profileId: profile.id)
+        }
+    }
+
     // MARK: - Server Profile Row
 
     @ViewBuilder
@@ -177,13 +201,10 @@ struct MobileObjectExplorerView: View {
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                     if isExpanded {
-                        expandedServers.remove(profile.id)
+                        setServerExpanded(profile, expanded: false)
                     } else {
-                        expandedServers.insert(profile.id)
                         selectedProfileId = profile.id
-                        Task {
-                            await connectionManager.connectIfNeeded(profile: profile)
-                        }
+                        setServerExpanded(profile, expanded: true)
                     }
                 }
             } label: {
@@ -193,16 +214,15 @@ struct MobileObjectExplorerView: View {
             .buttonStyle(.plain)
             .contextMenu {
                 Button("Connect") {
-                    Task {
-                        await connectionManager.connectIfNeeded(profile: profile)
-                    }
+                    setServerExpanded(profile, expanded: true)
                 }
                 .disabled(connectionManager.activeConnections[profile.id] != nil || connectionManager.isConnecting[profile.id] == true)
 
                 Button("Disconnect") {
-                    Task {
-                        await connectionManager.disconnect(profileId: profile.id)
-                    }
+                    // Hard close now (honours explicit intent even if the detail
+                    // workspace also holds a claim) and drop the sidebar's claim.
+                    Task { await connectionManager.disconnect(profileId: profile.id) }
+                    setServerExpanded(profile, expanded: false)
                 }
                 .disabled(connectionManager.activeConnections[profile.id] == nil)
 

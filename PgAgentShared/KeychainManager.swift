@@ -176,6 +176,26 @@ class KeychainManager {
         }
     }
 
+    /// Persist (or clear) a Postgres profile's password for `account`,
+    /// honouring the editor's "save to keychain" + "sync via iCloud" toggles.
+    /// Shared by both platforms' connection editors so this three-way branch
+    /// (write / migrate-in-place / delete) can't drift between them.
+    func persistPostgresPassword(
+        account: String,
+        password: String,
+        saveToKeychain: Bool,
+        synchronizable: Bool
+    ) {
+        if saveToKeychain && !password.isEmpty {
+            savePassword(kind: .postgresPassword, account: account, secret: password, synchronizable: synchronizable)
+        } else if saveToKeychain {
+            // No new password entered — migrate whatever already exists.
+            setPasswordSynchronizable(kind: .postgresPassword, account: account, synchronizable: synchronizable)
+        } else {
+            deletePassword(kind: .postgresPassword, account: account)
+        }
+    }
+
     /// Migrate an existing secret between stores without knowing its value
     /// (used when the toggle flips but the password field wasn't re-entered).
     /// Duplicates are resolved by deleting the source copy after a

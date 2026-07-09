@@ -165,7 +165,7 @@ struct PostgresConnectionEditView: View {
                         }
                     }
                     .pickerStyle(.menu)
-                    Text(tlsHint)
+                    Text(tls.hint)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -278,18 +278,6 @@ struct PostgresConnectionEditView: View {
         return "\(user)@\(host):\(portValue)/\(database)"
     }
 
-    private var tlsHint: String {
-        switch tls {
-        case .disable:
-            return "No encryption. Only safe over a private network."
-        case .prefer:
-            return "Try TLS, fall back to plaintext."
-        case .require:
-            return "Require TLS but skip certificate verification (encrypts the wire, not authenticates the server)."
-        case .verifyFull:
-            return "Require TLS and validate the server certificate against the system trust store. Recommended for production."
-        }
-    }
 
     private var canSave: Bool {
         !trimmedName.isEmpty
@@ -448,30 +436,12 @@ struct PostgresConnectionEditView: View {
             syncPassword: savePasswordToKeychain && syncPasswordViaICloud
         )
 
-        if savePasswordToKeychain && !password.isEmpty {
-            // The synchronizable variant writes to exactly one store and
-            // removes the other, so flipping the iCloud toggle migrates.
-            KeychainManager.shared.savePassword(
-                kind: .postgresPassword,
-                account: profile.keychainAccount,
-                secret: password,
-                synchronizable: profile.syncPassword
-            )
-        } else if savePasswordToKeychain {
-            // No password re-entered — migrate whatever already exists so
-            // the toggle still takes effect (local ↔ iCloud Keychain).
-            KeychainManager.shared.setPasswordSynchronizable(
-                kind: .postgresPassword,
-                account: profile.keychainAccount,
-                synchronizable: profile.syncPassword
-            )
-        } else {
-            // Drop any prior keychain entry so we don't keep stale secrets.
-            KeychainManager.shared.deletePassword(
-                kind: .postgresPassword,
-                account: profile.keychainAccount
-            )
-        }
+        KeychainManager.shared.persistPostgresPassword(
+            account: profile.keychainAccount,
+            password: password,
+            saveToKeychain: savePasswordToKeychain,
+            synchronizable: profile.syncPassword
+        )
 
         store.saveOrUpdate(profile)
         logger.log("Saved Postgres profile \(profile.id, privacy: .public)")

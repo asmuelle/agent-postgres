@@ -50,19 +50,36 @@ final class FleetHealthStore: ObservableObject {
     }
 
     private func refreshOne(profile: PostgresProfile) async {
-        await connectionManager.connectIfNeeded(profile: profile)
-
-        guard let connectionId = connectionManager.activeConnections[profile.id] else {
-            health[profile.id] = FleetInstanceHealth(
-                profileId: profile.id,
-                reachable: false,
-                activeBackends: 0,
-                longRunningCount: 0,
-                blockedLockCount: 0,
-                errorMessage: connectionManager.connectionErrors[profile.id] ?? "Unreachable",
-                lastUpdated: Date()
-            )
-            return
+        // Reuse a connection an interactive surface already owns; otherwise
+        // open a short-lived probe we tear down before returning. Monitoring
+        // must never accumulate connections across the whole fleet — that was
+        // the dominant cause of connection exhaustion.
+        let existing = connectionManager.activeConnections[profile.id]
+        let isProbe = existing == nil
+        let connectionId: String
+        if let existing {
+            connectionId = existing
+        } else {
+            do {
+                connectionId = try await BridgeManager.shared.pgConnect(profile: profile)
+            } catch {
+                health[profile.id] = FleetInstanceHealth(
+                    profileId: profile.id,
+                    reachable: false,
+                    activeBackends: 0,
+                    longRunningCount: 0,
+                    blockedLockCount: 0,
+                    errorMessage: error.localizedDescription,
+                    lastUpdated: Date()
+                )
+                return
+            }
+        }
+        // Close only what we opened; leave interactive connections alone.
+        defer {
+            if isProbe {
+                Task { await BridgeManager.shared.pgDisconnect(connectionId: connectionId) }
+            }
         }
 
         do {

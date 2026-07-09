@@ -142,16 +142,14 @@ extension BridgeManager {
         }
         #endif
 
-        // The profile stores the *SSH profile id* the user picked; the
-        // FFI needs the *live connection id* the Rust manager holds.
-        // Resolve (auto-opening the SSH connection with stored
-        // credentials if needed) and substitute before connecting.
+        // The profile stores either a saved SSH profile id (macOS) or an
+        // inline SSH endpoint (iOS); the FFI needs the *live connection id*
+        // the Rust manager holds. Resolve (auto-opening the SSH connection
+        // with stored credentials if needed) and substitute before connecting.
         if let tunnel = profile.tunnel {
             let liveId: String
             do {
-                liveId = try await SSHTunnelResolver.liveConnectionId(
-                    forSSHProfileReference: tunnel.sshConnectionId
-                )
+                liveId = try await SSHTunnelResolver.liveConnectionId(for: tunnel)
             } catch {
                 throw PostgresBridgeError.tunnel(
                     (error as? LocalizedError)?.errorDescription
@@ -176,6 +174,14 @@ extension BridgeManager {
                 connectionId: connectionId,
                 profile: profile
             )
+            // Track this Postgres connection's use of the shared SSH tunnel so
+            // the underlying SSH connection is reclaimed once the last Postgres
+            // consumer of it disconnects (see pgDisconnect).
+            if let tunnel = profile.tunnel {
+                await SSHTunnelResolver.registerTunnelUse(
+                    pgConnectionId: connectionId, tunnel: tunnel
+                )
+            }
             return connectionId
         } catch let err as FfiPgError {
             throw PostgresBridgeError.from(err)
@@ -191,6 +197,8 @@ extension BridgeManager {
             _ = rshellPgDisconnect(connectionId: connectionId)
         }
         PostgresConnectionAuditRegistry.shared.unregister(connectionId: connectionId)
+        // Reclaim the SSH tunnel connection if this was its last Postgres user.
+        await SSHTunnelResolver.releaseTunnelUse(pgConnectionId: connectionId)
     }
 
     func pgListDatabases(connectionId: String) async throws -> [FfiPgDatabase] {

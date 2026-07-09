@@ -20,7 +20,44 @@ final class PostgresConnectionManager: ObservableObject {
 
     private var storeSubscriptions: [String: AnyCancellable] = [:]
 
+    /// Live consumers per profile (views that need the connection while
+    /// visible). The pool is closed automatically when the last consumer
+    /// releases, so a profile's connection lives exactly as long as some UI
+    /// shows it — the fix for connections that were previously never freed.
+    private var refCounts: [String: Int] = [:]
+
     private init() {}
+
+    // MARK: - Reference-counted ownership
+
+    /// Register a consumer that needs `profile` connected while it is visible,
+    /// connecting if this is the first consumer. Balance every call with
+    /// exactly one `release(profileId:)` when the consumer goes away.
+    func acquire(profile: PostgresProfile) async {
+        refCounts[profile.id, default: 0] += 1
+        await connectIfNeeded(profile: profile)
+    }
+
+    /// Drop a consumer's claim; closes the pool once the last consumer is gone.
+    /// Safe to call for a profile with no outstanding claim (no-op).
+    func release(profileId: String) {
+        guard let count = refCounts[profileId] else { return }
+        if count <= 1 {
+            refCounts.removeValue(forKey: profileId)
+            Task { await disconnect(profileId: profileId) }
+        } else {
+            refCounts[profileId] = count - 1
+        }
+    }
+
+    /// Close every open connection (e.g. an explicit "disconnect all", app
+    /// teardown). Clears consumer claims too.
+    func disconnectAll() async {
+        refCounts.removeAll()
+        for profileId in Array(activeConnections.keys) {
+            await disconnect(profileId: profileId)
+        }
+    }
 
     func connectIfNeeded(profile: PostgresProfile) async {
         if activeConnections[profile.id] != nil || isConnecting[profile.id] == true { return }
@@ -69,6 +106,11 @@ final class PostgresConnectionManager: ObservableObject {
     }
 
     func disconnect(profileId: String) async {
+        // Closes the connection *now* without touching consumer claims: a
+        // manual "Disconnect" button while the workspace is still on screen
+        // leaves its claim intact, so a later Connect → navigate-away still
+        // balances to a single release. Claims are owned solely by
+        // acquire/release/disconnectAll.
         storeSubscriptions.removeValue(forKey: profileId)
         schemaStores.removeValue(forKey: profileId)
         

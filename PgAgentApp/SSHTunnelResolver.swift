@@ -50,7 +50,47 @@ enum SSHTunnelResolver {
     /// dropped/disconnected session is reopened, not assumed.
     private static var liveConnections: [String: String] = [:]
 
+    /// Reclaim bookkeeping: how many live Postgres connections use each SSH
+    /// tunnel, and which tunnel each Postgres connection uses — so the SSH
+    /// connection is closed once its last Postgres consumer disconnects.
+    private static var tunnelRefCounts: [String: Int] = [:]   // ssh key -> count
+    private static var pgToSshKey: [String: String] = [:]     // pg conn id -> ssh key
+
     private static let logger = Logger(subsystem: "com.mc-ssh", category: "ssh-tunnel-resolver")
+
+    /// Resolve a Postgres profile's tunnel to an open SSH connection's id.
+    /// On macOS the tunnel references a saved SSH profile, so this delegates
+    /// to the profile-id resolution path. (The iOS resolver reads the tunnel's
+    /// inline SSH endpoint instead.)
+    static func liveConnectionId(for tunnel: PostgresTunnel) async throws -> String {
+        try await liveConnectionId(forSSHProfileReference: tunnel.sshConnectionId)
+    }
+
+    /// Record that a Postgres connection now depends on `tunnel`'s SSH
+    /// connection. Ignored for tunnels this resolver didn't open, or a
+    /// duplicate register for the same Postgres connection.
+    static func registerTunnelUse(pgConnectionId: String, tunnel: PostgresTunnel) {
+        let key = tunnel.sshConnectionId
+        guard liveConnections[key] != nil, pgToSshKey[pgConnectionId] == nil else { return }
+        pgToSshKey[pgConnectionId] = key
+        tunnelRefCounts[key, default: 0] += 1
+    }
+
+    /// Drop a Postgres connection's dependency; closes the SSH connection once
+    /// no Postgres connection uses it anymore.
+    static func releaseTunnelUse(pgConnectionId: String) {
+        guard let key = pgToSshKey.removeValue(forKey: pgConnectionId) else { return }
+        let count = tunnelRefCounts[key] ?? 0
+        if count <= 1 {
+            tunnelRefCounts.removeValue(forKey: key)
+            if let sshId = liveConnections.removeValue(forKey: key) {
+                BridgeManager.shared.disconnect(connectionId: sshId)
+                logger.log("Closed idle SSH tunnel host connection: \(sshId, privacy: .public)")
+            }
+        } else {
+            tunnelRefCounts[key] = count - 1
+        }
+    }
 
     /// Resolve `reference` — normally an SSH profile id; tolerated as a
     /// raw live connection id for forward compatibility — to an open
