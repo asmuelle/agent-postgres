@@ -204,6 +204,7 @@ targets:
         INFOPLIST_FILE: PgAgentMobile/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile
         PRODUCT_NAME: "pgAgent"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_MODULE_NAME: PgAgentMobile
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: false
@@ -221,6 +222,12 @@ targets:
           - LocalAuthentication
           - -framework
           - SystemConfiguration
+          # On-device AI (FoundationModels) ships in the iOS 26 SDK but the
+          # deployment target is iOS 17 — weak-link so the app still loads on
+          # older OSes. Every call site is gated by `@available(iOS 26, *)`
+          # plus `PgAIAvailabilityProbe`. Mirrors the macOS target above.
+          - -weak_framework
+          - FoundationModels
           - -lxml2
           - -lz
     scheme:
