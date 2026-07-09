@@ -23,7 +23,10 @@ enum MidnightColors {
 
 @MainActor
 fileprivate final class MobileStoreCache {
-    static var schemaStores: [String: PgSchemaStore] = [:]
+    // Connection + schema state now lives in PostgresConnectionManager.shared
+    // (the single source of truth, shared with the sidebar and macOS). Only
+    // per-profile query-tab state — which is UI state, not a connection —
+    // persists here across view recreations.
     static var queryStores: [String: PostgresQueryTabsStore] = [:]
 }
 
@@ -36,8 +39,10 @@ struct MobileContentView: View {
 
     // Top-Level Active State Shared Per Profile
     @State private var selectedProfileId: String?
-    @State private var activeConnections: [String: String] = [:] // profileId -> connectionId
-    
+    // Connection + schema state comes from the shared manager; observing it
+    // keeps the layout in sync as connections open/close from any surface.
+    @ObservedObject private var connectionManager = PostgresConnectionManager.shared
+
     // Unified Object Explorer node selection bindings
     @State private var selectedNodeId: String? = nil
     @State private var selectedNode: PgSchemaNode? = nil
@@ -134,7 +139,7 @@ struct MobileContentView: View {
                         qStore.openRelationTab(
                             schema: schema,
                             name: name,
-                            relationKind: MobileStoreCache.schemaStores[profile.id]?
+                            relationKind: connectionManager.schemaStores[profile.id]?
                                 .relationDisplayKind(schema: schema, name: name)
                         )
                     case "routine":
@@ -172,12 +177,7 @@ struct MobileContentView: View {
                 // Tabbed SQL Query Workspace & Results
                 MobileProfileWorkspaceView(
                     profile: profile,
-                    connectionId: binding(forProfileId: profileId),
-                    schemaStore: schemaStore(forProfileId: profileId, connectionId: activeConnections[profileId]),
                     queryStore: queryStore(forProfileId: profileId),
-                    onConnectSuccess: { connId in
-                        activeConnections[profileId] = connId
-                    },
                     forceRegularMode: true
                 )
             } else {
@@ -217,12 +217,7 @@ struct MobileContentView: View {
                 if let profile = profileStore.profiles.first(where: { $0.id == profileId }) {
                     MobileProfileWorkspaceView(
                         profile: profile,
-                        connectionId: binding(forProfileId: profileId),
-                        schemaStore: schemaStore(forProfileId: profileId, connectionId: activeConnections[profileId]),
                         queryStore: queryStore(forProfileId: profileId),
-                        onConnectSuccess: { connId in
-                            activeConnections[profileId] = connId
-                        },
                         forceRegularMode: false
                     )
                 }
@@ -237,23 +232,6 @@ struct MobileContentView: View {
         } else {
             showingProUpgrade = true
         }
-    }
-    
-    private func binding(forProfileId profileId: String) -> Binding<String?> {
-        Binding(
-            get: { activeConnections[profileId] },
-            set: { activeConnections[profileId] = $0 }
-        )
-    }
-    
-    private func schemaStore(forProfileId profileId: String, connectionId: String?) -> PgSchemaStore? {
-        guard let connId = connectionId else { return nil }
-        if let existing = MobileStoreCache.schemaStores[profileId], existing.connectionId == connId {
-            return existing
-        }
-        let newStore = PgSchemaStore(connectionId: connId)
-        MobileStoreCache.schemaStores[profileId] = newStore
-        return newStore
     }
     
     private func queryStore(forProfileId profileId: String) -> PostgresQueryTabsStore {
@@ -520,20 +498,24 @@ extension View {
 // MARK: - Workspace Detail Workspace View
 struct MobileProfileWorkspaceView: View {
     let profile: PostgresProfile
-    @Binding var connectionId: String?
-    let schemaStore: PgSchemaStore?
     let queryStore: PostgresQueryTabsStore
-    var onConnectSuccess: (String) -> Void
     var forceRegularMode: Bool
-    
+
+    // Single source of truth for connection + schema state (shared with the
+    // Object Explorer sidebar and macOS). No local connection state here.
+    @ObservedObject private var connectionManager = PostgresConnectionManager.shared
+
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dismiss) private var dismiss
-    @State private var connectionError: String?
-    @State private var isConnecting = false
-    
+
     // Segment tab state for compact iOS screens
     @State private var compactTabSelected: Int = 1 // 0: Explorer, 1: Query, 2: Console
-    
+
+    private var connectionId: String? { connectionManager.activeConnections[profile.id] }
+    private var schemaStore: PgSchemaStore? { connectionManager.schemaStores[profile.id] }
+    private var isConnecting: Bool { connectionManager.isConnecting[profile.id] == true }
+    private var connectionError: String? { connectionManager.connectionErrors[profile.id] }
+
     var body: some View {
         ZStack {
             MidnightColors.primaryBackground.ignoresSafeArea()
@@ -552,7 +534,7 @@ struct MobileProfileWorkspaceView: View {
                         TabView(selection: $compactTabSelected) {
                             MobileSchemaBrowserView(
                                 profile: profile,
-                                connectionId: $connectionId,
+                                connectionId: connectionId,
                                 schemaStore: store,
                                 onOpenNodeTab: { node, details in
                                     let kind = details["kind"] ?? ""
@@ -601,7 +583,7 @@ struct MobileProfileWorkspaceView: View {
                     )
                 }
             } else {
-                Color.clear
+                disconnectedState
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -616,16 +598,61 @@ struct MobileProfileWorkspaceView: View {
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(action: { Task { await disconnect() } }) {
-                    Text("Disconnect")
-                        .font(MidnightMobileDesign.FontToken.captionStrong)
-                        .foregroundStyle(.red)
+                // Toggle with the live connection state: Disconnect while
+                // connected, Connect once closed. Hidden mid-connect.
+                if connectionId != nil {
+                    Button(action: { Task { await disconnect() } }) {
+                        Text("Disconnect")
+                            .font(MidnightMobileDesign.FontToken.captionStrong)
+                            .foregroundStyle(.red)
+                    }
+                } else if !isConnecting {
+                    Button(action: { Task { await connectIfNeeded() } }) {
+                        Text("Connect")
+                            .font(MidnightMobileDesign.FontToken.captionStrong)
+                            .foregroundStyle(MidnightColors.accentCyan)
+                    }
                 }
             }
         }
+        // Hold a connection claim while this workspace is on screen and release
+        // it when it goes away, so navigating off / switching profiles frees
+        // the pool once nothing else (e.g. the sidebar) still needs it.
         .task {
-            await connectIfNeeded()
+            await connectionManager.acquire(profile: profile)
         }
+        .onDisappear {
+            connectionManager.release(profileId: profile.id)
+        }
+    }
+
+    private var disconnectedState: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "bolt.horizontal.circle")
+                .font(.system(size: 48))
+                .foregroundStyle(MidnightColors.borderGray)
+            Text("Disconnected")
+                .font(MidnightMobileDesign.FontToken.headline)
+            Text("The session to \(profile.name) is closed.")
+                .font(MidnightMobileDesign.FontToken.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 30)
+
+            Button(action: {
+                Task { await connectIfNeeded() }
+            }) {
+                Text("Connect")
+                    .font(MidnightMobileDesign.FontToken.label)
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 10)
+                    .background(MidnightColors.accentCyan)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
     // Custom Segmented Pill Control with Premium aesthetics
@@ -709,7 +736,7 @@ struct MobileProfileWorkspaceView: View {
                 .buttonStyle(.plain)
                 
                 Button(action: {
-                    Task { await connectIfNeeded(force: true) }
+                    Task { await connectIfNeeded() }
                 }) {
                     Text("Retry")
                         .font(MidnightMobileDesign.FontToken.label)
@@ -726,42 +753,28 @@ struct MobileProfileWorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    // Database connection trigger
-    private func connectIfNeeded(force: Bool = false) async {
-        if !force && (connectionId != nil || isConnecting) { return }
-        isConnecting = true
-        connectionError = nil
-        PostgresConnectionStatusStore.shared.markConnecting(profileId: profile.id)
-        
-        do {
-            let id = try await BridgeManager.shared.pgConnect(profile: profile)
-            onConnectSuccess(id)
-            connectionId = id
-            
-            PostgresConnectionStatusStore.shared.markConnected(profileId: profile.id)
-            await PostgresProfileStore.shared.markConnected(profile)
-        } catch {
-            connectionError = error.localizedDescription
-            PostgresConnectionStatusStore.shared.markError(error.localizedDescription, profileId: profile.id)
-        }
-        isConnecting = false
+    // Connection lifecycle is owned entirely by the shared manager — the
+    // manager guards against duplicate connects, so the sidebar and this
+    // workspace connecting the same profile resolve to one pool + one
+    // schema store. `connectIfNeeded` already no-ops when connected, so a
+    // stale error simply retries (the manager clears the error on entry).
+    private func connectIfNeeded() async {
+        await connectionManager.connectIfNeeded(profile: profile)
     }
-    
+
     private func disconnect() async {
-        guard let id = connectionId else { return }
-        isConnecting = true
-        await BridgeManager.shared.pgDisconnect(connectionId: id)
-        connectionId = nil
-        PostgresConnectionStatusStore.shared.markDisconnected(profileId: profile.id)
-        isConnecting = false
-        dismiss()
+        // Releasing here flips the workspace to `disconnectedState` (Connect
+        // button) rather than dismissing — on iPad the workspace lives in the
+        // split-view detail pane where `dismiss()` is a no-op — and keeps the
+        // Object Explorer sidebar (same manager) in sync automatically.
+        await connectionManager.disconnect(profileId: profile.id)
     }
 }
 
 // MARK: - Schema Browser View
 struct MobileSchemaBrowserView: View {
     let profile: PostgresProfile
-    @Binding var connectionId: String?
+    let connectionId: String?
     @ObservedObject var schemaStore: PgSchemaStore
     var onOpenNodeTab: (PgSchemaNode, [String: String]) -> Void
     
@@ -1656,33 +1669,34 @@ struct MobileQueryWorkspaceView: View {
                     }
                 default:
                     // Editor Panel
-                    ZStack(alignment: .bottom) {
-                        VStack(spacing: 0) {
-                            TextEditor(text: Binding(
-                                get: { tab.sql },
-                                set: { store.setSQL($0, forTab: activeId) }
-                            ))
-                            .font(.system(size: 15, design: .monospaced))
-                            .padding(8)
-                            .background(Color.black.opacity(0.2))
-                            .keyboardType(.asciiCapable)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            
-                            // SQL quick assistants toolbar
-                            if showSQLToolbar {
-                                sqlQuickBar(tabId: activeId, currentSQL: tab.sql)
-                            }
+                    VStack(spacing: 0) {
+                        TextEditor(text: Binding(
+                            get: { tab.sql },
+                            set: { store.setSQL($0, forTab: activeId) }
+                        ))
+                        .font(.system(size: 15, design: .monospaced))
+                        .padding(8)
+                        .background(Color.black.opacity(0.2))
+                        .keyboardType(.asciiCapable)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+
+                        // SQL quick assistants toolbar
+                        if showSQLToolbar {
+                            sqlQuickBar(tabId: activeId, currentSQL: tab.sql)
                         }
-                        
-                        // Glassmorphic status / play / cancel pill
-                        floatingActionBar(tab: tab)
-                            .padding(.bottom, 12)
                     }
                     .frame(maxHeight: 280)
-                    
+
                     Divider().background(MidnightColors.borderGray)
-                    
+
+                    // Status + execute/cancel bar (also carries the
+                    // row-count metrics so the button never overlaps
+                    // the SQL editor or the snippet toolbar).
+                    resultsStatusBar(tab: tab)
+
+                    Divider().background(MidnightColors.borderGray)
+
                     // Collapsible results display pane
                     resultsDisplayPane(tab: tab)
                 }
@@ -1780,8 +1794,36 @@ struct MobileQueryWorkspaceView: View {
     }
     
     @ViewBuilder
-    private func floatingActionBar(tab: PostgresQueryTab) -> some View {
+    private func resultsStatusBar(tab: PostgresQueryTab) -> some View {
         HStack(spacing: 12) {
+            switch tab.execState {
+            case .idle:
+                Label("Ready to execute", systemImage: "tablecells")
+                    .foregroundStyle(.secondary)
+            case .running:
+                Label("Running query...", systemImage: "hourglass")
+                    .foregroundStyle(MidnightColors.accentCyan)
+            case .completed(let elapsed, _):
+                if let result = tab.lastResult {
+                    Label("\(result.rows.count) rows fetched", systemImage: "tablecells")
+                        .foregroundStyle(MidnightColors.accentCyan)
+                    Text(String(format: "%.0f ms", elapsed * 1000))
+                        .monospacedDigit()
+                        .foregroundStyle(MidnightColors.accentCyan)
+                } else {
+                    Label("Command executed", systemImage: "checkmark.circle")
+                        .foregroundStyle(MidnightColors.accentCyan)
+                }
+            case .failed:
+                Label("Query failed", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+            case .cancelled:
+                Label("Cancelled", systemImage: "stop.circle")
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
             switch tab.execState {
             case .running:
                 Button {
@@ -1799,9 +1841,9 @@ struct MobileQueryWorkspaceView: View {
                         .foregroundStyle(.red)
                         .font(MidnightMobileDesign.FontToken.captionStrong)
                         .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 6)
                         .background(Color.red.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
                 .buttonStyle(.plain)
             default:
@@ -1812,21 +1854,20 @@ struct MobileQueryWorkspaceView: View {
                         .foregroundStyle(.black)
                         .font(MidnightMobileDesign.FontToken.captionStrong)
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 6)
                         .background(MidnightColors.accentCyan)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
                 .buttonStyle(.plain)
                 .disabled(tab.sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(6)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(MidnightColors.borderGray, lineWidth: 1))
-        .shadow(radius: 8)
+        .font(MidnightMobileDesign.FontToken.captionStrong)
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .background(Color.black.opacity(0.3))
     }
-    
+
     @ViewBuilder
     private func resultsDisplayPane(tab: PostgresQueryTab) -> some View {
         ZStack {
@@ -1849,17 +1890,24 @@ struct MobileQueryWorkspaceView: View {
                         .font(MidnightMobileDesign.FontToken.caption)
                         .foregroundStyle(.secondary)
                 }
-            case .completed(let elapsed, _):
+            case .completed:
                 if let result = tab.lastResult {
                     MobileResultsGridView(
                         columns: result.columns,
                         rows: result.rows,
-                        elapsed: elapsed,
                         hasMore: tab.hasMore,
+                        isLoadingMore: tab.isLoadingMore,
                         pendingEdits: tab.pendingEdits,
                         onLoadMore: {
                             loadMoreRows(tab: tab)
-                        }
+                        },
+                        browse: tab.browse,
+                        onGoToPage: tab.browse != nil
+                            ? { page in goToBrowsePage(page, tab: tab) }
+                            : nil,
+                        onCycleSort: tab.browse != nil
+                            ? { column in cycleBrowseSort(column: column, tab: tab) }
+                            : nil
                     )
                 } else {
                     Text("Command executed successfully. No rows returned.")
@@ -1923,15 +1971,24 @@ struct MobileQueryWorkspaceView: View {
         guard let connId = connectionId else { return }
         let trimmed = tab.sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        
+
+        // A browse tab whose editor no longer matches its generated
+        // SELECT has been taken over by hand-written SQL — drop the
+        // pager so the page/sort controls can't re-run stale browse
+        // state over the user's own query. Mirrors the macOS `run`.
+        if let browse = tab.browse,
+           trimmed != browse.sql().trimmingCharacters(in: .whitespacesAndNewlines) {
+            store.setBrowse(nil, forTab: tab.id)
+        }
+
         runTask?.cancel()
         let started = Date()
         store.setExecState(.running(startedAt: started), forTab: tab.id)
-        
+
         let tabId = tab.id
         let sessionId = tab.id.uuidString
         let pageSize = store.pageSize
-        
+
         runTask = Task { @MainActor in
             do {
                 let result = try await BridgeManager.shared.pgExecute(
@@ -1945,9 +2002,15 @@ struct MobileQueryWorkspaceView: View {
                     store.setExecState(.cancelled(elapsed: elapsed), forTab: tabId)
                     return
                 }
-                store.setResult(result, forTab: tabId)
+                // Browse tabs derive `hasNextPage` from the page fill and
+                // page via LIMIT/OFFSET re-runs — no cursor "Load more".
+                if store.tabs.first(where: { $0.id == tabId })?.browse != nil {
+                    store.setBrowseResult(result, forTab: tabId)
+                } else {
+                    store.setResult(result, forTab: tabId)
+                }
                 store.setExecState(.completed(elapsed: elapsed, atTime: Date()), forTab: tabId)
-                
+
                 // Save to execution logs
                 let rowsReturned = result.columns.isEmpty ? nil : result.rows.count
                 PostgresHistoryStore.shared.record(
@@ -1961,6 +2024,30 @@ struct MobileQueryWorkspaceView: View {
                 store.setExecState(.failed(message: error.localizedDescription, elapsed: elapsed), forTab: tabId)
             }
         }
+    }
+
+    // MARK: - Browse paging (server-side sort + pagination)
+
+    /// Re-run the browse SELECT with new state (page or sort change).
+    /// The regenerated SQL replaces the editor text — same
+    /// see-what-runs convention as the generated tab. Mirrors macOS
+    /// `applyBrowse`.
+    private func applyBrowse(_ newBrowse: PostgresBrowseState, tabId: UUID) {
+        store.setBrowse(newBrowse, forTab: tabId)
+        store.setSQL(newBrowse.sql(), forTab: tabId)
+        if let updated = store.tabs.first(where: { $0.id == tabId }) {
+            executeSQL(tab: updated)
+        }
+    }
+
+    private func goToBrowsePage(_ page: Int, tab: PostgresQueryTab) {
+        guard let browse = tab.browse else { return }
+        applyBrowse(browse.movingToPage(page), tabId: tab.id)
+    }
+
+    private func cycleBrowseSort(column: String, tab: PostgresQueryTab) {
+        guard let browse = tab.browse else { return }
+        applyBrowse(browse.cyclingSort(by: column), tabId: tab.id)
     }
     
     private func loadMoreRows(tab: PostgresQueryTab) {
@@ -2021,12 +2108,16 @@ struct MobileResultsGridCellView: View {
 struct MobileResultsGridRowView: View {
     let rIdx: Int
     let row: FfiPgRow
+    /// Column indices to render, in order — excludes hidden `__pg_`
+    /// columns so the cell index still maps to the real result column
+    /// (pending-edit keys stay stable).
+    let visibleColumns: [Int]
     let pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit]
-    
+
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(Array<Int>(0..<row.cells.count), id: \.self) { cIdx in
-                MobileResultsGridCellView(cell: row.cells[cIdx], rIdx: rIdx, cIdx: cIdx, pendingEdits: pendingEdits)
+            ForEach(visibleColumns, id: \.self) { cIdx in
+                MobileResultsGridCellView(cell: cIdx < row.cells.count ? row.cells[cIdx] : nil, rIdx: rIdx, cIdx: cIdx, pendingEdits: pendingEdits)
             }
         }
     }
@@ -2036,28 +2127,72 @@ struct MobileResultsGridRowView: View {
 struct MobileResultsGridView: View {
     let columns: [FfiPgColumn]
     let rows: [FfiPgRow]
-    let elapsed: TimeInterval
     let hasMore: Bool
+    var isLoadingMore: Bool = false
     let pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit]
     var onLoadMore: () -> Void
-    
+    /// Server-side sort + pagination state for relation-browse tabs.
+    /// `nil` for generic SQL tabs, which keep local sort + cursor
+    /// "Load more". When set, the footer becomes a first/prev/next
+    /// pager and header clicks re-run the SELECT with a new ORDER BY.
+    var browse: PostgresBrowseState? = nil
+    /// Jump to a 0-based page (browse tabs only).
+    var onGoToPage: ((Int) -> Void)? = nil
+    /// Cycle the sort on a column by name (browse tabs only).
+    var onCycleSort: ((String) -> Void)? = nil
+
+    /// Result-column index the grid is sorted by, or `nil` for none.
+    /// Used only for generic SQL tabs; browse tabs sort server-side.
+    @State private var sortColumn: Int?
+    @State private var sortAscending: Bool = true
+
+    /// Column indices to display — hides internal `__pg_` columns
+    /// (e.g. the `ctid AS __pg_rowid__` row identity on browse tabs),
+    /// matching the macOS grid.
+    private var visibleColumns: [Int] {
+        columns.indices.filter { !columns[$0].name.hasPrefix("__pg_") }
+    }
+
+    /// Original row indices in display order (after applying the local sort).
+    /// Falls back to natural order when no sort is active or when the tab
+    /// sorts server-side (browse). The original index is preserved so
+    /// pending-edit keys and row striping stay stable.
+    private var displayOrder: [Int] {
+        let base = Array(0..<rows.count)
+        guard browse == nil, let col = sortColumn, col < columns.count else { return base }
+        return base.sorted { a, b in
+            let va = col < rows[a].cells.count ? rows[a].cells[col] : nil
+            let vb = col < rows[b].cells.count ? rows[b].cells[col] : nil
+            let order = Self.compareCells(va, vb)
+            return sortAscending ? order == .orderedAscending : order == .orderedDescending
+        }
+    }
+
+    /// NULLs sort as largest (Postgres default); non-nulls use a locale- and
+    /// numeric-aware comparison so `img9` precedes `img10`. Mirrors the macOS
+    /// results grid (`PostgresResultsTableCoordinator.compareCells`).
+    static func compareCells(_ a: String?, _ b: String?) -> ComparisonResult {
+        switch (a, b) {
+        case (nil, nil): return .orderedSame
+        case (nil, _): return .orderedDescending
+        case (_, nil): return .orderedAscending
+        case let (.some(x), .some(y)): return x.localizedStandardCompare(y)
+        }
+    }
+
+    /// Cycle a column through ascending → descending → unsorted, matching the
+    /// macOS header-click behavior.
+    private func toggleSort(_ col: Int) {
+        if sortColumn == col {
+            if sortAscending { sortAscending = false } else { sortColumn = nil }
+        } else {
+            sortColumn = col
+            sortAscending = true
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            // Metrics Banner
-            HStack {
-                Label("\(rows.count) rows fetched", systemImage: "tablecells")
-                Spacer()
-                Text(String(format: "%.0f ms", elapsed * 1000))
-                    .monospacedDigit()
-            }
-            .font(MidnightMobileDesign.FontToken.captionStrong)
-            .foregroundStyle(MidnightColors.accentCyan)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .background(Color.black.opacity(0.3))
-            
-            Divider().background(MidnightColors.borderGray)
-            
             // Grid Canvas
             if rows.isEmpty {
                 VStack {
@@ -2069,50 +2204,144 @@ struct MobileResultsGridView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView([.horizontal, .vertical]) {
+                // Outer horizontal scroll carries both header and body so they
+                // stay column-aligned; the inner vertical scroll only moves the
+                // rows, keeping the header pinned to the top.
+                ScrollView(.horizontal, showsIndicators: true) {
                     VStack(alignment: .leading, spacing: 0) {
-                        // Header Row
-                        HStack(spacing: 0) {
-                            ForEach(columns, id: \.name) { col in
-                                Text(col.name)
-                                    .font(MidnightMobileDesign.FontToken.captionStrong)
-                                    .foregroundStyle(MidnightColors.accentCyan)
-                                    .lineLimit(1)
-                                    .frame(width: 140, alignment: .leading)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 8)
-                                    .background(MidnightColors.cardBackground)
-                                    .border(MidnightColors.borderGray, width: 0.5)
-                            }
-                        }
-                        
-                        // Data Rows
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(0..<rows.count, id: \.self) { rIdx in
-                                MobileResultsGridRowView(rIdx: rIdx, row: rows[rIdx], pendingEdits: pendingEdits)
-                            }
-                            
-                            // Load more indicator
-                            if hasMore {
-                                Button(action: onLoadMore) {
-                                    HStack {
-                                        Spacer()
-                                        Label("Load More Pages", systemImage: "arrow.down.circle")
-                                            .font(MidnightMobileDesign.FontToken.captionStrong)
-                                            .foregroundStyle(MidnightColors.accentCyan)
-                                            .padding()
-                                        Spacer()
-                                    }
+                        headerRow
+                        ScrollView(.vertical) {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(displayOrder, id: \.self) { rIdx in
+                                    MobileResultsGridRowView(rIdx: rIdx, row: rows[rIdx], visibleColumns: visibleColumns, pendingEdits: pendingEdits)
                                 }
-                                .buttonStyle(.plain)
-                                .frame(height: 50)
+
+                                // Cursor "Load more" lives in-scroll for
+                                // generic SQL tabs; browse tabs page via
+                                // the footer pager below instead.
+                                if browse == nil, hasMore {
+                                    Button(action: onLoadMore) {
+                                        HStack {
+                                            Spacer()
+                                            Label("Load More Pages", systemImage: "arrow.down.circle")
+                                                .font(MidnightMobileDesign.FontToken.captionStrong)
+                                                .foregroundStyle(MidnightColors.accentCyan)
+                                                .padding()
+                                            Spacer()
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .frame(height: 50)
+                                }
                             }
                         }
                     }
                 }
             }
+
+            // Paging footer (browse tabs) — first / prev / next with the
+            // current row range, mirroring the macOS browse pager.
+            if let browse, let onGoToPage {
+                Divider().background(MidnightColors.borderGray)
+                browsePagerFooter(browse: browse, onGoToPage: onGoToPage)
+            }
         }
         .background(MidnightColors.primaryBackground)
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: 0) {
+            ForEach(visibleColumns, id: \.self) { idx in
+                let col = columns[idx]
+                let sortedAscending: Bool? = {
+                    if let browse {
+                        return browse.sortColumn == col.name ? browse.sortAscending : nil
+                    }
+                    return sortColumn == idx ? sortAscending : nil
+                }()
+                Button {
+                    if let onCycleSort {
+                        onCycleSort(col.name)
+                    } else {
+                        toggleSort(idx)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(col.name)
+                            .font(MidnightMobileDesign.FontToken.captionStrong)
+                            .foregroundStyle(MidnightColors.accentCyan)
+                            .lineLimit(1)
+                        if let ascending = sortedAscending {
+                            Image(systemName: ascending ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(MidnightColors.accentCyan)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(width: 140, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(MidnightColors.cardBackground)
+                    .border(MidnightColors.borderGray, width: 0.5)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// First / previous / next page controls plus the current row range.
+    /// Each tap re-runs the browse SELECT at a new OFFSET (the query
+    /// workspace owns the re-run), so the grid never accumulates rows.
+    @ViewBuilder
+    private func browsePagerFooter(browse: PostgresBrowseState, onGoToPage: @escaping (Int) -> Void) -> some View {
+        let first = browse.firstRowNumber
+        let atStart = browse.page == 0
+        HStack(spacing: 14) {
+            Button {
+                onGoToPage(0)
+            } label: {
+                Image(systemName: "chevron.left.2")
+                    .foregroundStyle(atStart ? Color.secondary : MidnightColors.accentCyan)
+            }
+            .disabled(atStart)
+
+            Button {
+                onGoToPage(browse.page - 1)
+            } label: {
+                Image(systemName: "chevron.left")
+                    .foregroundStyle(atStart ? Color.secondary : MidnightColors.accentCyan)
+            }
+            .disabled(atStart)
+
+            Text(rows.isEmpty
+                 ? "Page \(browse.page + 1) · no rows"
+                 : "Page \(browse.page + 1) · rows \(first)–\(first + rows.count - 1)")
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            Button {
+                onGoToPage(browse.page + 1)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(browse.hasNextPage ? MidnightColors.accentCyan : Color.secondary)
+            }
+            .disabled(!browse.hasNextPage)
+
+            if let sort = browse.sortColumn {
+                Divider().frame(height: 12)
+                Label("\(sort) \(browse.sortAscending ? "asc" : "desc")",
+                      systemImage: "arrow.up.arrow.down")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(MidnightColors.accentCyan)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.3))
     }
 }
 
