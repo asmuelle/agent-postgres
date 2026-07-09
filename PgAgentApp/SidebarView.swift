@@ -27,6 +27,7 @@ struct SidebarView: View {
     @State var search = ""
     @State private var editingPostgresProfile: PostgresEditTarget?
     @State private var detailsExpanded = true
+    @State private var connectionAcquireTasks: [String: Task<Void, Never>] = [:]
 
     // First-run local detection (roadmap 2.1): only probed while the
     // profile list is empty; a hit offers a one-click localhost profile.
@@ -137,6 +138,14 @@ struct SidebarView: View {
                     activeSchemaStore = PostgresConnectionManager.shared.schemaStores[profileId]
                 }
             }
+        }
+        .onDisappear {
+            connectionAcquireTasks.values.forEach { $0.cancel() }
+            connectionAcquireTasks.removeAll()
+            for profileId in expandedServers {
+                connectionManager.release(profileId: profileId)
+            }
+            expandedServers.removeAll()
         }
     }
 
@@ -255,14 +264,7 @@ struct SidebarView: View {
             isExpanded: Binding(
                 get: { isExpanded },
                 set: { expanded in
-                    if expanded {
-                        expandedServers.insert(profile.id)
-                        Task {
-                            await connectionManager.connectIfNeeded(profile: profile)
-                        }
-                    } else {
-                        expandedServers.remove(profile.id)
-                    }
+                    setServerExpanded(profile, expanded: expanded)
                 }
             )
         ) {
@@ -320,9 +322,7 @@ struct SidebarView: View {
                 }
                 .contextMenu {
                     Button("Connect") {
-                        Task {
-                            await connectionManager.connectIfNeeded(profile: profile)
-                        }
+                        setServerExpanded(profile, expanded: true)
                     }
                     .disabled(connectionManager.activeConnections[profile.id] != nil || connectionManager.isConnecting[profile.id] == true)
 
@@ -347,6 +347,19 @@ struct SidebarView: View {
                     }
                 }
                 .tag("server:\(profile.id)")
+        }
+    }
+
+    private func setServerExpanded(_ profile: PostgresProfile, expanded: Bool) {
+        if expanded {
+            guard expandedServers.insert(profile.id).inserted else { return }
+            connectionAcquireTasks[profile.id] = Task { @MainActor in
+                await connectionManager.acquire(profile: profile)
+            }
+        } else {
+            guard expandedServers.remove(profile.id) != nil else { return }
+            connectionAcquireTasks.removeValue(forKey: profile.id)?.cancel()
+            connectionManager.release(profileId: profile.id)
         }
     }
 

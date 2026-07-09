@@ -95,9 +95,6 @@ struct ContentView: View {
             selectProfile: { profile in
                 selectedPostgresProfileId = profile.id
                 selectedNode = nil
-                Task {
-                    await PostgresConnectionManager.shared.connectIfNeeded(profile: profile)
-                }
             }
         )
         isCommandPaletteVisible = true

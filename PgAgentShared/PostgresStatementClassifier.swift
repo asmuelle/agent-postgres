@@ -15,8 +15,8 @@ import Foundation
 //     column literally named `update` false-blocks. Acceptable.
 //   * `SELECT ... FOR UPDATE` is blocked (row locks are a write-adjacent
 //     side effect) via the UPDATE token. Acceptable.
-//   * `EXPLAIN ANALYZE <write>` is blocked by the write keyword itself, so
-//     plain `EXPLAIN` / `EXPLAIN ANALYZE SELECT` stays allowed.
+//   * `EXPLAIN ANALYZE` is blocked because ANALYZE executes the explained
+//     statement, even when the statement starts with SELECT.
 //   * Multi-statement scripts: the sanitized text is split on top-level
 //     semicolons and EVERY statement must classify read-only. Scripts that
 //     lead with BEGIN/SET are blocked (not in the allowed leading set) —
@@ -43,6 +43,19 @@ enum PostgresStatementClassifier {
         "CREATE", "ALTER", "DROP", "TRUNCATE",
         "GRANT", "REVOKE", "VACUUM", "REINDEX", "CLUSTER", "REFRESH",
         "CALL", "DO", "COPY", "LOCK", "IMPORT", "COMMENT", "SECURITY",
+        "ANALYZE",
+    ]
+
+    /// Built-in functions with observable side effects. User-defined
+    /// functions are protected by the server-side `default_transaction_read_only`
+    /// setting applied by the bridge; this list closes the obvious local false
+    /// allows before a statement reaches the server.
+    private static let sideEffectingFunctions: Set<String> = [
+        "NEXTVAL", "SETVAL", "SET_CONFIG", "PG_NOTIFY",
+        "PG_ADVISORY_LOCK", "PG_ADVISORY_XACT_LOCK", "PG_ADVISORY_UNLOCK",
+        "PG_ADVISORY_UNLOCK_ALL", "PG_CANCEL_BACKEND", "PG_TERMINATE_BACKEND",
+        "PG_RELOAD_CONF", "PG_ROTATE_LOGFILE", "LO_CREATE", "LO_UNLINK",
+        "DBLINK", "DBLINK_EXEC",
     ]
 
     /// `true` when every top-level statement in `sql` is read-only under
@@ -53,7 +66,9 @@ enum PostgresStatementClassifier {
 
         // Any write keyword anywhere (including CTE bodies like
         // `WITH x AS (DELETE ...) SELECT ...`) fails the whole text.
-        for token in tokenize(sanitized) where writeKeywords.contains(token) {
+        for token in tokenize(sanitized)
+        where writeKeywords.contains(token) || sideEffectingFunctions.contains(token)
+        {
             return false
         }
 
@@ -71,6 +86,22 @@ enum PostgresStatementClassifier {
             else { return false }
         }
         return true
+    }
+
+    /// Redact literal and comment contents before persisting SQL in the audit
+    /// log. The returned SQL keeps its statement shape and keywords while
+    /// removing string literals, quoted identifiers, dollar-quoted bodies, and
+    /// comments that may contain credentials or personal data.
+    static func redactedForAudit(_ sql: String) -> String {
+        let withoutQuotedData = stripLiteralsAndComments(sql)
+        // Numeric constants can also carry identifiers, account numbers, or
+        // other personal data. Keep the SQL shape while replacing standalone
+        // numeric tokens; digits embedded in identifiers remain untouched.
+        return withoutQuotedData.replacingOccurrences(
+            of: #"(?<![A-Za-z_])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"#,
+            with: "?",
+            options: .regularExpression
+        )
     }
 
     // MARK: - Lexing helpers

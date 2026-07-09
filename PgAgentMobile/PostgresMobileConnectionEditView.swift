@@ -15,7 +15,7 @@ struct PostgresMobileConnectionEditView: View {
     @State private var password = ""
     @State private var savePasswordToKeychain = true
     @State private var syncPasswordViaICloud = false
-    @State private var tls: PostgresTlsMode = .prefer
+    @State private var tls: PostgresTlsMode = .require
     @State private var notes = ""
     @State private var folderPath = ""
     @State private var errorText: String?
@@ -670,14 +670,20 @@ struct PostgresMobileConnectionEditView: View {
             syncPassword: savePasswordToKeychain && syncPasswordViaICloud
         )
 
-        KeychainManager.shared.persistPostgresPassword(
+        guard KeychainManager.shared.persistPostgresPassword(
             account: updatedProfile.keychainAccount,
             password: password,
             saveToKeychain: savePasswordToKeychain,
             synchronizable: updatedProfile.syncPassword
-        )
+        ) else {
+            errorText = "Couldn't save the password to the Keychain. The profile was not saved."
+            return
+        }
 
-        persistTunnelSecrets(tunnel)
+        guard persistTunnelSecrets(tunnel) else {
+            errorText = "Couldn't save the SSH tunnel secret to the Keychain. The profile was not saved."
+            return
+        }
 
         onSave(updatedProfile)
         dismiss()
@@ -724,7 +730,8 @@ struct PostgresMobileConnectionEditView: View {
     /// Persist the tunnel's SSH secrets to the Keychain and evict any that the
     /// user orphaned by disabling the tunnel, switching auth, or changing the
     /// SSH endpoint (which moves the Keychain account).
-    private func persistTunnelSecrets(_ tunnel: PostgresTunnel?) {
+    private func persistTunnelSecrets(_ tunnel: PostgresTunnel?) -> Bool {
+        var success = true
         let newAccount = tunnel?.sshKeychainAccount
 
         if let old = originalSshAccount, old != newAccount {
@@ -736,35 +743,41 @@ struct PostgresMobileConnectionEditView: View {
                sshPrivateKey.isEmpty, hasStoredKey,
                let existingPem = MobileSSHKeyStore.load(account: old)
             {
-                MobileSSHKeyStore.save(pem: existingPem, account: newAccount)
+                guard MobileSSHKeyStore.save(pem: existingPem, account: newAccount) else {
+                    return false
+                }
             }
-            KeychainManager.shared.deletePassword(kind: .sshPassword, account: old)
-            KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: old)
-            MobileSSHKeyStore.delete(account: old)
+            guard KeychainManager.shared.deletePassword(kind: .sshPassword, account: old),
+                  KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: old),
+                  MobileSSHKeyStore.delete(account: old)
+            else {
+                return false
+            }
         }
 
-        guard let tunnel, let account = tunnel.sshKeychainAccount else { return }
+        guard let tunnel, let account = tunnel.sshKeychainAccount else { return success }
 
         switch tunnel.sshAuth ?? .password {
         case .password:
             if !sshPassword.isEmpty {
-                KeychainManager.shared.savePassword(kind: .sshPassword, account: account, secret: sshPassword)
+                success = KeychainManager.shared.savePassword(kind: .sshPassword, account: account, secret: sshPassword) && success
             }
             // Drop any key material left from a prior private-key config.
-            KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account)
-            MobileSSHKeyStore.delete(account: account)
+            success = KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account) && success
+            success = MobileSSHKeyStore.delete(account: account) && success
         case .privateKey:
             if !sshPrivateKey.isEmpty {
-                MobileSSHKeyStore.save(pem: sshPrivateKey, account: account)
+                success = MobileSSHKeyStore.save(pem: sshPrivateKey, account: account) && success
             }
             if sshKeyPassphrase.isEmpty {
-                KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account)
+                success = KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account) && success
             } else {
-                KeychainManager.shared.savePassword(kind: .sshKeyPassphrase, account: account, secret: sshKeyPassphrase)
+                success = KeychainManager.shared.savePassword(kind: .sshKeyPassphrase, account: account, secret: sshKeyPassphrase) && success
             }
             // Drop any password left from a prior password config.
-            KeychainManager.shared.deletePassword(kind: .sshPassword, account: account)
+            success = KeychainManager.shared.deletePassword(kind: .sshPassword, account: account) && success
         }
+        return success
     }
 }
 

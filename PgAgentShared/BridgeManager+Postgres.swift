@@ -285,22 +285,32 @@ extension BridgeManager {
         sql: String,
         pageSize: UInt32
     ) async throws -> FfiPgExecutionResult {
+        let audit = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
         let isWrite = !PostgresStatementClassifier.isReadOnly(sql)
-        let audit = isWrite
-            ? PostgresConnectionAuditRegistry.shared.context(for: connectionId)
-            : nil
         if isWrite {
             try await Self.throwIfReadOnly(
                 connectionId: connectionId,
                 auditing: audit, action: .execute, statement: sql
             )
         }
+        // Keep the server-side default aligned with the live profile on every
+        // leased session. This protects against side-effecting SELECT
+        // functions and user-defined functions that a lexical classifier
+        // cannot prove safe. The core's smart multi-statement path executes
+        // this preamble before the user's statement on the same wire.
+        let effectiveSQL: String
+        if let audit {
+            let readOnly = await Self.liveReadOnlyState(for: audit)
+            effectiveSQL = "SET default_transaction_read_only = \(readOnly ? "on" : "off");\n\(sql)"
+        } else {
+            effectiveSQL = sql
+        }
         do {
             let result = try await pgWrapping {
                 try rshellPgExecute(
                     connectionId: connectionId,
                     sessionId: sessionId,
-                    sql: sql,
+                    sql: effectiveSQL,
                     pageSize: pageSize
                 )
             }
@@ -564,30 +574,42 @@ extension BridgeManager {
     /// profiles: BEGIN/COMMIT around SELECTs is harmless, and any write
     /// inside the transaction is refused per-statement by `pgExecute`.
     func pgBegin(connectionId: String, sessionId: String) async throws {
-        try await auditedTransaction(connectionId: connectionId, statement: "BEGIN") {
+        try await auditedTransaction(connectionId: connectionId, sessionId: sessionId, statement: "BEGIN") {
             try rshellPgBegin(connectionId: connectionId, sessionId: sessionId)
         }
     }
 
     func pgCommit(connectionId: String, sessionId: String) async throws {
-        try await auditedTransaction(connectionId: connectionId, statement: "COMMIT") {
+        try await auditedTransaction(connectionId: connectionId, sessionId: sessionId, statement: "COMMIT") {
             try rshellPgCommit(connectionId: connectionId, sessionId: sessionId)
         }
     }
 
     func pgRollback(connectionId: String, sessionId: String) async throws {
-        try await auditedTransaction(connectionId: connectionId, statement: "ROLLBACK") {
+        try await auditedTransaction(connectionId: connectionId, sessionId: sessionId, statement: "ROLLBACK") {
             try rshellPgRollback(connectionId: connectionId, sessionId: sessionId)
         }
     }
 
     private func auditedTransaction(
         connectionId: String,
+        sessionId: String,
         statement: String,
         _ work: @escaping () throws -> Void
     ) async throws {
         let audit = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
         do {
+            if statement == "BEGIN", let audit {
+                let readOnly = await Self.liveReadOnlyState(for: audit)
+                _ = try await pgWrapping {
+                    try rshellPgExecute(
+                        connectionId: connectionId,
+                        sessionId: sessionId,
+                        sql: "SET default_transaction_read_only = \(readOnly ? "on" : "off")",
+                        pageSize: 1
+                    )
+                }
+            }
             try await pgWrapping(work)
             Self.audit(audit, action: .transaction, statement: statement,
                        error: nil, rowsAffected: nil)
@@ -618,14 +640,20 @@ extension BridgeManager {
     ) async throws {
         guard let ctx = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
         else { return }
-        let isReadOnly = await MainActor.run {
-            PostgresProfileStore.shared.profile(withId: ctx.profileId)?.isReadOnly
-                ?? ctx.isReadOnlyAtConnect
-        }
+        let isReadOnly = await Self.liveReadOnlyState(for: ctx)
         if isReadOnly {
             Self.audit(audit ?? ctx, action: action, statement: statement,
                        error: "blocked: connection is read-only", rowsAffected: nil)
             throw PostgresBridgeError.readOnlyConnection
+        }
+    }
+
+    private static func liveReadOnlyState(
+        for context: PostgresConnectionAuditContext
+    ) async -> Bool {
+        await MainActor.run {
+            PostgresProfileStore.shared.profile(withId: context.profileId)?.isReadOnly
+                ?? context.isReadOnlyAtConnect
         }
     }
 

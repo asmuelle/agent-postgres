@@ -71,6 +71,8 @@ struct MobileInstanceLocksView: View {
             }
         }
         .task {
+            await connectionManager.acquire(profile: profile)
+            defer { connectionManager.release(profileId: profile.id) }
             while !Task.isCancelled {
                 // Pause the auto-poll while verification owns the refresh
                 // cadence, so the banner verdict reflects its own re-polls.
@@ -197,7 +199,6 @@ struct MobileInstanceLocksView: View {
     // MARK: - Data
 
     private func refresh() async {
-        await connectionManager.connectIfNeeded(profile: profile)
         guard let connectionId else { return }
         do {
             let locks = try await BridgeManager.shared.pgListLocks(connectionId: connectionId)

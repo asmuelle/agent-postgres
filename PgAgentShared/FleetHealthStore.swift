@@ -50,36 +50,22 @@ final class FleetHealthStore: ObservableObject {
     }
 
     private func refreshOne(profile: PostgresProfile) async {
-        // Reuse a connection an interactive surface already owns; otherwise
-        // open a short-lived probe we tear down before returning. Monitoring
-        // must never accumulate connections across the whole fleet — that was
-        // the dominant cause of connection exhaustion.
-        let existing = connectionManager.activeConnections[profile.id]
-        let isProbe = existing == nil
-        let connectionId: String
-        if let existing {
-            connectionId = existing
-        } else {
-            do {
-                connectionId = try await BridgeManager.shared.pgConnect(profile: profile)
-            } catch {
-                health[profile.id] = FleetInstanceHealth(
-                    profileId: profile.id,
-                    reachable: false,
-                    activeBackends: 0,
-                    longRunningCount: 0,
-                    blockedLockCount: 0,
-                    errorMessage: error.localizedDescription,
-                    lastUpdated: Date()
-                )
-                return
-            }
-        }
-        // Close only what we opened; leave interactive connections alone.
-        defer {
-            if isProbe {
-                Task { await BridgeManager.shared.pgDisconnect(connectionId: connectionId) }
-            }
+        // Acquire through the shared manager so a fleet probe cannot race an
+        // interactive connect or accidentally disconnect its connection.
+        await connectionManager.acquire(profile: profile)
+        defer { connectionManager.release(profileId: profile.id) }
+
+        guard let connectionId = connectionManager.activeConnections[profile.id] else {
+            health[profile.id] = FleetInstanceHealth(
+                profileId: profile.id,
+                reachable: false,
+                activeBackends: 0,
+                longRunningCount: 0,
+                blockedLockCount: 0,
+                errorMessage: connectionManager.connectionErrors[profile.id] ?? "Not connected",
+                lastUpdated: Date()
+            )
+            return
         }
 
         do {

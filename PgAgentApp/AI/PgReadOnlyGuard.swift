@@ -58,6 +58,13 @@ enum PgReadOnlyGuard {
         "MOVE", "CLOSE", "LISTEN", "NOTIFY", "UNLISTEN", "CHECKPOINT",
         "DISCARD", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE",
         "START", "END", "ATTACH", "DETACH",
+        // Known side-effecting functions; arbitrary user-defined functions
+        // are additionally contained by the server-side read-only setting.
+        "NEXTVAL", "SETVAL", "SET_CONFIG", "PG_NOTIFY",
+        "PG_ADVISORY_LOCK", "PG_ADVISORY_XACT_LOCK", "PG_ADVISORY_UNLOCK",
+        "PG_ADVISORY_UNLOCK_ALL", "PG_CANCEL_BACKEND", "PG_TERMINATE_BACKEND",
+        "PG_RELOAD_CONF", "PG_ROTATE_LOGFILE", "LO_CREATE", "LO_UNLINK",
+        "DBLINK", "DBLINK_EXEC",
     ]
 
     /// Returns the trimmed statement if it is a single read-only statement;

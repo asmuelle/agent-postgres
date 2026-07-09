@@ -23,7 +23,7 @@ struct PostgresConnectionEditView: View {
     @State private var password: String = ""
     @State private var savePasswordToKeychain: Bool = true
     @State private var syncPasswordViaICloud: Bool = false
-    @State private var tls: PostgresTlsMode = .prefer
+    @State private var tls: PostgresTlsMode = .require
     @State private var applicationName: String = "mc-ssh"
     @State private var color: String? = nil
     @State private var environment: PostgresEnvironment = .unspecified
@@ -436,12 +436,15 @@ struct PostgresConnectionEditView: View {
             syncPassword: savePasswordToKeychain && syncPasswordViaICloud
         )
 
-        KeychainManager.shared.persistPostgresPassword(
+        guard KeychainManager.shared.persistPostgresPassword(
             account: profile.keychainAccount,
             password: password,
             saveToKeychain: savePasswordToKeychain,
             synchronizable: profile.syncPassword
-        )
+        ) else {
+            saveError = "Couldn't save the password to the Keychain. The profile was not saved."
+            return
+        }
 
         store.saveOrUpdate(profile)
         logger.log("Saved Postgres profile \(profile.id, privacy: .public)")

@@ -211,11 +211,9 @@ struct PostgresLocalConfigImportView: View {
         var imported = 0
         for candidate in candidates
         where selectedIds.contains(candidate.id) && !candidate.alreadyExists {
-            // No explicit sslmode: default to the app's secure `.require`,
-            // except for loopback hosts where local servers usually run
-            // with ssl=off and the traffic never leaves the machine.
-            let isLoopback = candidate.host == "localhost"
-                || candidate.host == "127.0.0.1" || candidate.host == "::1"
+            // No explicit sslmode: default to the app's secure `.require`.
+            // Users with a deliberately plaintext local server can still opt
+            // down explicitly in the connection editor.
             let profile = PostgresProfile(
                 name: candidate.name,
                 host: candidate.host,
@@ -223,7 +221,7 @@ struct PostgresLocalConfigImportView: View {
                 database: candidate.database,
                 user: candidate.user,
                 auth: .keychain,
-                tls: candidate.tls ?? (isLoopback ? .prefer : .require)
+                tls: candidate.tls ?? .require
             )
             if let password = candidate.password, !password.isEmpty {
                 KeychainManager.shared.savePassword(

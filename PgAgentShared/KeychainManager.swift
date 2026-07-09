@@ -180,19 +180,21 @@ class KeychainManager {
     /// honouring the editor's "save to keychain" + "sync via iCloud" toggles.
     /// Shared by both platforms' connection editors so this three-way branch
     /// (write / migrate-in-place / delete) can't drift between them.
+    @discardableResult
     func persistPostgresPassword(
         account: String,
         password: String,
         saveToKeychain: Bool,
         synchronizable: Bool
-    ) {
+    ) -> Bool {
         if saveToKeychain && !password.isEmpty {
-            savePassword(kind: .postgresPassword, account: account, secret: password, synchronizable: synchronizable)
+            return savePassword(kind: .postgresPassword, account: account, secret: password, synchronizable: synchronizable)
         } else if saveToKeychain {
             // No new password entered — migrate whatever already exists.
-            setPasswordSynchronizable(kind: .postgresPassword, account: account, synchronizable: synchronizable)
+            guard hasPassword(kind: .postgresPassword, account: account) else { return true }
+            return setPasswordSynchronizable(kind: .postgresPassword, account: account, synchronizable: synchronizable)
         } else {
-            deletePassword(kind: .postgresPassword, account: account)
+            return deletePassword(kind: .postgresPassword, account: account)
         }
     }
 

@@ -39,10 +39,15 @@ struct MobileInstanceActivityView: View {
             }
         }
         .task {
+            await connectionManager.acquire(profile: profile)
+            defer { connectionManager.release(profileId: profile.id) }
             while !Task.isCancelled {
                 await refresh()
                 try? await Task.sleep(for: Self.refreshInterval)
             }
+        }
+        .onDisappear {
+            aiStore.dismiss()
         }
         .alert(item: $pendingFix) { fix in
             Alert(
@@ -58,7 +63,8 @@ struct MobileInstanceActivityView: View {
             MobileActivityAISheet(
                 store: aiStore,
                 onCancelBackend: { pid in requestFix(pid: pid, terminate: false) },
-                onTerminateBackend: { pid in requestFix(pid: pid, terminate: true) }
+                onTerminateBackend: { pid in requestFix(pid: pid, terminate: true) },
+                canTerminateBackend: { pid in canTerminateBackend(pid) }
             )
         }
         .overlay(alignment: .bottom) {
@@ -247,7 +253,6 @@ struct MobileInstanceActivityView: View {
     // MARK: - Data + actions
 
     private func refresh(force: Bool = false) async {
-        await connectionManager.connectIfNeeded(profile: profile)
         guard let connectionId else { return }
         do {
             sessions = try await BridgeManager.shared.pgListSessions(connectionId: connectionId)
@@ -269,6 +274,16 @@ struct MobileInstanceActivityView: View {
             return
         }
         pendingFix = terminate ? .terminate(session) : .cancel(session)
+    }
+
+    /// The model may describe a blocker, but only the current lock graph can
+    /// authorize a destructive termination recommendation.
+    private func canTerminateBackend(_ pid: Int32) -> Bool {
+        let waitPairs = locks.compactMap { lock -> (waiterPid: Int32, blockerPid: Int32)? in
+            guard let blocker = lock.blockedByPid else { return nil }
+            return (waiterPid: lock.pid, blockerPid: blocker)
+        }
+        return fleetRootBlockerPid(waitPairs: waitPairs) == pid
     }
 
     private func apply(_ fix: PendingFix) async {

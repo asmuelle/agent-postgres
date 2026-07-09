@@ -56,6 +56,12 @@ actor PostgresAuditLog {
     static let statementCap = 2_000
     private static let errorMessageCap = 500
 
+    /// Synchronous and side-effect free so the redaction policy can be tested
+    /// without touching the actor's file-backed log.
+    static func redactedStatement(_ statement: String) -> String {
+        String(PostgresStatementClassifier.redactedForAudit(statement).prefix(statementCap))
+    }
+
     private let logger = Logger(subsystem: "com.mc-ssh", category: "postgres-audit")
 
     /// Where the JSONL stream lives. Nonisolated so the export UI can
@@ -101,7 +107,7 @@ actor PostgresAuditLog {
             database: database,
             user: user,
             action: action,
-            statement: String(statement.prefix(Self.statementCap)),
+            statement: Self.redactedStatement(statement),
             outcome: outcome,
             rowsAffected: rowsAffected
         )

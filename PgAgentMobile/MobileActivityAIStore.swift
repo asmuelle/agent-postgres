@@ -213,12 +213,21 @@ final class MobileActivityAIStore: ObservableObject {
         else { return nil }
 
         let sessionId = "activity-ai-\(UUID().uuidString)"
-        guard let result = try? await BridgeManager.shared.pgExecute(
-            connectionId: connectionId,
-            sessionId: sessionId,
-            sql: "EXPLAIN \(query)",
-            pageSize: explainRowCap
-        ) else { return nil }
+        let result: FfiPgExecutionResult
+        do {
+            result = try await BridgeManager.shared.pgExecute(
+                connectionId: connectionId,
+                sessionId: sessionId,
+                sql: "EXPLAIN \(query)",
+                pageSize: explainRowCap
+            )
+        } catch {
+            _ = await BridgeManager.shared.pgReleaseSession(
+                connectionId: connectionId,
+                sessionId: sessionId
+            )
+            return nil
+        }
         if let cursorId = result.cursorId {
             _ = await BridgeManager.shared.pgCloseQuery(
                 connectionId: connectionId,
@@ -226,6 +235,10 @@ final class MobileActivityAIStore: ObservableObject {
                 cursorId: cursorId
             )
         }
+        _ = await BridgeManager.shared.pgReleaseSession(
+            connectionId: connectionId,
+            sessionId: sessionId
+        )
         let plan = result.rows
             .compactMap { $0.cells.first ?? nil }
             .joined(separator: "\n")

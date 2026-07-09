@@ -101,6 +101,11 @@ final class PgReadOnlyGuardTests: XCTestCase {
         assertViolation("SELECT * FROM users FOR UPDATE", expected: .forbiddenKeyword("UPDATE"))
     }
 
+    func testSideEffectingFunctionRejected() {
+        assertViolation("SELECT nextval('orders_id_seq')", expected: .forbiddenKeyword("NEXTVAL"))
+        assertViolation("SELECT set_config('app.mode', 'unsafe', false)", expected: .forbiddenKeyword("SET_CONFIG"))
+    }
+
     func testNonSelectLeadingRejected() {
         // SET isn't an allowed leading keyword, so the leading-statement check
         // fires before the keyword scan — the more precise violation.

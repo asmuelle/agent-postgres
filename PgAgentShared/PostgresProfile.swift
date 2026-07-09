@@ -349,8 +349,10 @@ final class PostgresProfileStore: ObservableObject {
         // originating device's stamp.
         var stamped = profile
         stamped.updatedAt = Date()
+        var reconnectRequired = false
         if let idx = profiles.firstIndex(where: { $0.id == stamped.id }) {
             let previous = profiles[idx]
+            reconnectRequired = Self.connectionSettingsChanged(from: previous, to: stamped)
             // If the keychain account changed, drop the old entry so we
             // don't accumulate orphaned secrets.
             if previous.keychainAccount != stamped.keychainAccount {
@@ -365,12 +367,22 @@ final class PostgresProfileStore: ObservableObject {
         }
         persist()
         CloudSyncEngine.shared.noteProfilesChanged()
+
+        if reconnectRequired {
+            Task { @MainActor in
+                await PostgresConnectionManager.shared.reconnectIfNeeded(profile: stamped)
+            }
+        }
     }
 
     func delete(_ profile: PostgresProfile) {
-        removeLocally(profile)
-        persist()
-        CloudSyncEngine.shared.noteProfileDeleted(id: profile.id)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await PostgresConnectionManager.shared.forget(profileId: profile.id)
+            removeLocally(profile)
+            persist()
+            CloudSyncEngine.shared.noteProfileDeleted(id: profile.id)
+        }
     }
 
     /// Shared teardown for local + remote-initiated deletions: drop the
@@ -398,7 +410,15 @@ final class PostgresProfileStore: ObservableObject {
         for profile in upserts {
             if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
                 if profiles[idx] != profile {
+                    let reconnectRequired = Self.connectionSettingsChanged(
+                        from: profiles[idx], to: profile
+                    )
                     profiles[idx] = profile
+                    if reconnectRequired {
+                        Task { @MainActor in
+                            await PostgresConnectionManager.shared.reconnectIfNeeded(profile: profile)
+                        }
+                    }
                     changed = true
                 }
             } else {
@@ -408,6 +428,9 @@ final class PostgresProfileStore: ObservableObject {
         }
         for id in deleteIds {
             guard let existing = profiles.first(where: { $0.id == id }) else { continue }
+            Task { @MainActor in
+                await PostgresConnectionManager.shared.forget(profileId: id)
+            }
             removeLocally(existing)
             changed = true
         }
@@ -416,6 +439,25 @@ final class PostgresProfileStore: ObservableObject {
 
     func profile(withId id: String) -> PostgresProfile? {
         profiles.first { $0.id == id }
+    }
+
+    private static func connectionSettingsChanged(
+        from old: PostgresProfile,
+        to new: PostgresProfile
+    ) -> Bool {
+        old.host != new.host
+            || old.port != new.port
+            || old.database != new.database
+            || old.user != new.user
+            || old.auth != new.auth
+            || old.tls != new.tls
+            || old.applicationName != new.applicationName
+            || old.tunnel != new.tunnel
+            || old.connectTimeoutSecs != new.connectTimeoutSecs
+            || old.maxPoolSize != new.maxPoolSize
+            || old.idleTimeoutSecs != new.idleTimeoutSecs
+            || old.minIdleConnections != new.minIdleConnections
+            || old.isReadOnly != new.isReadOnly
     }
 
     func markConnected(_ profile: PostgresProfile) {

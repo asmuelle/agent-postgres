@@ -12,6 +12,8 @@ struct MobileActivityAISheet: View {
     let onCancelBackend: (Int32) -> Void
     /// Route a "terminate this backend" recommendation back to the pane's confirm flow.
     let onTerminateBackend: (Int32) -> Void
+    /// Only deterministic lock-graph results may expose termination actions.
+    let canTerminateBackend: (Int32) -> Bool
 
     var body: some View {
         NavigationStack {
@@ -88,7 +90,7 @@ struct MobileActivityAISheet: View {
                 Text(result.explanation)
                     .font(MidnightMobileDesign.FontToken.label)
                 adviceBox(result.recommendation)
-                if let rootPid = result.rootBlockerPid {
+                if let rootPid = result.rootBlockerPid, canTerminateBackend(rootPid) {
                     Button {
                         store.dismiss()
                         onTerminateBackend(rootPid)
@@ -127,16 +129,20 @@ struct MobileActivityAISheet: View {
             .buttonStyle(.borderedProminent)
             .tint(.orange)
         case .terminate:
-            Button {
-                store.dismiss()
-                onTerminateBackend(pid)
-            } label: {
-                Label("Terminate · PID \(pid)", systemImage: "xmark.octagon.fill")
-                    .font(MidnightMobileDesign.FontToken.captionStrong)
-                    .frame(maxWidth: .infinity)
+            if canTerminateBackend(pid) {
+                Button {
+                    store.dismiss()
+                    onTerminateBackend(pid)
+                } label: {
+                    Label("Terminate · PID \(pid)", systemImage: "xmark.octagon.fill")
+                        .font(MidnightMobileDesign.FontToken.captionStrong)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+            } else {
+                EmptyView()
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
         case .none:
             EmptyView()
         }

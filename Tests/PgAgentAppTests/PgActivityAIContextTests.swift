@@ -88,9 +88,10 @@ final class PgActivityAIContextTests: XCTestCase {
         )
         let lines = context.components(separatedBy: "\n")
         XCTAssertTrue(lines[0].contains("3 backends"))
-        XCTAssertTrue(lines[1].contains("pid=3"), "blocked session should rank first")
-        XCTAssertTrue(lines[2].contains("pid=2"))
-        XCTAssertTrue(lines[3].contains("pid=1"))
+        let sessionLines = lines.filter { $0.contains("pid=") }
+        XCTAssertTrue(sessionLines[0].contains("pid=3"), "blocked session should rank first")
+        XCTAssertTrue(sessionLines[1].contains("pid=2"))
+        XCTAssertTrue(sessionLines[2].contains("pid=1"))
     }
 
     func testPackSessionsMarksLongRunningAndTruncatesOverflow() {

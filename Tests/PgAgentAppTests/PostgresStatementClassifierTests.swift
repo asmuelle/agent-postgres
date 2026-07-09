@@ -24,7 +24,9 @@ final class PostgresStatementClassifierTests: XCTestCase {
 
     func testExplainSelectAllowed() {
         XCTAssertTrue(PostgresStatementClassifier.isReadOnly("EXPLAIN SELECT * FROM users"))
-        XCTAssertTrue(PostgresStatementClassifier.isReadOnly("EXPLAIN ANALYZE SELECT * FROM users"))
+        // EXPLAIN ANALYZE executes the statement and is not safe for an
+        // application-level read-only boundary.
+        XCTAssertFalse(PostgresStatementClassifier.isReadOnly("EXPLAIN ANALYZE SELECT * FROM users"))
     }
 
     func testShowValuesTableFetchAllowed() {
@@ -141,6 +143,11 @@ final class PostgresStatementClassifierTests: XCTestCase {
     func testSelectForUpdateBlocked() {
         // Documented conservative bias: row locks ride on the UPDATE token.
         XCTAssertFalse(PostgresStatementClassifier.isReadOnly("SELECT * FROM users FOR UPDATE"))
+    }
+
+    func testKnownSideEffectingFunctionCallsBlocked() {
+        XCTAssertFalse(PostgresStatementClassifier.isReadOnly("SELECT nextval('orders_id_seq')"))
+        XCTAssertFalse(PostgresStatementClassifier.isReadOnly("SELECT set_config('app.mode', 'unsafe', false)"))
     }
 
     func testDollarQuotedWriteBodyIsData() {

@@ -45,4 +45,8 @@ final class PostgresConnectionConfigTests: XCTestCase {
             XCTAssertFalse(mode.hint.isEmpty, "TLS hint missing for \(mode)")
         }
     }
+
+    func testNewProfilesRequireTlsByDefault() {
+        XCTAssertEqual(makeProfile().tls, .require)
+    }
 }

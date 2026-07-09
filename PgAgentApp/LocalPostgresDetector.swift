@@ -63,9 +63,8 @@ enum LocalPostgresDetector {
 
     /// The ready-to-edit profile offered when a local server is detected:
     /// current macOS username (Homebrew/Postgres.app superuser default),
-    /// `postgres` database, no password, TLS `prefer` (local servers
-    /// usually run with ssl=off, and loopback traffic never leaves the
-    /// machine — `.require` would fail out of the box).
+    /// `postgres` database, no password, and the secure TLS `require` default.
+    /// Local servers without TLS can still opt down explicitly in the editor.
     static func makeLocalhostProfile() -> PostgresProfile {
         PostgresProfile(
             name: "Local PostgreSQL",
@@ -74,7 +73,7 @@ enum LocalPostgresDetector {
             database: "postgres",
             user: NSUserName(),
             auth: .keychain,
-            tls: .prefer,
+            tls: .require,
             environment: .development
         )
     }

@@ -37,7 +37,9 @@ pub fn rshell_pg_list_sessions(
                 WHERE state IS NOT NULL AND pid <> pg_backend_pid()
                 ORDER BY query_start DESC
             ";
-            let outcome = pool.execute(&session_id, sql, 1000).await?;
+            let outcome = pool.execute(&session_id, sql, 1000).await;
+            pool.release_session(&session_id).await;
+            let outcome = outcome?;
             let mut sessions = Vec::new();
             for row in outcome.rows {
                 if row.len() >= 8 {
@@ -78,7 +80,9 @@ pub fn rshell_pg_cancel_backend(connection_id: String, pid: i32) -> Result<bool,
             // injection-safe. (The core pool exposes no bound-parameter execute;
             // if that changes, prefer `pg_cancel_backend($1)`.)
             let sql = format!("SELECT pg_cancel_backend({pid})");
-            let outcome = pool.execute(&session_id, &sql, 1).await?;
+            let outcome = pool.execute(&session_id, &sql, 1).await;
+            pool.release_session(&session_id).await;
+            let outcome = outcome?;
             let mut success = false;
             if let Some(row) = outcome.rows.first()
                 && let Some(cell) = row.first()
@@ -102,7 +106,9 @@ pub fn rshell_pg_terminate_backend(connection_id: String, pid: i32) -> Result<bo
             // injection-safe. (The core pool exposes no bound-parameter execute;
             // if that changes, prefer `pg_terminate_backend($1)`.)
             let sql = format!("SELECT pg_terminate_backend({pid})");
-            let outcome = pool.execute(&session_id, &sql, 1).await?;
+            let outcome = pool.execute(&session_id, &sql, 1).await;
+            pool.release_session(&session_id).await;
+            let outcome = outcome?;
             let mut success = false;
             if let Some(row) = outcome.rows.first()
                 && let Some(cell) = row.first()
@@ -145,7 +151,9 @@ pub fn rshell_pg_list_locks(connection_id: String) -> Result<Vec<FfiPgLockDetail
                 FROM pg_locks l
                 WHERE l.relation IS NOT NULL AND l.pid <> pg_backend_pid()
             ";
-            let outcome = pool.execute(&session_id, sql, 1000).await?;
+            let outcome = pool.execute(&session_id, sql, 1000).await;
+            pool.release_session(&session_id).await;
+            let outcome = outcome?;
             let mut locks = Vec::new();
             for row in outcome.rows {
                 if row.len() >= 5 {

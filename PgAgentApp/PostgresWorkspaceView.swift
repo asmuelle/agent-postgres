@@ -6,8 +6,8 @@ import SwiftUI
 //
 // Layout: HSplitView with the schema browser on the left (320pt ideal)
 // and the query tabs container on the right. Connection identity is
-// owned by the browser (it runs the connect/disconnect lifecycle) but
-// surfaced here via a @State so query tabs can read it. New tabs come
+// owned by the shared manager; the workspace holds a claim while visible
+// so collapsing the sidebar cannot tear down active query tabs. New tabs come
 // from two paths:
 //   - Sidebar's "+" button → blank tab.
 //   - Double-click on a relation → tab populated with
@@ -82,6 +82,13 @@ struct PostgresWorkspaceView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .openPostgresObjectTab)) { notification in
                 handleOpenTabNotification(notification)
+            }
+            .task(id: profile.id) {
+                await PostgresConnectionManager.shared.acquire(profile: profile)
+                defer { PostgresConnectionManager.shared.release(profileId: profile.id) }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(3600))
+                }
             }
     }
 
