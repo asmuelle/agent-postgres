@@ -124,6 +124,3 @@ just mac-build
 
 **Build is slow on first run** — `russh` and `parquet` (transitive via `ssh-commander-pg-parquet`) compile from source. Subsequent incremental builds are fast.
 
-## License
-
-Private. All rights reserved.
