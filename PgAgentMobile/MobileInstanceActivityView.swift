@@ -13,7 +13,9 @@ struct MobileInstanceActivityView: View {
     let profile: PostgresProfile
 
     @ObservedObject private var connectionManager = PostgresConnectionManager.shared
+    @StateObject private var aiStore = MobileActivityAIStore()
     @State private var sessions: [FfiPgSessionDetail] = []
+    @State private var locks: [FfiPgLockDetail] = []
     @State private var loadError: String?
     @State private var pendingFix: PendingFix?
     @State private var actionNote: String?
@@ -52,6 +54,13 @@ struct MobileInstanceActivityView: View {
                 secondaryButton: .cancel()
             )
         }
+        .sheet(isPresented: $aiStore.isPresented) {
+            MobileActivityAISheet(
+                store: aiStore,
+                onCancelBackend: { pid in requestFix(pid: pid, terminate: false) },
+                onTerminateBackend: { pid in requestFix(pid: pid, terminate: true) }
+            )
+        }
         .overlay(alignment: .bottom) {
             if let note = actionNote {
                 Text(note)
@@ -70,6 +79,9 @@ struct MobileInstanceActivityView: View {
 
     private var sessionList: some View {
         List {
+            if aiStore.availability.isAvailable {
+                aiSection
+            }
             Section {
                 ForEach(sorted, id: \.pid) { session in
                     SessionRow(session: session)
@@ -90,6 +102,20 @@ struct MobileInstanceActivityView: View {
                             }
                             .tint(.orange)
                         }
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                            if aiStore.availability.isAvailable {
+                                Button {
+                                    aiStore.explainSession(
+                                        session,
+                                        connectionId: connectionId,
+                                        connectedDatabase: profile.database
+                                    )
+                                } label: {
+                                    Label("Explain", systemImage: "sparkles")
+                                }
+                                .tint(MidnightColors.accentCyan)
+                            }
+                        }
                 }
             } header: {
                 Text("\(sorted.count) backend\(sorted.count == 1 ? "" : "s") · swipe a row to cancel or terminate")
@@ -100,6 +126,69 @@ struct MobileInstanceActivityView: View {
         }
         .scrollContentBackground(.hidden)
         .refreshable { await refresh() }
+    }
+
+    /// Whether any backend is stuck behind a lock right now.
+    private var hasBlocking: Bool {
+        sessions.contains { $0.waitEvent != nil }
+            || locks.contains { $0.blockedByPid != nil || !$0.granted }
+    }
+
+    /// On-demand AI analyses. Everything here is advisory: results open in a
+    /// sheet, and any recommended fix routes through the same confirmation
+    /// alert + biometric gate as the manual swipe actions.
+    private var aiSection: some View {
+        Section {
+            if let digest = aiStore.lastDigest {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(digest.headline, systemImage: "sparkles")
+                        .font(MidnightMobileDesign.FontToken.caption)
+                        .foregroundStyle(MidnightColors.accentCyan)
+                    ForEach(digest.points, id: \.self) { point in
+                        Text(point)
+                            .font(MidnightMobileDesign.FontToken.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .listRowBackground(MidnightColors.cardBackground)
+            }
+
+            HStack(spacing: 10) {
+                aiChip("Digest", icon: "sparkles") {
+                    aiStore.generateDigest(sessions: sessions, locks: locks)
+                }
+                if hasBlocking {
+                    aiChip("Blocking", icon: "lock.trianglebadge.exclamationmark") {
+                        aiStore.analyzeBlocking(sessions: sessions, locks: locks)
+                    }
+                }
+                if aiStore.canNarrateTrend {
+                    aiChip("Trend", icon: "chart.line.uptrend.xyaxis") {
+                        aiStore.narrateTrend()
+                    }
+                }
+                Spacer()
+            }
+            .listRowBackground(MidnightColors.cardBackground)
+        } header: {
+            Text("On-device AI · swipe a row right to explain it")
+                .font(MidnightMobileDesign.FontToken.caption)
+                .foregroundStyle(.secondary)
+                .textCase(nil)
+        }
+    }
+
+    private func aiChip(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(MidnightMobileDesign.FontToken.captionStrong)
+                .foregroundStyle(MidnightColors.accentCyan)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(MidnightColors.accentCyan.opacity(0.12))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     /// Active, oldest-running queries first; idle backends sink to the bottom.
@@ -163,9 +252,23 @@ struct MobileInstanceActivityView: View {
         do {
             sessions = try await BridgeManager.shared.pgListSessions(connectionId: connectionId)
             loadError = nil
+            aiStore.recordSnapshot(sessions: sessions)
+            // Locks feed the AI blocking analysis; a failure there shouldn't
+            // take down the session list, so it degrades to an empty graph.
+            locks = (try? await BridgeManager.shared.pgListLocks(connectionId: connectionId)) ?? []
         } catch {
             loadError = error.localizedDescription
         }
+    }
+
+    /// Route an AI recommendation into the same confirm-alert flow the manual
+    /// swipe actions use. The pid may have exited since the analysis ran.
+    private func requestFix(pid: Int32, terminate: Bool) {
+        guard let session = sessions.first(where: { $0.pid == pid }) else {
+            Task { await flash("PID \(pid) is already gone") }
+            return
+        }
+        pendingFix = terminate ? .terminate(session) : .cancel(session)
     }
 
     private func apply(_ fix: PendingFix) async {

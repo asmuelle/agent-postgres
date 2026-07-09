@@ -41,7 +41,7 @@ enum PgAIAvailability: Equatable, Sendable {
         case .available:
             return nil
         case .osTooOld:
-            return "On-device AI needs macOS 26 or later."
+            return "On-device AI needs macOS 26 / iOS 26 or later."
         case .deviceNotEligible:
             return "This device isn't eligible for Apple Intelligence."
         case .appleIntelligenceNotEnabled:
@@ -54,6 +54,11 @@ enum PgAIAvailability: Equatable, Sendable {
             return "On-device AI is unavailable: \(detail)"
         }
     }
+}
+
+/// Why no assistant could be resolved, carrying a user-facing message.
+struct PgAIUnavailable: Error, Equatable {
+    let message: String
 }
 
 /// Probes the live model state. Cheap to call; the UI may call it per render.

@@ -29,11 +29,6 @@ protocol PgAIAssisting: Sendable {
 /// resolver; tests inject a closure returning a fake.
 typealias PgAIAssistantFactory = @Sendable (_ connectionId: String, _ defaultSchema: String) -> any PgAIAssisting
 
-/// Why no assistant could be resolved, carrying a user-facing message.
-struct PgAIUnavailable: Error, Equatable {
-    let message: String
-}
-
 enum PgAIAssistantResolver {
     /// Resolve a ready assistant, or a user-facing reason it's unavailable.
     /// When `factory` is non-nil (tests), it wins and the SDK path is skipped
