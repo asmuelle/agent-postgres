@@ -66,7 +66,18 @@ struct MobilePropertyInspectorView: View {
 
                     Divider()
 
-                    if activeTab == .properties {
+                    if activeTab == .properties, isRole {
+                        // Roles get the pgAdmin-style editor: privilege
+                        // attributes, connection limit / expiry, comment,
+                        // and memberships.
+                        MobileRoleEditorView(
+                            roleName: node.name,
+                            connectionId: connectionId,
+                            onApplied: { _ in
+                                Task { await schemaStore.loadRoles() }
+                            }
+                        )
+                    } else if activeTab == .properties {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 20) {
                         // Leaf Details Card
@@ -399,6 +410,11 @@ struct MobilePropertyInspectorView: View {
         return false
     }
 
+    private var isRole: Bool {
+        if case .role = node.kind { return true }
+        return false
+    }
+
     private var hasTypeProperty: Bool {
         switch node.kind {
         case .column, .key, .constraint, .routine, .objectType:
@@ -506,6 +522,18 @@ struct MobilePropertyInspectorView: View {
 
     // MARK: - Reconstructive DDL Source Methods
     private func loadReconstructedDDL() async {
+        // Role ids ("role:<name>") don't fit the dotted id format below.
+        if case .role = node.kind {
+            guard let connectionId else {
+                reconstructedDDL = "-- Not connected — DDL source needs a live connection."
+                return
+            }
+            reconstructedDDL = await PostgresRoleEditorStore.reconstructCreateDDL(
+                name: node.name, connectionId: connectionId
+            )
+            return
+        }
+
         guard let connectionId = connectionId,
               let parsed = parseNodeId(node.id)
         else {

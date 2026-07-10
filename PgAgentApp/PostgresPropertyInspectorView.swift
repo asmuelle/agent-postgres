@@ -57,7 +57,17 @@ struct PostgresPropertyInspectorView: View {
 
             Divider()
 
-            if activeTab == .properties {
+            if activeTab == .properties, isRole {
+                // Roles get the pgAdmin-style editor: privilege attributes,
+                // connection limit / expiry, comment, and memberships.
+                PostgresRoleEditorView(
+                    roleName: node.name,
+                    connectionId: connectionId,
+                    onApplied: { _ in
+                        Task { await store.loadRoles() }
+                    }
+                )
+            } else if activeTab == .properties {
                 ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // Parent Path Info
@@ -367,6 +377,11 @@ struct PostgresPropertyInspectorView: View {
         return false
     }
 
+    private var isRole: Bool {
+        if case .role = node.kind { return true }
+        return false
+    }
+
     private var hasTypeProperty: Bool {
         switch node.kind {
         case .column, .key, .constraint, .routine, .objectType:
@@ -385,6 +400,7 @@ struct PostgresPropertyInspectorView: View {
         case .sequence:     return "Sequence Editor"
         case .routine:      return "Routine Editor"
         case .objectType:   return "Type Editor"
+        case .role:         return "Role Editor"
         default:            return "Property Editor"
         }
     }
@@ -398,6 +414,7 @@ struct PostgresPropertyInspectorView: View {
         case .sequence:     return "number"
         case .routine(let k, _, _): return k.sfSymbol
         case .objectType(let k):    return k.sfSymbol
+        case .role:         return "person.2.fill"
         default:            return "info.circle"
         }
     }
