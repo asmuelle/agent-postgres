@@ -1,51 +1,44 @@
 import SwiftUI
-import OSLog
 #if canImport(PgAgentMacOS)
 import PgAgentMacOS
 #endif
 
-// =============================================================================
-// Postgres Visual Backup & Restore Utility View (Pillar 4)
-// GUI-driven wrapper that triggers pg_dump, pg_restore, and psql remotely
-// over the active SSH tunnel connection, displaying streaming outputs.
-// Integrates with the built-in SFTP Dual-Pane explorer via server directories.
-// =============================================================================
-
+// A durable PostgreSQL 14+ backup executor. Work runs remotely through the
+// profile's SSH host, credentials come from that host's ~/.pgpass, archive
+// output is atomic + verified, and every finished job records evidence.
 struct PostgresBackupRestoreView: View {
     let profile: PostgresProfile
     @Environment(\.dismiss) private var dismiss
-    
-    @State private var activeTab: String = "Backup" // Backup, Restore
-    
-    // Backup Options
-    @State private var backupPath: String = "/tmp/db_backup.dump"
-    @State private var backupFormat: String = "custom" // custom, tar, plain
+
+    @State private var activeTab = "Backup"
+    @State private var backupPath = "/var/backups/postgresql/db_backup.dump"
+    @State private var backupFormat = PostgresBackupFormat.custom
     @State private var backupDataOnly = false
     @State private var backupSchemaOnly = false
     @State private var backupClean = false
-    
-    // Restore Options
-    @State private var restorePath: String = "/tmp/db_backup.dump"
+    @State private var restorePath = "/var/backups/postgresql/db_backup.dump"
+    @State private var restoreFormat = PostgresBackupFormat.custom
     @State private var restoreClean = false
-    @State private var restoreSingleTransaction = false
-    
-    // Console Logs
-    @State private var consoleLogs: String = ""
+    @State private var restoreSingleTransaction = true
+
+    @State private var consoleLogs = ""
+    @State private var phase = "Ready"
     @State private var isExecuting = false
-    @State private var executionSuccess: Bool? = nil
-    
-    private let formats = [
-        ("Custom format (compressed, -Fc)", "custom"),
-        ("Tar archive (-Ft)", "tar"),
-        ("Plain SQL script (-Fp)", "plain")
-    ]
-    
+    @State private var executionSuccess: Bool?
+    @State private var currentToken: String?
+    @State private var currentLiveSshId: String?
+    @State private var currentJobId: String?
+    @State private var jobTask: Task<Void, Never>?
+    @State private var history: [PostgresBackupJobRecord] = []
+    @State private var showingRestoreConfirmation = false
+    @State private var restorePhrase = ""
+
+    private let jobStore = PostgresBackupJobStore()
+
     var body: some View {
         VStack(spacing: 0) {
             headerBar
             Divider()
-            
-            // Check if SSH Tunnel is configured
             if let sshId = profile.tunnel?.sshConnectionId, !sshId.isEmpty {
                 mainContent(sshId: sshId)
             } else {
@@ -53,322 +46,392 @@ struct PostgresBackupRestoreView: View {
             }
         }
         .background(MidnightMacDesign.ColorToken.windowBackground)
-        .frame(minWidth: 640, minHeight: 480)
+        .frame(minWidth: 760, minHeight: 560)
+        .task { await loadHistory() }
+        .sheet(isPresented: $showingRestoreConfirmation) {
+            restoreConfirmation
+        }
     }
-    
-    // MARK: - Header Bar
-    @ViewBuilder
+
     private var headerBar: some View {
         HStack(spacing: 12) {
-            Image(systemName: "square.and.arrow.down.on.square.fill")
-                .font(.title2)
-                .foregroundStyle(.blue)
-            
+            Image(systemName: "externaldrive.badge.checkmark")
+                .font(.title2).foregroundStyle(.blue)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Backup & Restore Utility")
-                    .font(MidnightMacDesign.FontToken.title)
-                Text("Database: \(profile.database) on \(profile.host)")
+                Text("Backup Executor").font(MidnightMacDesign.FontToken.title)
+                Text("\(profile.database) on \(profile.host) · PostgreSQL 14+")
                     .font(MidnightMacDesign.FontToken.caption)
                     .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
             }
-            
             Spacer()
-            
             Picker("", selection: $activeTab) {
                 Text("Backup").tag("Backup")
                 Text("Restore").tag("Restore")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 180)
+            .pickerStyle(.segmented).labelsHidden().frame(width: 180)
             .disabled(isExecuting)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20).padding(.vertical, 12)
     }
-    
-    // MARK: - SSH Missing Warning State
-    @ViewBuilder
+
     private var sshMissingState: some View {
         VStack(spacing: 16) {
             Image(systemName: "network.badge.shield.half.filled")
-                .font(.system(size: 48))
-                .foregroundStyle(.orange)
-            
-            Text("SSH Tunnel Configuration Required")
-                .font(MidnightMacDesign.FontToken.title)
-            
-            Text("Server-side dump utilities must be executed on a remote server over SSH. This profile does not have an active SSH Tunnel configuration.\n\nPlease edit your Postgres Connection Profile to assign a parent SSH host first.")
-                .font(MidnightMacDesign.FontToken.body)
-                .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
-            
-            Button("Dismiss") {
-                dismiss()
-            }
-            .buttonStyle(.borderedProminent)
-            .padding(.top, 8)
+                .font(.system(size: 48)).foregroundStyle(.orange)
+            Text("SSH execution host required").font(.title3)
+            Text("Assign an SSH execution host to this PostgreSQL profile. pgAgent runs pg_dump, pg_restore, and psql there. For a directly managed cloud database, use a small runner or jump host that can reach its endpoint.")
+                .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 440)
+            Button("Dismiss") { dismiss() }.buttonStyle(.borderedProminent)
         }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    
-    // MARK: - Main Interactive Content
-    @ViewBuilder
+
     private func mainContent(sshId: String) -> some View {
         HSplitView {
-            // Options Panel
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    if activeTab == "Backup" {
-                        backupForm
-                    } else {
-                        restoreForm
-                    }
-                    
+                VStack(alignment: .leading, spacing: 18) {
+                    credentialNotice
+                    if activeTab == "Backup" { backupForm } else { restoreForm }
                     Divider()
-                    
                     HStack {
-                        Button("Cancel") {
-                            dismiss()
+                        Button("Close") { dismiss() }.disabled(isExecuting)
+                        if isExecuting {
+                            Button("Cancel Job", role: .destructive) { cancelCurrentJob() }
                         }
-                        .buttonStyle(.plain)
-                        .disabled(isExecuting)
-                        
                         Spacer()
-                        
-                        Button(action: { runUtility(sshId: sshId) }) {
-                            HStack {
-                                if isExecuting {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                        .padding(.trailing, 4)
-                                }
-                                Text(activeTab == "Backup" ? "Start Backup" : "Start Restore")
-                            }
+                        Button(activeTab == "Backup" ? "Start Verified Backup" : "Start Restore") {
+                            requestExecution(sshId: sshId)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(isExecuting || (activeTab == "Backup" ? backupPath.isEmpty : restorePath.isEmpty))
+                        .tint(activeTab == "Restore" ? .orange : .blue)
+                        .disabled(isExecuting || selectedPath.isEmpty || invalidBackupOptions)
                     }
                 }
                 .padding(20)
             }
-            .frame(minWidth: 280, maxWidth: .infinity)
-            
-            // Console Console Logs
-            consolePanel
-                .frame(width: 320)
+            .frame(minWidth: 360)
+
+            VStack(spacing: 0) {
+                consolePanel
+                Divider()
+                historyPanel.frame(height: 190)
+            }
+            .frame(minWidth: 360)
         }
     }
-    
-    // MARK: - Backup Form
-    @ViewBuilder
+
+    private var credentialNotice: some View {
+        Label {
+            Text("The SSH host must have a mode-0600 ~/.pgpass entry for this database. pgAgent never sends database passwords in shell commands.")
+        } icon: {
+            Image(systemName: "key.fill")
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        .padding(10).background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+
     private var backupForm: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("BACKUP LOCATION")
-                .font(MidnightMacDesign.FontToken.label)
-                .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Remote Destination Filepath")
-                    .font(MidnightMacDesign.FontToken.caption)
-                TextField("e.g. /tmp/backup.dump", text: $backupPath)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
+        VStack(alignment: .leading, spacing: 12) {
+            Text("BACKUP DESTINATION").font(MidnightMacDesign.FontToken.label)
+            TextField("Remote destination", text: $backupPath)
+                .textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
+            formatPicker("Format", selection: $backupFormat)
+            Toggle("Data only", isOn: $backupDataOnly).toggleStyle(.checkbox)
+            Toggle("Schema only", isOn: $backupSchemaOnly).toggleStyle(.checkbox)
+            Toggle("Include clean/drop statements", isOn: $backupClean).toggleStyle(.checkbox)
+            if invalidBackupOptions {
+                Text("Data-only and schema-only cannot both be enabled.")
+                    .font(.caption).foregroundStyle(.red)
             }
-            
-            Picker("Format", selection: $backupFormat) {
-                ForEach(formats, id: \.1) { item in
-                    Text(item.0).tag(item.1)
-                }
-            }
-            .pickerStyle(.menu)
-            
-            Divider()
-            
-            Text("ADVANCED DUMP PARAMETERS")
-                .font(MidnightMacDesign.FontToken.label)
-                .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
-            
-            Toggle("Data Only (-a)", isOn: $backupDataOnly)
-                .toggleStyle(.checkbox)
-            Toggle("Schema Only (-s)", isOn: $backupSchemaOnly)
-                .toggleStyle(.checkbox)
-            Toggle("Clean / Drop before create (-c)", isOn: $backupClean)
-                .toggleStyle(.checkbox)
         }
     }
-    
-    // MARK: - Restore Form
-    @ViewBuilder
+
     private var restoreForm: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("RESTORE SOURCE")
-                .font(MidnightMacDesign.FontToken.label)
-                .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Remote Source Filepath")
-                    .font(MidnightMacDesign.FontToken.caption)
-                TextField("e.g. /tmp/backup.dump", text: $restorePath)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-            }
-            
-            Divider()
-            
-            Text("RESTORE OPTIONS")
-                .font(MidnightMacDesign.FontToken.label)
-                .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
-            
-            Toggle("Clean before restore (--clean)", isOn: $restoreClean)
-                .toggleStyle(.checkbox)
-            
-            Toggle("Single Transaction (--single-transaction)", isOn: $restoreSingleTransaction)
-                .toggleStyle(.checkbox)
-                .help("Runs restore inside a single SQL transaction block. Fails whole restore if any statement crashes.")
-            
-            Text("Note: If the selected restore file is a plain SQL script (.sql), it will be executed via 'psql'. Binary and custom formats will be processed via 'pg_restore'.")
-                .font(MidnightMacDesign.FontToken.caption)
-                .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
-                .padding(.top, 4)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("RESTORE SOURCE").font(MidnightMacDesign.FontToken.label)
+            TextField("Remote source", text: $restorePath)
+                .textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
+            formatPicker("Archive format", selection: $restoreFormat)
+            Toggle("Clean before restore", isOn: $restoreClean).toggleStyle(.checkbox)
+            Toggle("Single transaction", isOn: $restoreSingleTransaction).toggleStyle(.checkbox)
+            Label("The archive is preflighted before any restore SQL runs. Plain SQL uses ON_ERROR_STOP and ignores remote psqlrc files.", systemImage: "checkmark.shield")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
-    
-    // MARK: - Console Output Log View
-    @ViewBuilder
+
+    private func formatPicker(
+        _ title: String, selection: Binding<PostgresBackupFormat>
+    ) -> some View {
+        Picker(title, selection: selection) {
+            Text("Custom (compressed)").tag(PostgresBackupFormat.custom)
+            Text("Tar archive").tag(PostgresBackupFormat.tar)
+            Text("Plain SQL").tag(PostgresBackupFormat.plain)
+        }.pickerStyle(.menu)
+    }
+
     private var consolePanel: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Image(systemName: "terminal.fill")
-                Text("EXECUTION PROGRESS")
-                    .font(MidnightMacDesign.FontToken.label)
+                Text(phase.uppercased()).font(MidnightMacDesign.FontToken.label)
                 Spacer()
-                
-                if let success = executionSuccess {
-                    HStack(spacing: 4) {
-                        Image(systemName: success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        Text(success ? "SUCCESS" : "FAILED")
-                    }
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(success ? .green : .red)
+                if isExecuting { ProgressView().controlSize(.small) }
+                if let executionSuccess {
+                    Label(executionSuccess ? "VERIFIED" : "FAILED",
+                          systemImage: executionSuccess ? "checkmark.seal.fill" : "xmark.octagon.fill")
+                        .font(.caption.bold()).foregroundStyle(executionSuccess ? .green : .red)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(MidnightMacDesign.ColorToken.controlBackground)
-            
-            Divider()
-            
+            .padding(10).background(MidnightMacDesign.ColorToken.controlBackground)
             ScrollView {
-                if consoleLogs.isEmpty {
-                    Text("No logs yet. Configure parameters and click Start.")
-                        .font(MidnightMacDesign.FontToken.caption)
-                        .foregroundStyle(MidnightMacDesign.ColorToken.tertiaryText)
-                        .padding()
-                } else {
-                    Text(consoleLogs)
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
+                Text(consoleLogs.isEmpty ? "Preflight and job output will appear here." : consoleLogs)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary).padding()
+                    .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
             }
             .background(MidnightMacDesign.ColorToken.textBackground)
         }
     }
-    
-    // MARK: - Pipeline Executor
-    private func runUtility(sshId: String) {
+
+    private var historyPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("RECENT JOB EVIDENCE").font(MidnightMacDesign.FontToken.label).padding(.horizontal, 10)
+            if history.isEmpty {
+                Text("No completed jobs for this profile.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 10)
+            } else {
+                List(history.prefix(5)) { job in
+                    HStack {
+                        Image(systemName: job.state == .succeeded ? "checkmark.seal.fill" : "xmark.circle.fill")
+                            .foregroundStyle(job.state == .succeeded ? .green : .red)
+                        VStack(alignment: .leading) {
+                            Text("\(job.kind.rawValue.capitalized) · \(job.path)").lineLimit(1)
+                            if let evidence = job.evidence {
+                                Text("\(ByteCountFormatter.string(fromByteCount: evidence.sizeBytes, countStyle: .file)) · SHA-256 \(evidence.sha256.prefix(12))…")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text(job.message ?? job.state.rawValue).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    private var restoreConfirmation: some View {
+        let challenge = PostgresRestorePolicy.challenge(
+            database: profile.database,
+            isProduction: profile.effectiveEnvironment == .production)
+        return VStack(alignment: .leading, spacing: 14) {
+            Label("Restore can overwrite database objects", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline).foregroundStyle(.orange)
+            Text("Target: \(profile.name) · \(profile.database)")
+            if let required = challenge.requiredPhrase {
+                Text("Type \(required) to continue.").font(.caption)
+                TextField(required, text: $restorePhrase).textFieldStyle(.roundedBorder)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { showingRestoreConfirmation = false }
+                Button("Run Restore", role: .destructive) {
+                    showingRestoreConfirmation = false
+                    if let sshId = profile.tunnel?.sshConnectionId { startExecution(sshId: sshId) }
+                }
+                .disabled(!challenge.accepts(restorePhrase))
+            }
+        }
+        .padding(22).frame(width: 470)
+    }
+
+    private var selectedPath: String { activeTab == "Backup" ? backupPath : restorePath }
+    private var invalidBackupOptions: Bool {
+        activeTab == "Backup" && backupDataOnly && backupSchemaOnly
+    }
+
+    private func requestExecution(sshId: String) {
+        if activeTab == "Restore" {
+            restorePhrase = ""
+            showingRestoreConfirmation = true
+        } else {
+            startExecution(sshId: sshId)
+        }
+    }
+
+    private func startExecution(sshId: String) {
+        guard !isExecuting else { return }
         isExecuting = true
         executionSuccess = nil
-        consoleLogs = "[PROCESS INITIALIZED] Connecting to remote host...\n"
-        
-        let isBackup = activeTab == "Backup"
-        let path = isBackup ? backupPath : restorePath
-        
-        // Resolve postgres credentials
-        let password = KeychainManager.shared.loadPassword(kind: .postgresPassword, account: profile.keychainAccount) ?? ""
-        // POSIX-safe single quoting so host / user / database / path / password
-        // values cannot break out of their quotes into the remote shell — a
-        // field like `'; rm -rf ~ #` is rendered inert. Applied to *every*
-        // interpolated field (the port is a typed UInt16 and needs no quoting).
-        func shellSingleQuoted(_ value: String) -> String {
-            "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        }
-        let quotedPassword = shellSingleQuoted(password)
-        let quotedHost = shellSingleQuoted(profile.host)
-        let quotedUser = shellSingleQuoted(profile.user)
-        let quotedDatabase = shellSingleQuoted(profile.database)
-        let quotedPath = shellSingleQuoted(path)
-        
-        // Dynamically build cmd
-        var cmd = ""
-        if isBackup {
-            cmd = "PGPASSWORD=\(quotedPassword) pg_dump -h \(quotedHost) -p \(profile.port) -U \(quotedUser)"
-            if backupDataOnly { cmd += " -a" }
-            if backupSchemaOnly { cmd += " -s" }
-            if backupClean { cmd += " -c" }
-            
-            switch backupFormat {
-            case "custom": cmd += " -F c"
-            case "tar": cmd += " -F t"
-            case "plain": cmd += " -F p"
-            default: break
-            }
-            
-            cmd += " -f \(quotedPath)"
-            cmd += " \(quotedDatabase)"
-        } else {
-            // Is Restore. Check if plain SQL
-            let isSql = path.lowercased().hasSuffix(".sql")
-            if isSql {
-                cmd = "PGPASSWORD=\(quotedPassword) psql -h \(quotedHost) -p \(profile.port) -U \(quotedUser) -d \(quotedDatabase) -f \(quotedPath)"
-            } else {
-                cmd = "PGPASSWORD=\(quotedPassword) pg_restore -h \(quotedHost) -p \(profile.port) -U \(quotedUser) -d \(quotedDatabase)"
-                if restoreClean { cmd += " -c" }
-                if restoreSingleTransaction { cmd += " -1" }
-                cmd += " \(quotedPath)"
-            }
-        }
-        
-        // Append stdout/stderr mapping redirect
-        cmd += " 2>&1"
-        
-        consoleLogs += "[EXECUTION INITIATED] Running command on SSH host:\n"
-        // Mask the quoted password substring so the secret never reaches the log.
-        var printableCmd = cmd
-        if !password.isEmpty {
-            printableCmd = printableCmd.replacingOccurrences(of: quotedPassword, with: "'********'")
-        }
-        consoleLogs += "$ \(printableCmd)\n\n"
-        
-        Task {
-            do {
-                // `sshId` is the saved SSH *profile* id — resolve it to a
-                // live connection (opening one with stored credentials if
-                // needed) before running anything on it.
-                let liveSshId = try await SSHTunnelResolver.liveConnectionId(
-                    forSSHProfileReference: sshId
-                )
-                let output = try await BridgeManager.shared.executeCommand(connectionId: liveSshId, command: cmd)
+        phase = "Resolving SSH host"
+        consoleLogs = ""
+        let token = UUID().uuidString.lowercased()
+        let jobId = UUID().uuidString
+        currentToken = token
+        currentJobId = jobId
+        let startedAt = Date()
 
-                await MainActor.run {
-                    isExecuting = false
+        jobTask = Task {
+            do {
+                let liveSshId = try await SSHTunnelResolver.liveConnectionId(
+                    forSSHProfileReference: sshId)
+                currentLiveSshId = liveSshId
+                let (kind, path, preflight, command) = makeCommands()
+                phase = "Preflight"
+                let preflightOutput = try await BridgeManager.shared.executeCommand(
+                    connectionId: liveSshId, command: preflight)
+                consoleLogs = preflightOutput
+
+                let running = jobRecord(
+                    id: jobId, kind: kind, path: path, startedAt: startedAt,
+                    state: .running, evidence: nil, message: "Remote token \(token)")
+                try? await jobStore.append(running)
+
+                phase = kind == .backup ? "Backup running" : "Restore running"
+                _ = try await BridgeManager.shared.executeCommand(
+                    connectionId: liveSshId,
+                    command: PostgresRemoteJobProtocol.launch(token: token, command: command))
+                let result = try await pollJob(
+                    liveSshId: liveSshId, token: token, preflightOutput: preflightOutput)
+                guard !Task.isCancelled else { return }
+
+                if result.exitCode == 0 {
+                    let evidence = kind == .backup
+                        ? try PostgresBackupEvidenceParser.parse(result.output) : nil
+                    let final = jobRecord(
+                        id: jobId, kind: kind, path: path, startedAt: startedAt,
+                        state: .succeeded, evidence: evidence, message: "Verified")
+                    try await jobStore.append(final)
                     executionSuccess = true
-                    consoleLogs += output
-                    consoleLogs += "\n\n[SUCCESS] Operation completed successfully."
+                    phase = kind == .backup ? "Backup verified" : "Restore completed"
+                    consoleLogs = preflightOutput + "\n" + result.output
+                    audit(job: final)
+                } else {
+                    throw BackupExecutionError.remoteExit(result.exitCode)
                 }
+                _ = try? await BridgeManager.shared.executeCommand(
+                    connectionId: liveSshId,
+                    command: PostgresRemoteJobProtocol.cleanup(token: token))
+            } catch is CancellationError {
+                // cancelCurrentJob records the terminal state.
             } catch {
-                await MainActor.run {
-                    isExecuting = false
-                    executionSuccess = false
-                    consoleLogs += "\n[ERROR] Command failed:\n"
-                    consoleLogs += error.localizedDescription
-                }
+                let kind: PostgresBackupJobKind = activeTab == "Backup" ? .backup : .restore
+                let failed = jobRecord(
+                    id: jobId, kind: kind, path: selectedPath, startedAt: startedAt,
+                    state: .failed, evidence: nil, message: error.localizedDescription)
+                try? await jobStore.append(failed)
+                executionSuccess = false
+                phase = "Failed"
+                consoleLogs += "\nERROR: \(error.localizedDescription)"
+                audit(job: failed)
             }
+            isExecuting = false
+            currentToken = nil
+            currentLiveSshId = nil
+            currentJobId = nil
+            await loadHistory()
         }
+    }
+
+    private func makeCommands() -> (
+        PostgresBackupJobKind, String, String, String
+    ) {
+        if activeTab == "Backup" {
+            let request = PostgresBackupRequest(
+                profileId: profile.id, profileName: profile.name,
+                host: profile.host, port: profile.port, user: profile.user,
+                database: profile.database, destinationPath: backupPath,
+                format: backupFormat, dataOnly: backupDataOnly,
+                schemaOnly: backupSchemaOnly, clean: backupClean)
+            return (.backup, backupPath,
+                    PostgresBackupCommandBuilder.preflight(for: request),
+                    PostgresBackupCommandBuilder.backup(for: request))
+        }
+        let request = PostgresRestoreRequest(
+            profileId: profile.id, profileName: profile.name,
+            host: profile.host, port: profile.port, user: profile.user,
+            database: profile.database, sourcePath: restorePath,
+            format: restoreFormat, clean: restoreClean,
+            singleTransaction: restoreSingleTransaction)
+        return (.restore, restorePath,
+                PostgresBackupCommandBuilder.preflight(for: request),
+                PostgresBackupCommandBuilder.restore(for: request))
+    }
+
+    private func pollJob(
+        liveSshId: String, token: String, preflightOutput: String
+    ) async throws -> (exitCode: Int, output: String) {
+        while !Task.isCancelled {
+            let output = try await BridgeManager.shared.executeCommand(
+                connectionId: liveSshId,
+                command: PostgresRemoteJobProtocol.poll(token: token))
+            consoleLogs = preflightOutput + "\n" + output
+            if output.hasPrefix("PGAGENT_DONE\t") {
+                let first = output.split(separator: "\n", maxSplits: 1).first ?? ""
+                let code = Int(first.split(separator: "\t").last ?? "1") ?? 1
+                return (code, output)
+            }
+            try await Task.sleep(for: .seconds(1))
+        }
+        throw CancellationError()
+    }
+
+    private func cancelCurrentJob() {
+        guard let token = currentToken, let liveSshId = currentLiveSshId else {
+            jobTask?.cancel()
+            return
+        }
+        jobTask?.cancel()
+        let jobId = currentJobId ?? UUID().uuidString
+        let kind: PostgresBackupJobKind = activeTab == "Backup" ? .backup : .restore
+        let path = selectedPath
+        Task {
+            _ = try? await BridgeManager.shared.executeCommand(
+                connectionId: liveSshId,
+                command: PostgresRemoteJobProtocol.cancel(token: token))
+            let cancelled = jobRecord(
+                id: jobId, kind: kind, path: path, startedAt: Date(),
+                state: .cancelled, evidence: nil, message: "Cancelled by operator")
+            try? await jobStore.append(cancelled)
+            phase = "Cancelled"
+            executionSuccess = false
+            isExecuting = false
+            await loadHistory()
+        }
+    }
+
+    private func jobRecord(
+        id: String, kind: PostgresBackupJobKind, path: String, startedAt: Date,
+        state: PostgresBackupJobState, evidence: PostgresBackupEvidence?, message: String?
+    ) -> PostgresBackupJobRecord {
+        PostgresBackupJobRecord(
+            id: id, profileId: profile.id, profileName: profile.name,
+            database: profile.database, kind: kind, path: path,
+            startedAt: startedAt, finishedAt: state == .running ? nil : Date(),
+            state: state, evidence: evidence, message: message)
+    }
+
+    private func loadHistory() async {
+        history = (try? await jobStore.recent(profileId: profile.id, limit: 20)) ?? []
+    }
+
+    private func audit(job: PostgresBackupJobRecord) {
+        let auditedProfile = profile
+        Task.detached(priority: .utility) {
+            await PostgresAuditLog.shared.record(
+                profileName: auditedProfile.name, host: auditedProfile.host,
+                database: auditedProfile.database, user: auditedProfile.user,
+                action: job.kind == .backup ? .backup : .restore,
+                statement: "\(job.path); sha256=\(job.evidence?.sha256 ?? "n/a")",
+                error: job.state == .failed ? job.message : nil,
+                rowsAffected: nil)
+        }
+    }
+}
+
+private enum BackupExecutionError: LocalizedError {
+    case remoteExit(Int)
+    var errorDescription: String? {
+        switch self { case .remoteExit(let code): return "Remote backup job exited with status \(code)." }
     }
 }

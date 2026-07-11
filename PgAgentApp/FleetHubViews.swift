@@ -12,6 +12,7 @@ import PgAgentMacOS
 struct FleetHubMenuView: View {
     @ObservedObject private var hub = FleetMonitorHub.shared
     @ObservedObject private var relay = FleetMonitorHub.shared.relay
+    @ObservedObject private var lifecycle = FleetAlertLifecycleStore.shared
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -21,6 +22,34 @@ struct FleetHubMenuView: View {
             } else {
                 ForEach(hub.healths) { health in
                     Text(instanceLine(health))
+                }
+            }
+
+            if !hub.activeAlerts.isEmpty {
+                Divider()
+                Text("Active alerts")
+                ForEach(Array(hub.activeAlerts.prefix(8))) { alert in
+                    Menu(alert.title) {
+                        Button("Acknowledge") { lifecycle.acknowledge(alert) }
+                        Button("Snooze 1 hour") {
+                            lifecycle.snooze(
+                                alert, until: Date().addingTimeInterval(3_600))
+                        }
+                        Button("Maintenance 1 hour") {
+                            lifecycle.beginMaintenance(
+                                profileId: alert.profileId,
+                                until: Date().addingTimeInterval(3_600))
+                        }
+                    }
+                }
+            }
+
+            if !hub.driftFindings.isEmpty {
+                Divider()
+                Text("Fleet drift")
+                ForEach(hub.driftFindings.prefix(8)) { finding in
+                    let name = hub.instanceNames[finding.profileId] ?? finding.profileId
+                    Text("⚠️ \(name): \(finding.detail)")
                 }
             }
 
@@ -62,11 +91,28 @@ struct FleetHubMenuView: View {
     private func statusText(_ health: FleetInstanceHealth) -> String {
         switch health.severity {
         case .offline: return health.errorMessage ?? "unreachable"
-        case .blocked: return "\(health.blockedLockCount) blocked"
-        case .slow: return "\(health.longRunningCount) slow"
+        case .blocked:
+            if health.blockedLockCount > 0 { return "\(health.blockedLockCount) blocked" }
+            return postureText(health.metrics) ?? "critical posture"
+        case .slow:
+            if health.longRunningCount > 0 { return "\(health.longRunningCount) slow" }
+            return postureText(health.metrics) ?? "posture warning"
         case .busy: return "\(health.activeBackends) active"
         case .healthy: return "healthy"
         }
+    }
+
+    private func postureText(_ metrics: FleetProbeMetrics?) -> String? {
+        guard let metrics else { return nil }
+        if (metrics.xidAge ?? 0) >= 1_500_000_000 { return "XID age \(metrics.xidAge ?? 0)" }
+        if (metrics.connectionUtilizationPercent ?? 0) >= 80 {
+            return String(format: "%.0f%% connections", metrics.connectionUtilizationPercent ?? 0)
+        }
+        if (metrics.replicationLagSeconds ?? 0) >= 60 {
+            return String(format: "%.0fs replication lag", metrics.replicationLagSeconds ?? 0)
+        }
+        if (metrics.archiveFailureCount ?? 0) > 0 { return "WAL archive failing" }
+        return nil
     }
 }
 

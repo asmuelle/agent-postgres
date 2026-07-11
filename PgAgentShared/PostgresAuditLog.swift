@@ -30,6 +30,8 @@ struct PostgresAuditRecord: Codable, Sendable {
         // Guarded on-call fixes (roadmap 1.2 alert → action loop).
         case cancelBackend = "cancel_backend"
         case terminateBackend = "terminate_backend"
+        case backup
+        case restore
     }
 
     let ts: Date

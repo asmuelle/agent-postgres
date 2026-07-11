@@ -170,7 +170,7 @@ struct PostgresQueryTabView: View {
                     typeKind: typeKind
                 )
             case .activity:
-                PostgresActivityMonitorView(connectionId: connectionId)
+                PostgresActivityMonitorView(connectionId: connectionId, profile: profile)
             case .erd(let schema):
                 PostgresERDView(
                     connectionId: connectionId,
@@ -302,7 +302,8 @@ struct PostgresQueryTabView: View {
         .sheet(isPresented: $explainPlanOpen) {
             PostgresExplainVisualizerView(
                 connectionId: connectionId,
-                query: tab.sql
+                query: tab.sql,
+                isProduction: profile?.effectiveEnvironment == .production
             )
             .frame(minWidth: 850, minHeight: 600)
         }

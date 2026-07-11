@@ -45,6 +45,10 @@ let package = Package(
             name: "PgAgentMacOS",
             targets: ["PgAgentMacOS"]
         ),
+        .library(
+            name: "PgAgentOperatorCore",
+            targets: ["PgAgentOperatorCore"]
+        ),
     ],
     dependencies: [],
     targets: [
@@ -52,10 +56,30 @@ let package = Package(
             name: "PgAgentMacOS",
             path: "Sources/PgAgentMacOS"
         ),
+        .target(
+            name: "PgAgentOperatorCore",
+            path: "PgAgentShared",
+            sources: [
+                "FleetAlertModel.swift",
+                "FleetAlertLifecycleStore.swift",
+                "FleetHealthModel.swift",
+                "FleetOperatorCore.swift",
+                "PostgresBackupCore.swift",
+                "PostgresOperatorSafety.swift",
+                "PostgresOperationsCore.swift",
+                "PostgresStatementClassifier.swift",
+                "PostgresStatementSplitter.swift",
+            ]
+        ),
         .testTarget(
             name: "PgAgentMacOSTests",
             dependencies: ["PgAgentMacOS"],
             path: "Tests/PgAgentMacOSTests"
+        ),
+        .testTarget(
+            name: "PgAgentOperatorCoreTests",
+            dependencies: ["PgAgentOperatorCore"],
+            path: "Tests/PgAgentOperatorCoreTests"
         ),
     ]
 )

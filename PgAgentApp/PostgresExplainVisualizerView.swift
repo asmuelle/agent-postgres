@@ -6,8 +6,9 @@ import PgAgentMacOS
 
 // =============================================================================
 // Postgres Visual EXPLAIN Plan Analyzer (Pillar 2)
-// Executes EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT JSON)
-// parses the JSON tree, and draws an interactive, color-coded node graph.
+// Uses a non-executing estimated plan by default. Runtime ANALYZE is a
+// separate, explicitly-confirmed path that runs one read-only statement in a
+// read-only transaction with statement + lock timeouts.
 // =============================================================================
 
 struct PgExplainResult: Decodable, Sendable {
@@ -86,10 +87,13 @@ struct PgPlanNode: Decodable, Identifiable, Sendable, Hashable {
 struct PostgresExplainVisualizerView: View {
     let connectionId: String?
     let query: String
+    let isProduction: Bool
     
     @State private var state: VisualizerState<PgPlanNode> = .loading
     @State private var selectedNode: PgPlanNode? = nil
     @State private var zoomScale: CGFloat = 1.0
+    @State private var includesRuntimeMetrics = false
+    @State private var isAnalyzeConfirmationPresented = false
     
     var body: some View {
         HStack(spacing: 0) {
@@ -150,7 +154,18 @@ struct PostgresExplainVisualizerView: View {
         }
         .background(MidnightMacDesign.ColorToken.windowBackground)
         .task(id: query) {
-            await loadExplainPlan()
+            await loadExplainPlan(mode: .estimated)
+        }
+        .sheet(isPresented: $isAnalyzeConfirmationPresented) {
+            PostgresExplainAnalyzeConfirmationView(
+                query: query,
+                isProduction: isProduction,
+                onCancel: { isAnalyzeConfirmationPresented = false },
+                onConfirm: {
+                    isAnalyzeConfirmationPresented = false
+                    Task { await loadExplainPlan(mode: .analyze(confirmed: true)) }
+                }
+            )
         }
     }
     
@@ -165,11 +180,20 @@ struct PostgresExplainVisualizerView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Visual Query Optimizer")
                     .font(MidnightMacDesign.FontToken.title)
-                Text("Explain Tree and Execution diagnostics")
+                Text(includesRuntimeMetrics ? "Runtime plan (ANALYZE)" : "Estimated plan — query not executed")
                     .font(MidnightMacDesign.FontToken.caption)
                     .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
             }
             Spacer()
+            Button {
+                isAnalyzeConfirmationPresented = true
+            } label: {
+                Label("Run ANALYZE…", systemImage: "play.circle")
+            }
+            .disabled(!analyzeIsEligible)
+            .help(analyzeIsEligible
+                  ? "Execute this read-only statement with strict timeouts to collect runtime metrics"
+                  : "ANALYZE requires exactly one statement classified as read-only")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -305,27 +329,57 @@ struct PostgresExplainVisualizerView: View {
     }
     
     // MARK: - loadExplainPlan
-    private func loadExplainPlan() async {
+    private var analyzeIsEligible: Bool {
+        guard PostgresStatementSplitter.split(query).count == 1 else { return false }
+        return PostgresStatementClassifier.isReadOnly(query)
+    }
+
+    private func loadExplainPlan(mode: PostgresExplainMode) async {
         guard let connectionId else {
             state = .error("No connection available")
             return
         }
-        
+
+        let plan: PostgresExplainExecutionPlan
+        do {
+            plan = try PostgresExplainPolicy.plan(for: query, mode: mode)
+        } catch {
+            state = .error(error.localizedDescription)
+            return
+        }
+
         state = .loading
-        let sessionId = UUID().uuidString
-        let explainSql = "EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT JSON) \(query)"
-        
+        let sessionId = "explain-\(UUID().uuidString)"
+        var transactionOpened = false
+
         defer {
             Task {
+                if transactionOpened {
+                    try? await BridgeManager.shared.pgRollback(
+                        connectionId: connectionId, sessionId: sessionId)
+                }
                 await BridgeManager.shared.pgReleaseSession(connectionId: connectionId, sessionId: sessionId)
             }
         }
-        
+
         do {
+            if !plan.prelude.isEmpty {
+                try await BridgeManager.shared.pgBegin(
+                    connectionId: connectionId, sessionId: sessionId)
+                transactionOpened = true
+                for statement in plan.prelude {
+                    _ = try await BridgeManager.shared.pgExecute(
+                        connectionId: connectionId,
+                        sessionId: sessionId,
+                        sql: statement,
+                        pageSize: 1
+                    )
+                }
+            }
             let result = try await BridgeManager.shared.pgExecute(
                 connectionId: connectionId,
                 sessionId: sessionId,
-                sql: explainSql,
+                sql: plan.explainSQL,
                 pageSize: 10
             )
             
@@ -349,6 +403,7 @@ struct PostgresExplainVisualizerView: View {
             await MainActor.run {
                 state = .loaded(firstResult.plan)
                 selectedNode = firstResult.plan
+                includesRuntimeMetrics = plan.includesRuntimeMetrics
             }
             
         } catch {
@@ -356,6 +411,49 @@ struct PostgresExplainVisualizerView: View {
                 state = .error(error.localizedDescription)
             }
         }
+    }
+}
+
+private struct PostgresExplainAnalyzeConfirmationView: View {
+    let query: String
+    let isProduction: Bool
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    @State private var phrase = ""
+
+    private var canConfirm: Bool { !isProduction || phrase == "ANALYZE" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("EXPLAIN ANALYZE executes the query", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+                .foregroundStyle(isProduction ? .red : .orange)
+            Text("Only one read-only statement is allowed. pgAgent runs it in a read-only transaction with a 30-second statement timeout and 3-second lock timeout, then rolls back.")
+                .foregroundStyle(.secondary)
+            Text(query)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(8)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            if isProduction {
+                Text("Type ANALYZE to run this on production.")
+                    .font(.caption)
+                TextField("ANALYZE", text: $phrase)
+                    .textFieldStyle(.roundedBorder)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                Button("Run ANALYZE", action: onConfirm)
+                    .buttonStyle(.borderedProminent)
+                    .tint(isProduction ? .red : .orange)
+                    .disabled(!canConfirm)
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
     }
 }
 

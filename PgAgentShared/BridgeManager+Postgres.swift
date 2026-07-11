@@ -182,9 +182,42 @@ extension BridgeManager {
                     pgConnectionId: connectionId, tunnel: tunnel
                 )
             }
+            do {
+                try await validateMinimumServerVersion(connectionId: connectionId)
+            } catch {
+                await pgDisconnect(connectionId: connectionId)
+                throw error
+            }
             return connectionId
+        } catch let err as PostgresBridgeError {
+            throw err
         } catch let err as FfiPgError {
             throw PostgresBridgeError.from(err)
+        } catch {
+            throw PostgresBridgeError.other(error.localizedDescription)
+        }
+    }
+
+    private func validateMinimumServerVersion(connectionId: String) async throws {
+        let sessionId = "pgagent-version-check"
+        defer {
+            Task {
+                await self.pgReleaseSession(
+                    connectionId: connectionId, sessionId: sessionId)
+            }
+        }
+        let result = try await pgExecute(
+            connectionId: connectionId,
+            sessionId: sessionId,
+            sql: "SHOW server_version_num",
+            pageSize: 1)
+        guard let text = result.rows.first?.cells.first ?? nil,
+              let versionNum = Int(text) else {
+            throw PostgresBridgeError.other(
+                "Could not determine the PostgreSQL server version. pgAgent requires PostgreSQL 14 or newer.")
+        }
+        do {
+            try PostgresServerVersionPolicy.validate(versionNum: versionNum)
         } catch {
             throw PostgresBridgeError.other(error.localizedDescription)
         }

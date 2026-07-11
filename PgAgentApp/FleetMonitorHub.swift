@@ -23,8 +23,11 @@ final class FleetMonitorHub: ObservableObject {
     @Published private(set) var lastPollAt: Date?
     @Published private(set) var healths: [FleetInstanceHealth] = []
     @Published private(set) var instanceNames: [String: String] = [:]
+    @Published private(set) var activeAlerts: [FleetAlert] = []
+    @Published private(set) var driftFindings: [FleetDriftFinding] = []
 
     let relay = FleetAlertRelay()
+    let lifecycle = FleetAlertLifecycleStore.shared
 
     private let store = FleetHealthStore()
     private let settings = FleetMonitorSettings.shared
@@ -77,6 +80,7 @@ final class FleetMonitorHub: ObservableObject {
         pollTask?.cancel()
         pollTask = nil
         isRunning = false
+        Task { await store.shutdown() }
     }
 
     private func currentPollInterval() -> Int {
@@ -89,6 +93,8 @@ final class FleetMonitorHub: ObservableObject {
         let profiles = PostgresProfileStore.shared.profiles
         guard !profiles.isEmpty else {
             healths = []
+            activeAlerts = []
+            driftFindings = []
             lastPollAt = Date()
             return
         }
@@ -99,19 +105,50 @@ final class FleetMonitorHub: ObservableObject {
         let currentHealths = profiles.map { store.health(for: $0.id) }
         instanceNames = names
         healths = currentHealths
+        driftFindings = FleetDriftPolicy.findings(in: profiles.map { profile in
+            let metrics = store.health(for: profile.id).metrics
+            let group = profile.folderPath.map { "\($0)/\(profile.database)" } ?? profile.id
+            return FleetDriftSnapshot(
+                profileId: profile.id,
+                group: group,
+                environment: profile.effectiveEnvironment.rawValue,
+                serverMajorVersion: metrics?.serverMajorVersion,
+                schemaFingerprint: metrics?.schemaFingerprint)
+        })
         lastPollAt = Date()
 
-        let result = evaluateFleetAlerts(
-            healths: currentHealths,
-            names: names,
-            thresholds: settings.thresholds,
-            previouslyFiring: loadFiring()
-        )
-        saveFiring(result.firingNow)
+        let previouslyFiring = loadFiring()
+        var currentlyFiring: [FleetAlert] = []
+        for profile in profiles {
+            let result = evaluateFleetAlerts(
+                healths: [store.health(for: profile.id)],
+                names: names,
+                thresholds: thresholds(for: profile),
+                previouslyFiring: []
+            )
+            currentlyFiring.append(contentsOf: result.newAlerts)
+        }
+        activeAlerts = currentlyFiring
+        let firingNow = Set(currentlyFiring.map(\.id))
+        saveFiring(firingNow)
+        lifecycle.noteResolved(alertIds: previouslyFiring.subtracting(firingNow))
+        let lifecycleTransitions = lifecycle.prepareForPoll(
+            alerts: currentlyFiring, previouslyFiring: previouslyFiring)
 
-        guard !result.newAlerts.isEmpty else { return }
-        let payloads = result.newAlerts.map { FleetAlertPayload(alert: $0) }
+        let newlyRaised = currentlyFiring.filter {
+            (!previouslyFiring.contains($0.id) || lifecycleTransitions.contains($0.id))
+                && lifecycle.shouldDeliver($0)
+        }
+        guard !newlyRaised.isEmpty else { return }
+        let payloads = newlyRaised.map { FleetAlertPayload(alert: $0) }
         await relay.publish(payloads)
+    }
+
+    private func thresholds(for profile: PostgresProfile) -> FleetMonitorThresholds {
+        FleetEnvironmentPolicy.alertThresholds(
+            for: profile.effectiveEnvironment.rawValue,
+            user: settings.thresholds
+        )
     }
 
     // MARK: - Menu bar summary

@@ -22,6 +22,7 @@ struct HistoryPoint: Identifiable, Sendable {
 
 struct PostgresActivityMonitorView: View {
     let connectionId: String?
+    let profile: PostgresProfile?
     
     @State private var sessions: [FfiPgSessionDetail] = []
     @State private var locks: [FfiPgLockDetail] = []
@@ -33,6 +34,7 @@ struct PostgresActivityMonitorView: View {
     @State private var errorMessage: String? = nil
     @State private var searchPattern: String = ""
     @State private var filterState: String = "All" // All, Active, Waiting
+    @State private var pendingAction: PendingSessionAction?
     
     private let states = ["All", "Active", "Waiting"]
     
@@ -104,6 +106,16 @@ struct PostgresActivityMonitorView: View {
         }
         .onDisappear {
             isPolling = false
+        }
+        .sheet(item: $pendingAction) { pending in
+            PostgresSessionActionConfirmationView(
+                pending: pending,
+                onCancel: { pendingAction = nil },
+                onConfirm: { reason in
+                    pendingAction = nil
+                    performSessionAction(pending, reason: reason)
+                }
+            )
         }
     }
     
@@ -470,7 +482,7 @@ struct PostgresActivityMonitorView: View {
                             .foregroundStyle(MidnightMacDesign.ColorToken.secondaryText)
                         
                         HStack(spacing: 12) {
-                            Button(action: cancelQueryBackend) {
+                            Button { requestSessionAction(.cancel) } label: {
                                 Label("Cancel Query", systemImage: "xmark.circle")
                                     .font(MidnightMacDesign.FontToken.caption)
                                     .bold()
@@ -483,7 +495,7 @@ struct PostgresActivityMonitorView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                             .border(Color.orange.opacity(0.3), width: 1)
                             
-                            Button(action: terminateSessionBackend) {
+                            Button { requestSessionAction(.terminate) } label: {
                                 Label("Terminate Session", systemImage: "bolt.fill")
                                     .font(MidnightMacDesign.FontToken.caption)
                                     .bold()
@@ -576,36 +588,119 @@ struct PostgresActivityMonitorView: View {
         }
     }
     
-    private func cancelQueryBackend() {
-        guard let connectionId, let sess = selectedSession else { return }
+    private func requestSessionAction(_ action: PostgresSessionAction) {
+        guard let sess = selectedSession else { return }
+        let challenge = PostgresSessionActionPolicy.challenge(
+            action: action,
+            isProduction: profile?.effectiveEnvironment == .production,
+            profileName: profile?.name ?? "PostgreSQL",
+            pid: sess.pid
+        )
+        pendingAction = PendingSessionAction(
+            action: action, session: sess, challenge: challenge)
+    }
+
+    private func performSessionAction(_ pending: PendingSessionAction, reason: String) {
+        guard let connectionId else { return }
         Task {
             do {
-                let success = try await BridgeManager.shared.pgCancelBackend(connectionId: connectionId, pid: sess.pid)
-                if success {
-                    await fetchActivity()
-                } else {
-                    await MainActor.run { errorMessage = "Query cancel request sent, but PID was not active." }
+                let success: Bool
+                switch pending.action {
+                case .cancel:
+                    success = try await BridgeManager.shared.pgCancelBackend(
+                        connectionId: connectionId, pid: pending.session.pid)
+                case .terminate:
+                    success = try await BridgeManager.shared.pgTerminateBackend(
+                        connectionId: connectionId, pid: pending.session.pid)
                 }
+                auditSessionAction(pending, reason: reason, error: success ? nil : "backend no longer active")
+                if pending.action == .terminate, success {
+                    await MainActor.run { selectedSession = nil }
+                }
+                if !success {
+                    await MainActor.run { errorMessage = "The backend was no longer active." }
+                }
+                await fetchActivity()
             } catch {
+                auditSessionAction(pending, reason: reason, error: error.localizedDescription)
                 await MainActor.run { errorMessage = error.localizedDescription }
             }
         }
     }
-    
-    private func terminateSessionBackend() {
-        guard let connectionId, let sess = selectedSession else { return }
-        Task {
-            do {
-                let success = try await BridgeManager.shared.pgTerminateBackend(connectionId: connectionId, pid: sess.pid)
-                if success {
-                    await MainActor.run { selectedSession = nil }
-                    await fetchActivity()
-                } else {
-                    await MainActor.run { errorMessage = "Session terminate request sent, but connection was already dropped." }
+
+    private func auditSessionAction(
+        _ pending: PendingSessionAction,
+        reason: String,
+        error: String?
+    ) {
+        guard let profile else { return }
+        let action: PostgresAuditRecord.Action = pending.action == .cancel
+            ? .cancelBackend : .terminateBackend
+        Task.detached(priority: .utility) {
+            await PostgresAuditLog.shared.record(
+                profileName: profile.name,
+                host: profile.host,
+                database: profile.database,
+                user: profile.user,
+                action: action,
+                statement: "pid=\(pending.session.pid); reason=\(reason)",
+                error: error,
+                rowsAffected: nil
+            )
+        }
+    }
+}
+
+private struct PendingSessionAction: Identifiable {
+    let id = UUID()
+    let action: PostgresSessionAction
+    let session: FfiPgSessionDetail
+    let challenge: PostgresSessionActionChallenge
+}
+
+private struct PostgresSessionActionConfirmationView: View {
+    let pending: PendingSessionAction
+    let onCancel: () -> Void
+    let onConfirm: (String) -> Void
+
+    @State private var phrase = ""
+    @State private var reason = ""
+
+    private var canConfirm: Bool {
+        !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && pending.challenge.accepts(phrase)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(pending.challenge.title).font(.headline)
+            Text("PID \(pending.session.pid) · \(pending.session.usename) · \(pending.session.datname)")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Text(pending.session.query ?? "No query text available")
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(6)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            TextField("Reason for the audit log", text: $reason)
+                .textFieldStyle(.roundedBorder)
+            if let required = pending.challenge.requiredPhrase {
+                Text("Type \(required) to continue.").font(.caption)
+                TextField(required, text: $phrase).textFieldStyle(.roundedBorder)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                Button(pending.action == .cancel ? "Cancel Query" : "Terminate Session") {
+                    onConfirm(reason.trimmingCharacters(in: .whitespacesAndNewlines))
                 }
-            } catch {
-                await MainActor.run { errorMessage = error.localizedDescription }
+                .buttonStyle(.borderedProminent)
+                .tint(pending.action == .terminate ? .red : .orange)
+                .disabled(!canConfirm)
             }
         }
+        .padding(22)
+        .frame(width: 500)
     }
 }

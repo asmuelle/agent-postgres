@@ -31,7 +31,8 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
     let instanceName: String
     /// "critical" | "warning" — coarse, for notification styling/sorting.
     let severity: String
-    /// FleetAlertKind rawValue ("longRunning" | "blockedLocks" | "unreachable").
+    /// FleetAlertKind rawValue, such as "blockedLocks", "replicationLag",
+    /// "wraparound", or "unreachable".
     let kind: String
     let title: String
     let detail: String
@@ -117,8 +118,9 @@ struct FleetAlertPayload: Codable, Equatable, Sendable, Identifiable {
 
     static func severity(for kind: FleetAlertKind) -> String {
         switch kind {
-        case .blockedLocks, .unreachable: return "critical"
-        case .longRunning: return "warning"
+        case .blockedLocks, .unreachable, .wraparound: return "critical"
+        case .longRunning, .connectionCapacity, .replicationLag, .archiveFailures:
+            return "warning"
         }
     }
 
