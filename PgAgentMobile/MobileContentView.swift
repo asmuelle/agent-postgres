@@ -1667,6 +1667,14 @@ struct MobileQueryWorkspaceView: View {
                             .foregroundStyle(.secondary)
                             .padding()
                     }
+                case .routine(let schema, let name, let signature):
+                    MobileRoutineEditorView(
+                        connectionId: connectionId,
+                        profileId: profileId,
+                        schema: schema,
+                        name: name,
+                        signature: signature
+                    )
                 default:
                     // Editor Panel
                     VStack(spacing: 0) {

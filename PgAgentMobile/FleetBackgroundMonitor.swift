@@ -62,18 +62,24 @@ final class FleetBackgroundMonitor {
         await store.refresh(profiles: profiles)
 
         let names = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0.name) })
-        let healths = profiles.map { store.health(for: $0.id) }
         let previous = loadFiring()
+        var firingNow = Set<String>()
+        var newAlerts: [FleetAlert] = []
+        for profile in profiles {
+            let thresholds = FleetEnvironmentPolicy.alertThresholds(
+                for: profile.effectiveEnvironment.rawValue,
+                user: settings.thresholds)
+            let result = evaluateFleetAlerts(
+                healths: [store.health(for: profile.id)],
+                names: names,
+                thresholds: thresholds,
+                previouslyFiring: previous)
+            firingNow.formUnion(result.firingNow)
+            newAlerts.append(contentsOf: result.newAlerts)
+        }
 
-        let result = evaluateFleetAlerts(
-            healths: healths,
-            names: names,
-            thresholds: settings.thresholds,
-            previouslyFiring: previous
-        )
-
-        saveFiring(result.firingNow)
-        for alert in result.newAlerts {
+        saveFiring(firingNow)
+        for alert in newAlerts {
             await post(alert)
         }
     }

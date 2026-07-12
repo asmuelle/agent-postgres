@@ -126,6 +126,7 @@ struct PostgresHealthDashboardView: View {
                     topQueriesSection
                     deadTuplesSection
                     unusedIndexesSection
+                    PostgresOperationsPanel(connectionId: connectionId)
                 }
                 .padding(16)
             }

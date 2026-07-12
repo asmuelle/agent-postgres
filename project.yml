@@ -379,6 +379,7 @@ targets:
       - path: PgAgentMobile/MaintenanceModel.swift
       # Fleet monitor engine moved to PgAgentShared (reused by the macOS
       # monitoring hub) — same sources, new home.
+      - path: PgAgentShared/FleetOperatorCore.swift
       - path: PgAgentShared/FleetHealthModel.swift
       - path: PgAgentShared/FleetAlertModel.swift
       - path: PgAgentShared/FleetMonitorSettings.swift

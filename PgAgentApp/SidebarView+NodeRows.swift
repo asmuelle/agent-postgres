@@ -31,11 +31,9 @@ extension SidebarView {
             }
             .tag(node.id)
             .contentShape(Rectangle())
-            .onTapGesture {
-                selectedPostgresProfileId = profile.id
-                selectedNodeId = node.id
-                postOpenTabNotification(profile: profile, node: node, details: ["kind": "properties"])
-            }
+            // count:2 must be attached BEFORE the single-tap gesture —
+            // the other way round the single-tap recognizer consumes the
+            // first click and the double-click handler never fires.
             .onTapGesture(count: 2) {
                 guard let parsed = parsed else { return }
                 if isConnectedDb {
@@ -47,6 +45,11 @@ extension SidebarView {
                 } else {
                     presentForeignDatabaseAlert(profile: profile, database: parsed.database)
                 }
+            }
+            .onTapGesture {
+                selectedPostgresProfileId = profile.id
+                selectedNodeId = node.id
+                postOpenTabNotification(profile: profile, node: node, details: ["kind": "properties"])
             }
             .help(isConnectedDb ? "Double-click to view sequence properties" : "Database '\(parsed?.database ?? "?")' isn't connected through this profile.")
             .contextMenu {
@@ -79,11 +82,7 @@ extension SidebarView {
             }
             .tag(node.id)
             .contentShape(Rectangle())
-            .onTapGesture {
-                selectedPostgresProfileId = profile.id
-                selectedNodeId = node.id
-                postOpenTabNotification(profile: profile, node: node, details: ["kind": "properties"])
-            }
+            // Double-tap first — see the sequence row above.
             .onTapGesture(count: 2) {
                 guard let parsed = parsed else { return }
                 if isConnectedDb {
@@ -95,6 +94,11 @@ extension SidebarView {
                 } else {
                     presentForeignDatabaseAlert(profile: profile, database: parsed.database)
                 }
+            }
+            .onTapGesture {
+                selectedPostgresProfileId = profile.id
+                selectedNodeId = node.id
+                postOpenTabNotification(profile: profile, node: node, details: ["kind": "properties"])
             }
             .help(isConnectedDb ? "Double-click to view function definition" : "Database '\(parsed?.database ?? "?")' isn't connected through this profile.")
             .contextMenu {
@@ -119,11 +123,7 @@ extension SidebarView {
             }
             .tag(node.id)
             .contentShape(Rectangle())
-            .onTapGesture {
-                selectedPostgresProfileId = profile.id
-                selectedNodeId = node.id
-                postOpenTabNotification(profile: profile, node: node, details: ["kind": "properties"])
-            }
+            // Double-tap first — see the sequence row above.
             .onTapGesture(count: 2) {
                 guard let parsed = parsed else { return }
                 if isConnectedDb {
@@ -135,6 +135,11 @@ extension SidebarView {
                 } else {
                     presentForeignDatabaseAlert(profile: profile, database: parsed.database)
                 }
+            }
+            .onTapGesture {
+                selectedPostgresProfileId = profile.id
+                selectedNodeId = node.id
+                postOpenTabNotification(profile: profile, node: node, details: ["kind": "properties"])
             }
             .help(isConnectedDb ? "Double-click to view custom type details" : "Database '\(parsed?.database ?? "?")' isn't connected through this profile.")
             .contextMenu {
@@ -204,6 +209,26 @@ extension SidebarView {
                 }
             }
             .contentShape(Rectangle())
+            // Double-tap first — see the sequence row above.
+            .onTapGesture(count: 2) {
+                // Double-click = "show me the data now": opens (or
+                // reactivates) the browse tab with `autoRun` so the
+                // generated SELECT executes immediately. The store
+                // dedupes on (schema, table), so no duplicate tab appears.
+                guard let parsed = parsed, isConnectedDb else { return }
+                selectedPostgresProfileId = profile.id
+                selectedNodeId = rel.id
+                postOpenTabNotification(
+                    profile: profile,
+                    node: rel,
+                    details: [
+                        "kind": "relation",
+                        "schema": parsed.schema,
+                        "name": parsed.name,
+                        "autoRun": true,
+                    ]
+                )
+            }
             .onTapGesture {
                 selectedPostgresProfileId = profile.id
                 selectedNodeId = rel.id
@@ -217,24 +242,6 @@ extension SidebarView {
                 } else {
                     presentForeignDatabaseAlert(profile: profile, database: parsed.database)
                 }
-            }
-            .onTapGesture(count: 2) {
-                // Double-click = "show me the data now": the single-tap
-                // already opened (or reactivated) the browse tab; this
-                // re-posts with `autoRun` so the generated SELECT
-                // executes immediately. The store dedupes on
-                // (schema, table), so no duplicate tab appears.
-                guard let parsed = parsed, isConnectedDb else { return }
-                postOpenTabNotification(
-                    profile: profile,
-                    node: rel,
-                    details: [
-                        "kind": "relation",
-                        "schema": parsed.schema,
-                        "name": parsed.name,
-                        "autoRun": true,
-                    ]
-                )
             }
             .help(isConnectedDb
                   ? "Click to open a query tab; double-click to run the SELECT immediately"

@@ -17,17 +17,22 @@ struct FleetMonitorThresholds: Equatable, Sendable {
     var blockedLockAlert: Int
     /// Notify when an instance becomes unreachable.
     var alertOnUnreachable: Bool
+    var connectionWarningPercent: Double = 80
+    var replicationLagWarningSeconds: Double = 60
 
     static let defaults = FleetMonitorThresholds(
-        longRunningSeconds: 5,
+        longRunningSeconds: 30,
         longRunningCountAlert: 1,
         blockedLockAlert: 1,
-        alertOnUnreachable: false
+        alertOnUnreachable: false,
+        connectionWarningPercent: 80,
+        replicationLagWarningSeconds: 60
     )
 }
 
 enum FleetAlertKind: String, Sendable, Equatable {
     case longRunning, blockedLocks, unreachable
+    case connectionCapacity, replicationLag, wraparound, archiveFailures
 }
 
 struct FleetAlert: Identifiable, Equatable, Sendable {
@@ -103,6 +108,33 @@ func evaluateFleetAlerts(
             body: "\(health.blockedLockCount) backend\(health.blockedLockCount == 1 ? "" : "s") blocked on locks.",
             blockerPid: health.rootBlockerPid
         )
+
+        if let metrics = health.metrics {
+            consider(
+                .connectionCapacity,
+                active: (metrics.connectionUtilizationPercent ?? 0) >= thresholds.connectionWarningPercent,
+                title: "\(name): connection capacity",
+                body: String(format: "%.0f%% of PostgreSQL connections are in use.", metrics.connectionUtilizationPercent ?? 0)
+            )
+            consider(
+                .replicationLag,
+                active: (metrics.replicationLagSeconds ?? 0) >= thresholds.replicationLagWarningSeconds,
+                title: "\(name): replication lag",
+                body: String(format: "Replica replay lag is %.0f seconds.", metrics.replicationLagSeconds ?? 0)
+            )
+            consider(
+                .wraparound,
+                active: (metrics.xidAge ?? 0) >= 1_500_000_000,
+                title: "\(name): transaction ID risk",
+                body: "Oldest database XID age is \(metrics.xidAge ?? 0). Investigate autovacuum immediately."
+            )
+            consider(
+                .archiveFailures,
+                active: (metrics.archiveFailureCount ?? 0) > 0,
+                title: "\(name): WAL archive failures",
+                body: "pg_stat_archiver reports \(metrics.archiveFailureCount ?? 0) failed archive attempts."
+            )
+        }
     }
 
     return (newAlerts, firingNow)

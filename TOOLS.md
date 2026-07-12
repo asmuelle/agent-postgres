@@ -75,6 +75,9 @@ What pgAgent actually does, surface by surface. Pair with [`AGENTS.md`](AGENTS.m
 
 ## PostgreSQL workspace
 
+PostgreSQL 14 is the minimum supported server version. Connection setup rejects
+older servers before opening an interactive workspace.
+
 ### Browser & schema tree
 
 - `PostgresBrowserView.swift`, `PostgresBrowserWindow.swift`, `PgSchemaStore.swift`
@@ -103,6 +106,32 @@ What pgAgent actually does, surface by surface. Pair with [`AGENTS.md`](AGENTS.m
 
 - `PostgresHistoryPopover.swift`, `PostgresHistoryStore.swift`, `PostgresSavedQueriesPopover.swift`, `PostgresSavedQueriesStore.swift`, `PostgresSavedQueryEditSheet.swift`
 - Per-profile history with full-text search, pinned saved queries.
+
+### Fleet operations
+
+- `FleetHealthStore.swift`, `FleetOperatorCore.swift`, `FleetMonitorHub.swift`, `FleetHubViews.swift`
+- Dedicated reusable probe connections poll at most four of 20 instances at a time; interactive pools and schema discovery are not touched.
+- Environment-aware defaults cover reachability, connection capacity, long transactions, idle-in-transaction sessions, XID age, replication lag, retained WAL, archive failures, SSL, maintenance progress, and schema fingerprints.
+- Health snapshots are retained as JSONL evidence. Alerts support acknowledge, snooze, maintenance windows, recurrence, and resolution; grouped instances report schema drift.
+
+### Safe operator actions
+
+- `PostgresExplainVisualizerView.swift`, `PostgresActivityMonitorView.swift`, `PostgresOperatorSafety.swift`
+- EXPLAIN defaults to an estimated plan. EXPLAIN ANALYZE is single-statement, read-only classified, wrapped in a read-only transaction with timeouts, and requires explicit confirmation (typed confirmation in production).
+- Session cancel/terminate actions require a reason; termination and production cancellation require a typed challenge and are written to the audit log.
+
+### Verified backup executor
+
+- `PostgresBackupRestoreView.swift`, `PostgresBackupCore.swift`
+- Runs `pg_dump`, `pg_restore`, and `psql` as cancellable jobs on the profile's SSH execution host; database credentials stay in its mode-0600 `~/.pgpass`.
+- Checks server/tool compatibility and destination safety, writes backups atomically, validates archives, records SHA-256 evidence, and preserves durable JSONL job history.
+- Restore is a separate, explicitly confirmed operation. Production restore requires a typed database-specific challenge.
+
+### Maintenance progress & incident runbooks
+
+- `PostgresOperationsPanel.swift`, `PostgresOperationsCore.swift`
+- Live detailed progress for VACUUM, ANALYZE, CREATE INDEX, and CLUSTER; fleet posture also counts active base-backup and COPY operations.
+- Evidence-first, read-only diagnostic runbooks cover connection storms, replication lag, and transaction-ID wraparound risk; SQL is copyable for DBA review.
 
 ### SSH tunneling
 

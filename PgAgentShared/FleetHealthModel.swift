@@ -18,6 +18,10 @@ struct FleetInstanceHealth: Identifiable, Sendable, Equatable {
     var blockedLockCount: Int
     var errorMessage: String?
     var lastUpdated: Date?
+    /// End-to-end connection + catalog probe latency for this sample.
+    var latencyMilliseconds: Double? = nil
+    /// PostgreSQL 14+ posture metrics collected by the lightweight probe.
+    var metrics: FleetProbeMetrics? = nil
     /// Head of the biggest lock wait chain at poll time, when one exists —
     /// threaded into blocked-locks alerts so a notification tap can land on
     /// the offending session (roadmap 1.2). Nil when nothing is blocked.
@@ -29,7 +33,9 @@ struct FleetInstanceHealth: Identifiable, Sendable, Equatable {
     var severity: Severity {
         if !reachable { return .offline }
         if blockedLockCount > 0 { return .blocked }
+        if let metrics, FleetPosturePolicy.severity(metrics: metrics) == .critical { return .blocked }
         if longRunningCount > 0 { return .slow }
+        if let metrics, FleetPosturePolicy.severity(metrics: metrics) == .warning { return .slow }
         if activeBackends > 0 { return .busy }
         return .healthy
     }

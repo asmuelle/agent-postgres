@@ -19,9 +19,15 @@ Native macOS / iPadOS SSH workspace. AppKit + SwiftUI shell, SwiftTerm for the P
 ## Prerequisites
 
 - macOS 14+ with Xcode 15+ and command-line tools (`xcode-select --install`)
+- PostgreSQL **14+** for database connections and fleet monitoring
 - Rust **1.95+** (edition 2024) — `rustup default stable`
 - [`just`](https://github.com/casey/just) — `brew install just`
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen` (auto-installed by `just mac-bootstrap`)
+
+Verified backup and restore jobs run on the profile's SSH execution host. That
+host needs compatible `pg_dump` / `pg_restore` / `psql` binaries and a mode-0600
+`~/.pgpass` entry. Direct managed-cloud databases can use a small SSH runner or
+jump host with network access to the provider endpoint.
 
 ```bash
 just bootstrap          # one-time: xcodegen + macOS + iOS Rust targets
@@ -123,4 +129,3 @@ just mac-build
 **`Thread 3 Crashed: rshellInit() → _assertionFailure`** — uniffi binding checksums don't match the rebuilt Rust lib. Always regenerate via `just mac-bindings` after touching the FFI; never hand-edit the generated Swift.
 
 **Build is slow on first run** — `russh` and `parquet` (transitive via `ssh-commander-pg-parquet`) compile from source. Subsequent incremental builds are fast.
-
