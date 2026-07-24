@@ -16,9 +16,15 @@ import Security
 // =============================================================================
 enum MobileSSHKeyStore {
     private static let service = "com.mc-ssh.tunnel-ssh-key"
+    /// Passphrases for identity keys live here rather than in `KeychainManager`
+    /// so they share the key's `AfterFirstUnlock` accessibility. The shared
+    /// manager stores secrets `WhenUnlocked`, which would make the passphrase
+    /// unreadable during a locked-device background connect while the key
+    /// itself still loaded — an encrypted key silently opened as unencrypted.
+    private static let passphraseService = "com.mc-ssh.tunnel-ssh-key-passphrase"
     private static let logger = Logger(subsystem: "com.mc-ssh", category: "mobile-ssh-key-store")
 
-    private static func baseQuery(account: String) -> [String: Any] {
+    private static func baseQuery(account: String, service: String = service) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -69,6 +75,42 @@ enum MobileSSHKeyStore {
     @discardableResult
     static func delete(account: String) -> Bool {
         let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    // MARK: - Key passphrase (identity keys)
+
+    @discardableResult
+    static func savePassphrase(_ passphrase: String, account: String) -> Bool {
+        guard let data = passphrase.data(using: .utf8) else { return false }
+        SecItemDelete(baseQuery(account: account, service: passphraseService) as CFDictionary)
+
+        var add = baseQuery(account: account, service: passphraseService)
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+
+        let status = SecItemAdd(add as CFDictionary, nil)
+        if status != errSecSuccess {
+            logger.error("SSH key passphrase keychain add failed: \(status, privacy: .public)")
+            return false
+        }
+        return true
+    }
+
+    static func loadPassphrase(account: String) -> String? {
+        var query = baseQuery(account: account, service: passphraseService)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        guard status == errSecSuccess, let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    @discardableResult
+    static func deletePassphrase(account: String) -> Bool {
+        let status = SecItemDelete(baseQuery(account: account, service: passphraseService) as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
     }
 }

@@ -3,6 +3,7 @@ import UIKit
 
 struct PostgresMobileConnectionEditView: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var identityStore = MobileSSHIdentityStore.shared
 
     let profile: PostgresProfile?
     var onSave: (PostgresProfile) -> Void
@@ -32,6 +33,11 @@ struct PostgresMobileConnectionEditView: View {
     @State private var sshPassword = ""
     @State private var sshPrivateKey = ""
     @State private var sshKeyPassphrase = ""
+    // Shared-identity auth: the tunnel points at a keypair in
+    // MobileSSHIdentityStore instead of carrying its own endpoint-scoped key.
+    @State private var sshIdentityId: String?
+    @State private var showingIdentityManager = false
+    @State private var showingCreateIdentity = false
     @State private var tunnelRemoteHost = "127.0.0.1"
     @State private var tunnelRemotePort = ""
     // Stable across edits so the Keychain account / live-connection cache key
@@ -351,6 +357,16 @@ struct PostgresMobileConnectionEditView: View {
             .onAppear {
                 populate()
             }
+            .sheet(isPresented: $showingCreateIdentity) {
+                MobileCreateSSHIdentityView { identity in
+                    sshIdentityId = identity.id
+                }
+            }
+            .sheet(isPresented: $showingIdentityManager) {
+                MobileSSHIdentityListView { identity in
+                    sshIdentityId = identity.id
+                }
+            }
         }
     }
 
@@ -423,43 +439,15 @@ struct PostgresMobileConnectionEditView: View {
                         .tint(accent)
                     }
 
-                    if sshAuth == .password {
+                    switch sshAuth {
+                    case .password:
                         EditFormRow("SSH Password") {
                             SecureField("Required", text: $sshPassword)
                         }
-                    } else {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Button(action: applyClipboardPrivateKey) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "key.horizontal")
-                                    Text("Paste private key from clipboard")
-                                        .font(MidnightMobileDesign.FontToken.label)
-                                    Spacer()
-                                }
-                                .foregroundStyle(accent)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .midnightMobileMinimumTapTarget()
-
-                            if !sshPrivateKey.isEmpty || hasStoredKey {
-                                Button(role: .destructive, action: clearPrivateKey) {
-                                    Text("Remove private key")
-                                        .font(MidnightMobileDesign.FontToken.caption)
-                                }
-                                .buttonStyle(.plain)
-                            }
-
-                            Text(keyStatusText)
-                                .font(MidnightMobileDesign.FontToken.caption)
-                                .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            EditFormRow("Key Passphrase (Optional)") {
-                                SecureField("Only if the key is encrypted", text: $sshKeyPassphrase)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    case .privateKey:
+                        privateKeyAuthFields
+                    case .identity:
+                        identityAuthFields
                     }
 
                     Divider().background(MidnightMobileDesign.ColorToken.separator)
@@ -524,6 +512,110 @@ struct PostgresMobileConnectionEditView: View {
             .padding()
             .midnightMobileCard()
         }
+    }
+
+    @ViewBuilder
+    private var privateKeyAuthFields: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(action: applyClipboardPrivateKey) {
+                HStack(spacing: 8) {
+                    Image(systemName: "key.horizontal")
+                    Text("Paste private key from clipboard")
+                        .font(MidnightMobileDesign.FontToken.label)
+                    Spacer()
+                }
+                .foregroundStyle(accent)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .midnightMobileMinimumTapTarget()
+
+            if !sshPrivateKey.isEmpty || hasStoredKey {
+                Button(role: .destructive, action: clearPrivateKey) {
+                    Text("Remove private key")
+                        .font(MidnightMobileDesign.FontToken.caption)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text(keyStatusText)
+                .font(MidnightMobileDesign.FontToken.caption)
+                .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            EditFormRow("Key Passphrase (Optional)") {
+                SecureField("Only if the key is encrypted", text: $sshKeyPassphrase)
+            }
+
+            Text("This key is stored for this SSH endpoint only. To reuse one key across connections, switch to \"SSH Identity\".")
+                .font(MidnightMobileDesign.FontToken.caption)
+                .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var identityAuthFields: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if identityStore.identities.isEmpty {
+                Text("No SSH identities on this device yet. Create one and it becomes available to every connection.")
+                    .font(MidnightMobileDesign.FontToken.caption)
+                    .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                HStack {
+                    Text("Identity")
+                        .font(MidnightMobileDesign.FontToken.label)
+                    Spacer()
+                    Picker("Identity", selection: $sshIdentityId) {
+                        Text("None").tag(String?.none)
+                        ForEach(identityStore.identities) { identity in
+                            Text(identity.name).tag(String?.some(identity.id))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(accent)
+                }
+
+                if let selected = identityStore.identity(id: sshIdentityId) {
+                    Text(selected.fingerprint ?? "Fingerprint unavailable")
+                        .font(MidnightMobileDesign.FontToken.metadataMono)
+                        .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            HStack(spacing: 20) {
+                Button {
+                    showingCreateIdentity = true
+                } label: {
+                    Label("Create Identity", systemImage: "plus.circle")
+                        .font(MidnightMobileDesign.FontToken.label)
+                        .foregroundStyle(accent)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    showingIdentityManager = true
+                } label: {
+                    Label("Manage", systemImage: "key.horizontal")
+                        .font(MidnightMobileDesign.FontToken.label)
+                        .foregroundStyle(accent)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+            }
+            .midnightMobileMinimumTapTarget()
+
+            Text("The identity's public key must be in ~/.ssh/authorized_keys on the SSH host. Open it under Manage to copy the line.")
+                .font(MidnightMobileDesign.FontToken.caption)
+                .foregroundStyle(MidnightMobileDesign.ColorToken.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func applyClipboardPrivateKey() {
@@ -606,6 +698,7 @@ struct PostgresMobileConnectionEditView: View {
             sshPort = String(t.sshPort ?? 22)
             sshUser = t.sshUser ?? ""
             sshAuth = t.sshAuth ?? .password
+            sshIdentityId = t.sshIdentityId
             tunnelRemoteHost = t.remoteHost
             tunnelRemotePort = String(t.remotePort)
 
@@ -618,6 +711,9 @@ struct PostgresMobileConnectionEditView: View {
                 case .privateKey:
                     hasStoredKey = MobileSSHKeyStore.has(account: account)
                     sshKeyPassphrase = KeychainManager.shared.loadPassword(kind: .sshKeyPassphrase, account: account) ?? ""
+                case .identity:
+                    // Key material lives under the identity, not this endpoint.
+                    break
                 }
             }
         }
@@ -715,6 +811,11 @@ struct PostgresMobileConnectionEditView: View {
         if sshAuth == .privateKey && sshPrivateKey.isEmpty && !hasStoredKey {
             return (nil, "Paste an SSH private key, or switch the tunnel to password auth.")
         }
+        // Guard against a stale selection: an identity deleted while this sheet
+        // was open would otherwise save a tunnel that can never connect.
+        if sshAuth == .identity, MobileSSHIdentityStore.shared.identity(id: sshIdentityId) == nil {
+            return (nil, "Choose an SSH identity, or create one with \"Create Identity\".")
+        }
 
         return (PostgresTunnel(
             sshConnectionId: tunnelId,
@@ -723,7 +824,8 @@ struct PostgresMobileConnectionEditView: View {
             sshHost: trimmedHost,
             sshPort: sshPortValue,
             sshUser: trimmedUser,
-            sshAuth: sshAuth
+            sshAuth: sshAuth,
+            sshIdentityId: sshAuth == .identity ? sshIdentityId : nil
         ), nil)
     }
 
@@ -776,6 +878,12 @@ struct PostgresMobileConnectionEditView: View {
             }
             // Drop any password left from a prior password config.
             success = KeychainManager.shared.deletePassword(kind: .sshPassword, account: account) && success
+        case .identity:
+            // The identity owns its key and passphrase under its own account,
+            // so evict everything this endpoint held from a prior config.
+            success = KeychainManager.shared.deletePassword(kind: .sshPassword, account: account) && success
+            success = KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account) && success
+            success = MobileSSHKeyStore.delete(account: account) && success
         }
         return success
     }

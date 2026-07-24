@@ -46,6 +46,81 @@ final class PostgresTunnelCodableTests: XCTestCase {
         XCTAssertEqual(decoded, original)
         XCTAssertTrue(decoded.isInline)
         XCTAssertEqual(decoded.sshAuth, .privateKey)
+        XCTAssertNil(decoded.sshIdentityId, "a per-endpoint key tunnel never references an identity")
+    }
+
+    // MARK: - Shared SSH identity
+
+    func testIdentityTunnelRoundTrips() throws {
+        let original = PostgresTunnel(
+            sshConnectionId: "F1E2-D3C4",
+            remoteHost: "127.0.0.1",
+            remotePort: 5432,
+            sshHost: "bastion.example.com",
+            sshPort: 22,
+            sshUser: "deploy",
+            sshAuth: .identity,
+            sshIdentityId: "7C9E6679-7425-40DE-944B-E07FC1F90AE7"
+        )
+
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(PostgresTunnel.self, from: data)
+
+        XCTAssertEqual(decoded, original)
+        XCTAssertEqual(decoded.sshAuth, .identity)
+        XCTAssertEqual(decoded.sshIdentityId, "7C9E6679-7425-40DE-944B-E07FC1F90AE7")
+    }
+
+    /// Tunnels written before shared identities existed must keep decoding —
+    /// the field is absent from their JSON entirely.
+    func testDecodesInlineTunnelSavedBeforeIdentitiesExisted() throws {
+        let json = """
+        {
+          "sshConnectionId": "F1E2-D3C4",
+          "remoteHost": "127.0.0.1",
+          "remotePort": 5432,
+          "sshHost": "bastion.example.com",
+          "sshPort": 22,
+          "sshUser": "deploy",
+          "sshAuth": "privateKey"
+        }
+        """
+        let tunnel = try JSONDecoder().decode(PostgresTunnel.self, from: Data(json.utf8))
+
+        XCTAssertEqual(tunnel.sshAuth, .privateKey)
+        XCTAssertNil(tunnel.sshIdentityId)
+        XCTAssertTrue(tunnel.isInline)
+    }
+
+    /// The identity's key is stored under the identity, so several tunnels to
+    /// *different* endpoints share one keypair — the point of the feature.
+    func testDistinctEndpointsCanShareOneIdentity() {
+        let identityId = "7C9E6679-7425-40DE-944B-E07FC1F90AE7"
+        let staging = PostgresTunnel(
+            sshConnectionId: "a",
+            remoteHost: "127.0.0.1",
+            remotePort: 5432,
+            sshHost: "staging.example.com",
+            sshUser: "deploy",
+            sshAuth: .identity,
+            sshIdentityId: identityId
+        )
+        let production = PostgresTunnel(
+            sshConnectionId: "b",
+            remoteHost: "127.0.0.1",
+            remotePort: 5432,
+            sshHost: "prod.example.com",
+            sshUser: "ops",
+            sshAuth: .identity,
+            sshIdentityId: identityId
+        )
+
+        XCTAssertEqual(staging.sshIdentityId, production.sshIdentityId)
+        XCTAssertNotEqual(
+            staging.sshKeychainAccount,
+            production.sshKeychainAccount,
+            "endpoint accounts still differ — only the key material is shared"
+        )
     }
 
     // MARK: - Keychain account derivation

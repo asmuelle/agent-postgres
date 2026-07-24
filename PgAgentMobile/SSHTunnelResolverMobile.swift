@@ -27,6 +27,10 @@ enum SSHTunnelResolver {
         case incompleteConfig
         case passwordUnavailable(host: String)
         case keyUnavailable(host: String)
+        case identityNotSelected
+        case identityMissing
+        case identityKeyUnavailable(name: String)
+        case identityPassphraseUnavailable(name: String)
         case keyMaterializeFailed(String)
         case connectFailed(host: String, detail: String)
 
@@ -40,6 +44,14 @@ enum SSHTunnelResolver {
                 return "No saved SSH password for \(host). Edit the connection and re-enter the SSH password."
             case .keyUnavailable(let host):
                 return "No saved SSH private key for \(host). Edit the connection and import the private key again."
+            case .identityNotSelected:
+                return "This SSH tunnel has no identity selected. Edit the connection and pick an SSH identity."
+            case .identityMissing:
+                return "The SSH identity this tunnel used was deleted. Edit the connection and pick another identity."
+            case .identityKeyUnavailable(let name):
+                return "The private key for the identity \"\(name)\" is missing from this device's Keychain. Recreate the identity and add its public key to the server."
+            case .identityPassphraseUnavailable(let name):
+                return "The passphrase for the identity \"\(name)\" couldn't be read from the Keychain. Unlock the device and try again."
             case .keyMaterializeFailed(let detail):
                 return "Couldn't prepare the SSH private key: \(detail)"
             case .connectFailed(let host, let detail):
@@ -155,6 +167,31 @@ enum SSHTunnelResolver {
             // An empty stored passphrase means an unencrypted key — pass nil.
             let storedPassphrase = KeychainManager.shared.loadPassword(kind: .sshKeyPassphrase, account: account)
             passphrase = (storedPassphrase?.isEmpty == false) ? storedPassphrase : nil
+
+        case .identity:
+            // A shared identity's key lives under the identity's own account,
+            // not this endpoint's — so several tunnels reuse one keypair.
+            guard let identityId = tunnel.sshIdentityId else {
+                throw ResolveError.identityNotSelected
+            }
+            guard let identity = MobileSSHIdentityStore.shared.identity(id: identityId) else {
+                throw ResolveError.identityMissing
+            }
+            guard let pem = MobileSSHIdentityStore.shared.privateKeyPEM(id: identityId), !pem.isEmpty else {
+                throw ResolveError.identityKeyUnavailable(name: identity.name)
+            }
+            do {
+                materializedKey = try MaterializedSSHKey(pem: pem)
+            } catch {
+                throw ResolveError.keyMaterializeFailed(error.localizedDescription)
+            }
+            passphrase = MobileSSHIdentityStore.shared.passphrase(id: identityId)
+            // An encrypted key whose passphrase didn't load would otherwise be
+            // handed to russh as if it were unencrypted, surfacing only as an
+            // opaque auth rejection. Fail with the real reason instead.
+            if identity.isEncrypted, passphrase == nil {
+                throw ResolveError.identityPassphraseUnavailable(name: identity.name)
+            }
         }
         defer { materializedKey?.remove() }
 

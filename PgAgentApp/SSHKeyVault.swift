@@ -76,7 +76,7 @@ final class SSHKeyVault {
         guard let url = findFirstRecord() else { return true }
         do {
             let data = try Data(contentsOf: url)
-            let record = try JSONDecoder.midnightSSH.decode(SSHKeyVaultRecord.self, from: data)
+            let record = try JSONDecoder.agentSSH.decode(SSHKeyVaultRecord.self, from: data)
             _ = try decrypt(record.encryptedKey)
             return true
         } catch {
@@ -138,26 +138,17 @@ final class SSHKeyVault {
     }
 
     func generateEd25519Key(comment: String) throws -> (reference: SSHKeyReference, publicKey: String, fingerprint: String) {
-        let privateKey = Curve25519.Signing.PrivateKey()
-        let publicBytes = privateKey.publicKey.rawRepresentation
-        let privateBytes = privateKey.rawRepresentation + publicBytes
-        let publicKey = Self.openSSHPublicKey(publicBytes: publicBytes, comment: comment)
-        let fingerprint = Self.fingerprint(publicKeyLine: publicKey) ?? "SHA256:unknown"
-        let privateKeyText = try Self.openSSHPrivateKey(
-            privateBytes: privateBytes,
-            publicBytes: publicBytes,
-            comment: comment
-        )
+        let generated = try SSHKeyGeneration.generateEd25519(comment: comment)
 
         let id = UUID().uuidString
         try writeRecord(
             id: id,
             label: "pgAgent \(comment)",
             source: "Generated",
-            privateKey: Data(privateKeyText.utf8),
-            publicKey: publicKey
+            privateKey: Data(generated.privateKeyPEM.utf8),
+            publicKey: generated.publicKeyLine
         )
-        return (.generatedVaultKey(id: id), publicKey, fingerprint)
+        return (.generatedVaultKey(id: id), generated.publicKeyLine, generated.fingerprint)
     }
 
     func metadata(for reference: SSHKeyReference?) -> SSHKeyMetadata? {
@@ -266,32 +257,11 @@ final class SSHKeyVault {
     }
 
     static func fingerprint(publicKeyLine: String?) -> String? {
-        guard let publicKeyLine else { return nil }
-        let parts = publicKeyLine.split(separator: " ")
-        guard parts.count >= 2, let blob = Data(base64Encoded: String(parts[1])) else { return nil }
-        let digest = Data(SHA256.hash(data: blob))
-            .base64EncodedString()
-            .trimmingCharacters(in: CharacterSet(charactersIn: "="))
-        return "SHA256:\(digest)"
+        SSHKeyGeneration.fingerprint(publicKeyLine: publicKeyLine)
     }
 
     static func looksLikePrivateKey(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.hasPrefix("ssh-rsa "),
-              !trimmed.hasPrefix("ssh-ed25519 "),
-              !trimmed.hasPrefix("ecdsa-sha2-") else {
-            return false
-        }
-
-        let markers = [
-            "-----BEGIN OPENSSH PRIVATE KEY-----",
-            "-----BEGIN RSA PRIVATE KEY-----",
-            "-----BEGIN EC PRIVATE KEY-----",
-            "-----BEGIN DSA PRIVATE KEY-----",
-            "-----BEGIN PRIVATE KEY-----",
-            "PuTTY-User-Key-File-",
-        ]
-        return markers.contains { trimmed.contains($0) }
+        SSHKeyGeneration.looksLikePrivateKey(text)
     }
 
     private func writeRecord(
@@ -310,7 +280,7 @@ final class SSHKeyVault {
             fingerprint: Self.fingerprint(publicKeyLine: publicKey),
             encryptedKey: try encrypt(privateKey)
         )
-        let data = try JSONEncoder.midnightSSH.encode(record)
+        let data = try JSONEncoder.agentSSH.encode(record)
         let url = recordURL(id: id)
         try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: url, options: [.atomic])
@@ -322,7 +292,7 @@ final class SSHKeyVault {
         let url = recordURL(id: id)
         guard fileManager.fileExists(atPath: url.path) else { throw SSHKeyVaultError.keyNotFound }
         let data = try Data(contentsOf: url)
-        return try JSONDecoder.midnightSSH.decode(SSHKeyVaultRecord.self, from: data)
+        return try JSONDecoder.agentSSH.decode(SSHKeyVaultRecord.self, from: data)
     }
 
     private func encrypt(_ data: Data) throws -> Data {
@@ -448,82 +418,10 @@ final class SSHKeyVault {
         return line
     }
 
-    private static func openSSHPublicKey(publicBytes: Data, comment: String) -> String {
-        var blob = Data()
-        blob.appendSSHString(Data("ssh-ed25519".utf8))
-        blob.appendSSHString(publicBytes)
-        return "ssh-ed25519 \(blob.base64EncodedString()) \(comment)"
-    }
-
-    private static func openSSHPrivateKey(
-        privateBytes: Data,
-        publicBytes: Data,
-        comment: String
-    ) throws -> String {
-        var checkBytes = Data(count: 4)
-        let randomStatus = checkBytes.withUnsafeMutableBytes { buffer in
-            SecRandomCopyBytes(kSecRandomDefault, 4, buffer.baseAddress!)
-        }
-        guard randomStatus == errSecSuccess else {
-            throw SSHKeyVaultError.keychainUnavailable(randomStatus)
-        }
-        let check = checkBytes.withUnsafeBytes { $0.load(as: UInt32.self) }.bigEndian
-
-        var publicBlob = Data()
-        publicBlob.appendSSHString(Data("ssh-ed25519".utf8))
-        publicBlob.appendSSHString(publicBytes)
-
-        var privateBlock = Data()
-        privateBlock.appendUInt32(check)
-        privateBlock.appendUInt32(check)
-        privateBlock.appendSSHString(Data("ssh-ed25519".utf8))
-        privateBlock.appendSSHString(publicBytes)
-        privateBlock.appendSSHString(privateBytes)
-        privateBlock.appendSSHString(Data(comment.utf8))
-        var pad: UInt8 = 1
-        repeat {
-            privateBlock.append(pad)
-            pad &+= 1
-        } while privateBlock.count % 8 != 0
-
-        var body = Data("openssh-key-v1\0".utf8)
-        body.appendSSHString(Data("none".utf8))
-        body.appendSSHString(Data("none".utf8))
-        body.appendSSHString(Data())
-        body.appendUInt32(1)
-        body.appendSSHString(publicBlob)
-        body.appendSSHString(privateBlock)
-
-        let encoded = body.base64EncodedString()
-        let wrapped = stride(from: 0, to: encoded.count, by: 70).map { offset -> String in
-            let start = encoded.index(encoded.startIndex, offsetBy: offset)
-            let end = encoded.index(start, offsetBy: min(70, encoded.distance(from: start, to: encoded.endIndex)))
-            return String(encoded[start..<end])
-        }.joined(separator: "\n")
-
-        return """
-        -----BEGIN OPENSSH PRIVATE KEY-----
-        \(wrapped)
-        -----END OPENSSH PRIVATE KEY-----
-
-        """
-    }
-}
-
-private extension Data {
-    mutating func appendUInt32(_ value: UInt32) {
-        var bigEndian = value.bigEndian
-        append(Data(bytes: &bigEndian, count: MemoryLayout<UInt32>.size))
-    }
-
-    mutating func appendSSHString(_ data: Data) {
-        appendUInt32(UInt32(data.count))
-        append(data)
-    }
 }
 
 private extension JSONEncoder {
-    static var midnightSSH: JSONEncoder {
+    static var agentSSH: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
@@ -531,7 +429,7 @@ private extension JSONEncoder {
 }
 
 private extension JSONDecoder {
-    static var midnightSSH: JSONDecoder {
+    static var agentSSH: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
