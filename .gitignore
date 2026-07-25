@@ -36,3 +36,6 @@ ExportOptions.plist
 
 # Claude Code local permissions
 .claude/settings.local.json
+
+# Hermes local scratch (verification sources, desktop attachments)
+.hermes/
