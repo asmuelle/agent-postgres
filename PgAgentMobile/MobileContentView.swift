@@ -53,6 +53,7 @@ struct MobileContentView: View {
     @State private var showingCSVImport = false
     @State private var showingFleetMonitor = false
     @State private var showingProviderImport = false
+    @State private var showingSSHIdentities = false
 
     var body: some View {
         Group {
@@ -95,6 +96,9 @@ struct MobileContentView: View {
         .sheet(isPresented: $showingProviderImport) {
             MobileProviderImportView()
                 .environmentObject(profileStore)
+        }
+        .sheet(isPresented: $showingSSHIdentities) {
+            MobileSSHIdentityListView()
         }
         // Alert-notification deep link: tapping a fleet alert (Mac-hub push or
         // local BGAppRefresh notification) lands on the monitoring surface.
@@ -169,6 +173,11 @@ struct MobileContentView: View {
                         Label("Add from Provider", systemImage: "cloud")
                     }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showingSSHIdentities = true } label: {
+                        Label("SSH Identities", systemImage: "key.horizontal")
+                    }
+                }
             }
         } detail: {
             if let profileId = selectedProfileId,
@@ -210,7 +219,8 @@ struct MobileContentView: View {
                 onShowCSVImport: { showingCSVImport = true },
                 onShowProviderImport: { showingProviderImport = true },
                 onShowProUpgrade: { showingProUpgrade = true },
-                onShowMonitor: { showingFleetMonitor = true }
+                onShowMonitor: { showingFleetMonitor = true },
+                onShowSSHIdentities: { showingSSHIdentities = true }
             )
             .navigationTitle("pgAgent")
             .navigationDestination(item: $selectedProfileId) { profileId in
@@ -259,6 +269,7 @@ struct MobileConnectionListView: View {
     var onShowProviderImport: () -> Void
     var onShowProUpgrade: () -> Void
     var onShowMonitor: () -> Void
+    var onShowSSHIdentities: () -> Void
 
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @EnvironmentObject private var entitlementsStore: MobileEntitlementsStore
@@ -328,8 +339,12 @@ struct MobileConnectionListView: View {
                         Button(action: onShowProviderImport) {
                             Label("Add from Provider…", systemImage: "cloud")
                         }
+                        Divider()
+                        Button(action: onShowSSHIdentities) {
+                            Label("SSH Identities…", systemImage: "key.horizontal")
+                        }
                     } label: {
-                        Label("Import", systemImage: "square.and.arrow.down")
+                        Label("More", systemImage: "ellipsis.circle")
                     }
                     Button(action: onAddProfile) {
                         Label("Add Profile", systemImage: "plus")

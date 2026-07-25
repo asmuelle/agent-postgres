@@ -106,11 +106,16 @@ enum PostgresEnvironment: String, Codable, CaseIterable, Sendable {
 enum PostgresTunnelAuth: String, Codable, Hashable, Sendable, CaseIterable {
     case password
     case privateKey
+    /// A named keypair from the device's SSH identity store, shared across
+    /// connections. The key lives under the identity's id, not this tunnel's
+    /// endpoint account — see `PostgresTunnel.sshIdentityId`.
+    case identity
 
     var displayName: String {
         switch self {
         case .password:   return "Password"
         case .privateKey: return "Private Key"
+        case .identity:   return "SSH Identity"
         }
     }
 }
@@ -138,6 +143,11 @@ struct PostgresTunnel: Codable, Hashable, Sendable {
     var sshPort: UInt16? = nil
     var sshUser: String? = nil
     var sshAuth: PostgresTunnelAuth? = nil
+
+    /// The shared SSH identity backing this tunnel when `sshAuth == .identity`
+    /// (iOS). Nil for every other auth method, so an endpoint-scoped key and an
+    /// identity can never both be in play.
+    var sshIdentityId: String? = nil
 
     /// True when the tunnel carries its own SSH endpoint (iOS inline config)
     /// rather than referencing a saved SSH profile (macOS).
