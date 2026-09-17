@@ -254,6 +254,16 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     var fetchedRowCount: Int {
         lastResult?.rows.count ?? 0
     }
+
+    /// True when the tab carries a runnable SQL editor. Property
+    /// inspectors and routine editors render their own surface and
+    /// have no statement for ⌘↩ to execute.
+    var isSQLTab: Bool {
+        switch kind {
+        case .properties, .routine: return false
+        default: return true
+        }
+    }
 }
 
 @MainActor
@@ -531,6 +541,40 @@ final class PostgresQueryTabsStore: ObservableObject {
     func setActive(_ id: UUID) {
         guard tabs.contains(where: { $0.id == id }) else { return }
         activeTabId = id
+    }
+
+    // MARK: - Keyboard tab navigation (⌘⇧] / ⌘⇧[ / ⌘1…9)
+
+    private var activeTabIndex: Int? {
+        guard let id = activeTabId else { return nil }
+        return tabs.firstIndex { $0.id == id }
+    }
+
+    /// Select the tab after the active one, wrapping to the first.
+    func activateNextTab() {
+        guard !tabs.isEmpty else { return }
+        let next = ((activeTabIndex ?? -1) + 1) % tabs.count
+        activeTabId = tabs[next].id
+    }
+
+    /// Select the tab before the active one, wrapping to the last.
+    func activatePreviousTab() {
+        guard !tabs.isEmpty else { return }
+        let prev = ((activeTabIndex ?? 0) - 1 + tabs.count) % tabs.count
+        activeTabId = tabs[prev].id
+    }
+
+    /// Select the tab at a 0-based position; out-of-range is a no-op
+    /// (⌘7 with three tabs open does nothing, like Safari).
+    func activateTab(atIndex index: Int) {
+        guard tabs.indices.contains(index) else { return }
+        activeTabId = tabs[index].id
+    }
+
+    /// Select the last tab (⌘9 convention).
+    func activateLastTab() {
+        guard let last = tabs.last else { return }
+        activeTabId = last.id
     }
 
     // MARK: - Tab mutation
