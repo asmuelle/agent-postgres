@@ -29,6 +29,9 @@ struct PgAgentMobileApp: App {
                 }
             }
         }
+        // Hardware-keyboard shortcuts (⌘↩ run, ⌘T/⌘W tabs, ⌘⇧E sidebar…);
+        // see MobileKeyboardShortcuts.swift.
+        .commands { MobileKeyboardCommands() }
         .backgroundTask(.appRefresh(FleetBackgroundMonitor.taskId)) {
             await FleetBackgroundMonitor.shared.runBackgroundRefresh()
             await FleetBackgroundMonitor.shared.schedule()

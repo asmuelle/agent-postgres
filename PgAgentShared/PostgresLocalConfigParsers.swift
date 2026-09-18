@@ -124,7 +124,10 @@ enum PostgresLocalConfig {
             guard let name = currentName,
                   let host = params["host"], !host.isEmpty
             else { return }
-            let port = params["port"].flatMap { UInt16($0) }.flatMap { $0 > 0 ? $0 : nil } ?? 5432
+            let port: UInt16 = {
+                guard let raw = params["port"], let parsed = UInt16(raw), parsed > 0 else { return 5432 }
+                return parsed
+            }()
             entries.append(PgServiceEntry(
                 name: name,
                 host: host,
