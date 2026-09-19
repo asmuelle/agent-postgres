@@ -98,9 +98,20 @@ extension SidebarView {
             .onTapGesture {
                 selectedPostgresProfileId = profile.id
                 selectedNodeId = node.id
-                postOpenTabNotification(profile: profile, node: node, details: ["kind": "properties"])
+                // Single click previews the DDL editor in the reusable
+                // preview tab; foreign databases can't open the editor, so
+                // they keep the read-only Properties inspector.
+                if let parsed, isConnectedDb {
+                    postOpenTabNotification(
+                        profile: profile,
+                        node: node,
+                        details: ["kind": "routine", "schema": parsed.schema, "name": parsed.name, "signature": signature, "preview": true]
+                    )
+                } else {
+                    postOpenTabNotification(profile: profile, node: node, details: ["kind": "properties"])
+                }
             }
-            .help(isConnectedDb ? "Double-click to view function definition" : "Database '\(parsed?.database ?? "?")' isn't connected through this profile.")
+            .help(isConnectedDb ? "Click to preview the definition, double-click to keep it open" : "Database '\(parsed?.database ?? "?")' isn't connected through this profile.")
             .contextMenu {
                 PostgresNodeContextMenu(
                     node: node,

@@ -184,6 +184,11 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     /// `(tab id, resultsRevision)` instead of deep-equating up to
     /// 50k-row arrays on every unrelated store mutation.
     var resultsRevision: UInt64 = 0
+    /// `true` for the single reusable routine *preview* tab a sidebar
+    /// single-click opens (VS Code style): the next single-click swaps in
+    /// another routine instead of adding a tab. Editing or double-clicking
+    /// pins it (`pinTab`) so unsaved work is never replaced.
+    var isPreview: Bool = false
 
     init(
         id: UUID = UUID(),
@@ -394,24 +399,42 @@ final class PostgresQueryTabsStore: ObservableObject {
         return tab.id
     }
 
+    /// Open (or focus) the editor tab for one routine overload. With
+    /// `preview`, reuse the single preview tab rather than adding one; without
+    /// it (double-click) the tab is pinned.
     @discardableResult
-    func openRoutineTab(schema: String, name: String, signature: String) -> UUID {
-        if let existing = tabs.first(where: {
+    func openRoutineTab(schema: String, name: String, signature: String, preview: Bool = false) -> UUID {
+        let kind = TabKind.routine(schema: schema, name: name, signature: signature)
+        let title = "\(name)\(signature)"
+        if let index = tabs.firstIndex(where: {
             if case .routine(let s, let n, let sig) = $0.kind {
                 return s == schema && n == name && sig == signature
             }
             return false
         }) {
-            activeTabId = existing.id
-            return existing.id
+            if !preview && tabs[index].isPreview { tabs[index].isPreview = false }
+            activeTabId = tabs[index].id
+            return tabs[index].id
         }
-        let tab = PostgresQueryTab(
-            title: "\(name)\(signature)",
-            kind: .routine(schema: schema, name: name, signature: signature)
-        )
+        if preview, let index = tabs.firstIndex(where: \.isPreview) {
+            var updated = tabs[index]
+            updated.title = title
+            updated.kind = kind
+            tabs[index] = updated
+            activeTabId = updated.id
+            return updated.id
+        }
+        var tab = PostgresQueryTab(title: title, kind: kind)
+        tab.isPreview = preview
         tabs.append(tab)
         activeTabId = tab.id
         return tab.id
+    }
+
+    /// Keep a preview tab open: the next preview open gets a fresh tab.
+    func pinTab(_ id: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].isPreview else { return }
+        tabs[index].isPreview = false
     }
 
     @discardableResult
