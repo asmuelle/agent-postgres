@@ -242,7 +242,7 @@ struct MobilePropertyInspectorView: View {
                             Divider()
 
                             ScrollView {
-                                Text(reconstructedDDL)
+                                HighlightedSQLText(sql: reconstructedDDL)
                                     .font(.system(.caption, design: .monospaced))
                                     .padding(16)
                                     .frame(maxWidth: .infinity, alignment: .leading)
