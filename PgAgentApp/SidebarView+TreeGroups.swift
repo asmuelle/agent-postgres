@@ -41,7 +41,12 @@ extension SidebarView {
             case .failed(let msg):
                 Text(msg).foregroundStyle(.red).font(.caption).padding(.leading, 8)
             case .loaded(let databases):
-                ForEach(databases) { dbNode in
+                // `id: \.self`, not the String `node.id`: a ForEach id whose
+                // type matches the List's String selection implicitly tags
+                // the whole DisclosureGroup, so selecting the parent also
+                // highlighted every expanded child. The label's explicit
+                // `.tag(node.id)` still drives selection.
+                ForEach(databases, id: \.self) { dbNode in
                     databaseNodeRow(profile: profile, store: store, databaseNode: dbNode)
                 }
             }
@@ -195,7 +200,8 @@ extension SidebarView {
             case .failed(let msg):
                 Text(msg).foregroundStyle(.red).font(.caption).padding(.leading, 8)
             case .loaded(let schemas):
-                ForEach(schemas) { schemaNode in
+                // `id: \.self` — see databasesNodeGroup.
+                ForEach(schemas, id: \.self) { schemaNode in
                     schemaNodeRow(profile: profile, store: store, database: database, schemaNode: schemaNode)
                 }
             }
@@ -314,7 +320,8 @@ extension SidebarView {
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 4)
             } else {
-                ForEach(nodes) { node in
+                // `id: \.self` — see databasesNodeGroup.
+                ForEach(nodes, id: \.self) { node in
                     contentNodeRow(profile: profile, store: store, database: bundle.database, schema: bundle.schema, node: node)
                 }
             }
