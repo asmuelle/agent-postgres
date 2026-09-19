@@ -36,6 +36,9 @@ struct PostgresRoutineEditorView: View {
     /// Identity-argument signature (e.g. `integer, text`, no parentheses) that
     /// pins the exact overload. Matches `pg_get_function_identity_arguments`.
     let signature: String
+    /// Called on each edit to the source buffer; the host uses it to pin a
+    /// preview tab so another sidebar click can't replace unsaved work.
+    var onEdit: (() -> Void)? = nil
 
     private enum Phase: Equatable {
         case loading
@@ -340,6 +343,7 @@ struct PostgresRoutineEditorView: View {
                     get: { editorText },
                     set: { newValue in
                         editorText = newValue
+                        onEdit?()
                         // Any edit invalidates the stale error underline and the
                         // last apply error/notice (mirrors the query tab's setSQL).
                         errorOffset = nil

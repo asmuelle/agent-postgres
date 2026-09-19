@@ -129,7 +129,12 @@ struct PostgresWorkspaceView: View {
             if let schema = userInfo["schema"] as? String,
                let name = userInfo["name"] as? String,
                let signature = userInfo["signature"] as? String {
-                queryStore.openRoutineTab(schema: schema, name: name, signature: signature)
+                queryStore.openRoutineTab(
+                    schema: schema,
+                    name: name,
+                    signature: signature,
+                    preview: userInfo["preview"] as? Bool ?? false
+                )
             }
         case "sequence":
             if let schema = userInfo["schema"] as? String,
@@ -304,6 +309,7 @@ struct PostgresWorkspaceView: View {
                 .foregroundStyle(tabIconColor(tab))
             Text(tab.title)
                 .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                .italic(tab.isPreview)
                 .lineLimit(1)
             Button {
                 closeTab(tab)
@@ -330,7 +336,9 @@ struct PostgresWorkspaceView: View {
                 .stroke(isActive ? Color.accentColor.opacity(0.4) : .clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
+        .onTapGesture(count: 2) { queryStore.pinTab(tab.id) }
         .onTapGesture { queryStore.setActive(tab.id) }
+        .help(tab.isPreview ? "Preview — edit or double-click to keep this tab open" : "")
     }
 
     private func tabIcon(_ tab: PostgresQueryTab) -> String {
