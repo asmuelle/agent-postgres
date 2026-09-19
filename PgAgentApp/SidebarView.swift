@@ -365,7 +365,6 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func serverRowLabel(profile: PostgresProfile) -> some View {
-        let isSelected = selectedPostgresProfileId == profile.id
         let status = PostgresConnectionStatusStore.shared.status(forProfile: profile.id)
 
         let statusColor: Color = {
@@ -400,10 +399,9 @@ struct SidebarView: View {
                 HStack(spacing: 6) {
                     Text(profile.name)
                         .font(MidnightMacDesign.FontToken.callout.weight(.medium))
-                        .foregroundStyle(
-                            isProduction ? Color.red
-                                : (isSelected ? Color.accentColor : Color.primary)
-                        )
+                        // `.primary` (not accentColor) so the List flips it
+                        // to white on the blue selection highlight.
+                        .foregroundStyle(isProduction ? AnyShapeStyle(Color.red) : AnyShapeStyle(.primary))
                         .lineLimit(1)
 
                     PostgresEnvironmentBadge(profile: profile, compact: true)
