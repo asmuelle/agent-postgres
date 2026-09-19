@@ -28,7 +28,9 @@ settings:
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
-    from: 1.0.0
+    # Pinned: 1.19.0+ adds SwiftTermBuildInfoPlugin, which headless
+    # xcodebuild (CI) refuses to run without interactive approval.
+    exactVersion: 1.18.0
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: 2.9.1
