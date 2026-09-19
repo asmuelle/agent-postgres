@@ -15,10 +15,6 @@ xcode_proj  := "pgAgent.xcodeproj"
 mac_scheme  := "PgAgentApp"
 mac_fw      := "PgAgentMacOS"
 ios_scheme  := "PgAgentMobile"
-# SwiftTerm ships an SPM build plugin; headless xcodebuild refuses to run
-# package plugins/macros without interactive approval unless validation is
-# skipped (CI failed with "Validate plug-in SwiftTermBuildInfoPlugin").
-xcode_trust := "-skipPackagePluginValidation -skipMacroValidation"
 ios_bundle  := "com.pgagent.mobile"
 ios_sim_dd  := "/private/tmp/pgAgent-ios-dd"
 ios_sim_app := ios_sim_dd + "/Build/Products/Debug-iphonesimulator/pgAgent.app"
@@ -129,7 +125,6 @@ mac-build-dev config="Debug":
       xcodebuild \
         -allowProvisioningUpdates \
         -project {{xcode_proj}} \
-        {{xcode_trust}} \
         -scheme {{mac_scheme}} \
         -configuration {{config}} \
         -destination 'platform=macOS,arch=arm64' \
@@ -148,7 +143,6 @@ mac-ci-build:
     @just _ensure-xcodeproj
     xcodebuild \
         -project {{xcode_proj}} \
-        {{xcode_trust}} \
         -scheme {{mac_scheme}} \
         -destination 'platform=macOS' \
         -derivedDataPath /private/tmp/pgAgent-dd \
@@ -161,7 +155,6 @@ mac-build-signed:
     @test -n "${APPLE_SIGNING_IDENTITY:-}" || (echo "❌ APPLE_SIGNING_IDENTITY not set"; exit 1)
     xcodebuild \
         -project {{xcode_proj}} \
-        {{xcode_trust}} \
         -scheme {{mac_scheme}} \
         -configuration Release \
         -derivedDataPath {{mac_build}} \
@@ -202,7 +195,6 @@ mac-test:
     @just _ensure-xcodeproj
     xcodebuild test \
         -project {{xcode_proj}} \
-        {{xcode_trust}} \
         -scheme AllTests-macOS \
         -destination 'platform=macOS' \
         CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}" \
