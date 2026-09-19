@@ -239,7 +239,12 @@ struct SidebarView: View {
                             .foregroundColor(.secondary)
                             .font(MidnightMacDesign.FontToken.caption)
                     } else {
-                        ForEach(pgMatches) { profile in
+                        // `id: \.self`, not the String `profile.id`: see
+                        // databasesNodeGroup — a String ForEach id implicitly
+                        // tags every untagged row in the server subtree
+                        // (Databases / Roles / Tablespaces headers), so
+                        // clicking one highlighted all of them.
+                        ForEach(pgMatches, id: \.self) { profile in
                             serverNodeRow(profile: profile)
                         }
                     }
