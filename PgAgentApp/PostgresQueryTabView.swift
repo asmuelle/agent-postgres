@@ -154,7 +154,8 @@ struct PostgresQueryTabView: View {
                     profileId: profileId,
                     schema: schema,
                     name: name,
-                    signature: signature
+                    signature: signature,
+                    onEdit: tab.isPreview ? { store.pinTab(tab.id) } : nil
                 )
             case .sequence(let schema, let name):
                 PostgresSequenceVisualizerView(
