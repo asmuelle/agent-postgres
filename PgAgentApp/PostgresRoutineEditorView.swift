@@ -23,6 +23,11 @@ import PgAgentMacOS
 // parameter runner, structured attribute panel, plpgsql_check, transactional
 // dry-run + dependency blast-radius, AI grounding.
 //
+// The editor shows the DDL only: the structured attribute panel
+// (PostgresRoutineAttributesView) stays in the codebase but is not reachable
+// from here, so the routine tab matches the DDL-first flow of the sidebar's
+// single-click preview.
+//
 // Correctness note: because Apply submits the editor text VERBATIM, the server
 // error position (1-based into the submitted statement) maps directly to the
 // editor offset (position - 1) — no header-offset bookkeeping needed yet.
@@ -44,12 +49,6 @@ struct PostgresRoutineEditorView: View {
         case loading
         case ready
         case error(String)
-    }
-
-    private enum Tab: String, CaseIterable, Identifiable {
-        case source = "Source"
-        case attributes = "Attributes"
-        var id: String { rawValue }
     }
 
     /// Routine kind derived from `pg_proc.prokind`.
@@ -112,7 +111,6 @@ struct PostgresRoutineEditorView: View {
     }
 
     @State private var phase: Phase = .loading
-    @State private var selectedTab: Tab = .source
     /// Editable buffer bound to the SQL editor.
     @State private var editorText: String = ""
     /// Catalog baseline (last loaded/applied). Drives dirty detection + Revert.
@@ -241,28 +239,19 @@ struct PostgresRoutineEditorView: View {
             .disabled(connectionId == nil)
             .help("Call this routine with typed parameters")
 
-            Picker("", selection: $selectedTab) {
-                ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 180)
+            Button("Revert") { revert() }
+                .disabled(!isDirty)
+                .help("Discard changes and restore the live definition")
 
-            if selectedTab == .source {
-                Button("Revert") { revert() }
-                    .disabled(!isDirty)
-                    .help("Discard changes and restore the live definition")
-
-                Button {
-                    showSafeApply = true
-                } label: {
-                    Label("Apply…", systemImage: "checkmark.circle")
-                }
-                .keyboardShortcut("s", modifiers: .command)
-                .buttonStyle(.borderedProminent)
-                .disabled(!canApply)
-                .help("Review the change in a transaction, then commit (⌘S)")
+            Button {
+                showSafeApply = true
+            } label: {
+                Label("Apply…", systemImage: "checkmark.circle")
             }
+            .keyboardShortcut("s", modifiers: .command)
+            .buttonStyle(.borderedProminent)
+            .disabled(!canApply)
+            .help("Review the change in a transaction, then commit (⌘S)")
 
             Button {
                 Task { await reload() }
@@ -307,22 +296,7 @@ struct PostgresRoutineEditorView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
         case .ready:
-            if selectedTab == .source {
-                sourceEditor
-            } else {
-                PostgresRoutineAttributesView(
-                    connectionId: connectionId,
-                    profileId: profileId,
-                    schema: schema,
-                    name: name,
-                    signature: signature,
-                    onApplied: {
-                        // An ALTER changed the catalog definition — refresh the
-                        // Source buffer so it shows the server-normalized text.
-                        Task { await reload() }
-                    }
-                )
-            }
+            sourceEditor
         }
     }
 
