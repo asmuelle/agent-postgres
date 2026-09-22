@@ -142,7 +142,10 @@ the differentiator:
 1. **Slice 1** — editable body + Apply + error-line underline + plpgsql highlighting.
    Repoint `TabKind.routine` from the viewer to a new `PostgresRoutineEditorView`.
 2. **Slice 2** — typed parameter runner + saved fixtures.
-3. **Slice 3** — structured attribute panel + security lens.
+3. **Slice 3** — structured attribute panel + security lens. *(Built, then
+   removed: the routine tab is DDL-first, so attributes are edited in the
+   definition text. Recover `PostgresRoutineAttributes*.swift` from git history
+   if the panel comes back.)*
 4. **Slice 4** — inline `plpgsql_check`.
 5. **Slice 5** — Safe-Apply panel (the moat).
 6. **Slice 6** — AI grounding.

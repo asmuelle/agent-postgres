@@ -23,10 +23,9 @@ import PgAgentMacOS
 // parameter runner, structured attribute panel, plpgsql_check, transactional
 // dry-run + dependency blast-radius, AI grounding.
 //
-// The editor shows the DDL only: the structured attribute panel
-// (PostgresRoutineAttributesView) stays in the codebase but is not reachable
-// from here, so the routine tab matches the DDL-first flow of the sidebar's
-// single-click preview.
+// The editor shows the DDL only — the structured attribute panel built in
+// Slice 3 was removed in favor of this DDL-first flow (attributes are edited
+// as part of the definition text), matching the sidebar's single-click preview.
 //
 // Correctness note: because Apply submits the editor text VERBATIM, the server
 // error position (1-based into the submitted statement) maps directly to the
