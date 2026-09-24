@@ -172,7 +172,8 @@ private struct SidebarColumn: View {
             selectedPostgresProfileId: $selectedPostgresProfileId,
             selectedNode: $selectedNode,
             activeConnectionId: $activeConnectionId,
-            activeSchemaStore: $activeSchemaStore
+            activeSchemaStore: $activeSchemaStore,
+            isVisible: layoutManager.layout.sidebarVisible
         )
         // No custom background: the split view's sidebar column supplies
         // the system material (Liquid Glass on macOS 26+), which adapts to

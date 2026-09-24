@@ -31,6 +31,10 @@ struct SidebarView: View {
     /// One connection claim per expanded server, released exactly once on
     /// collapse / disappear.
     @State private var serverLeases: [String: PostgresConnectionLease] = [:]
+    /// Whether the sidebar column is shown. The split view keeps this view
+    /// mounted while the column is collapsed, so hiding it must release the
+    /// server claims explicitly — `onDisappear` alone no longer fires.
+    var isVisible: Bool = true
 
     // First-run local detection (roadmap 2.1): only probed while the
     // profile list is empty; a hit offers a one-click localhost profile.
@@ -142,13 +146,20 @@ struct SidebarView: View {
                 }
             }
         }
-        .onDisappear {
-            connectionAcquireTasks.values.forEach { $0.cancel() }
-            connectionAcquireTasks.removeAll()
-            serverLeases.values.forEach { connectionManager.release($0) }
-            serverLeases.removeAll()
-            expandedServers.removeAll()
+        .onChangeCompat(of: isVisible) { visible in
+            if !visible { releaseAllServers() }
         }
+        .onDisappear { releaseAllServers() }
+    }
+
+    /// Cancel pending connects, drop every server claim, and collapse the
+    /// servers so re-showing the sidebar starts from a clean tree.
+    private func releaseAllServers() {
+        connectionAcquireTasks.values.forEach { $0.cancel() }
+        connectionAcquireTasks.removeAll()
+        serverLeases.values.forEach { connectionManager.release($0) }
+        serverLeases.removeAll()
+        expandedServers.removeAll()
     }
 
     // MARK: - Connections Header
