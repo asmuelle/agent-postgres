@@ -19,6 +19,7 @@
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)com.pgagent.mobile</string>
+		<string>$(AppIdentifierPrefix)com.pgagent.shared</string>
 	</array>
 </dict>
 </plist>

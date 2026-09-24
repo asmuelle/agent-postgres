@@ -11,9 +11,10 @@ import PgAgentMacOS
 /// the caller gets back a `ResolvedCredential` ready to pass to
 /// `BridgeManager.connect`.
 ///
-/// Marked `@MainActor` because all Keychain access (load/save/delete)
-/// is main-actor-isolated; caller-provided prompt closures dispatch to
-/// main internally.
+/// Marked `@MainActor` for its mutable state and the caller-provided
+/// prompt closures. Keychain access itself goes through the `…Async`
+/// `KeychainManager` API, so a locked keychain or ACL prompt suspends this
+/// flow instead of blocking the main thread.
 @MainActor
 final class CredentialResolver {
     typealias PasswordProvider = (_ account: String, _ message: String) async -> String?
@@ -78,7 +79,7 @@ final class CredentialResolver {
         }
 
         let account = profile.keychainAccount
-        if let stored = KeychainManager.shared.loadPassword(
+        if let stored = await KeychainManager.shared.loadPasswordAsync(
             kind: .sshPassword, account: account
         ) {
             usedStoredPassword = true
@@ -119,7 +120,7 @@ final class CredentialResolver {
         }
 
         let account = profile.keychainAccount
-        if let stored = KeychainManager.shared.loadPassword(
+        if let stored = await KeychainManager.shared.loadPasswordAsync(
             kind: .sshKeyPassphrase, account: account
         ) {
             usedStoredPassphrase = true
@@ -140,9 +141,9 @@ final class CredentialResolver {
 
     /// Persist a prompted password that just succeeded, so the next
     /// connect is silent. No-ops if the password was already stored.
-    func persistPasswordIfPrompted(_ password: String, usedStoredPassword: Bool) {
+    func persistPasswordIfPrompted(_ password: String, usedStoredPassword: Bool) async {
         guard !usedStoredPassword else { return }
-        KeychainManager.shared.savePassword(
+        await KeychainManager.shared.savePasswordAsync(
             kind: .sshPassword,
             account: profile.keychainAccount,
             secret: password
@@ -150,9 +151,9 @@ final class CredentialResolver {
     }
 
     /// Persist a prompted passphrase that just succeeded.
-    func persistPassphraseIfPrompted(_ passphrase: String, usedStoredPassphrase: Bool) {
+    func persistPassphraseIfPrompted(_ passphrase: String, usedStoredPassphrase: Bool) async {
         guard !usedStoredPassphrase else { return }
-        KeychainManager.shared.savePassword(
+        await KeychainManager.shared.savePasswordAsync(
             kind: .sshKeyPassphrase,
             account: profile.keychainAccount,
             secret: passphrase
@@ -163,11 +164,11 @@ final class CredentialResolver {
 
     /// Called when a stored password was rejected. Evicts the stale entry
     /// so a re-prompt picks up the new value.
-    func evictStalePassword() {
-        KeychainManager.shared.deletePassword(kind: .sshPassword, account: profile.keychainAccount)
+    func evictStalePassword() async {
+        await KeychainManager.shared.deletePasswordAsync(kind: .sshPassword, account: profile.keychainAccount)
     }
 
-    func evictStalePassphrase() {
-        KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: profile.keychainAccount)
+    func evictStalePassphrase() async {
+        await KeychainManager.shared.deletePasswordAsync(kind: .sshKeyPassphrase, account: profile.keychainAccount)
     }
 }

@@ -59,6 +59,11 @@ final class SSHKeyVault {
     private let keychainService = "com.mc-ssh.ssh.key-vault"
     private let keychainAccount = "master-key"
     private let logger = Logger(subsystem: "com.mc-ssh", category: "ssh-key-vault")
+    /// Data-protection keychain (so ThisDeviceOnly is enforced) with a
+    /// verified migration from, and fallback to, the legacy file keychain.
+    private var masterKeyStore: DeviceLocalKeychainStore {
+        DeviceLocalKeychainStore(service: keychainService)
+    }
 
     private init() {}
 
@@ -85,16 +90,7 @@ final class SSHKeyVault {
     }
 
     private func hasMasterKey() -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        return status == errSecSuccess && (item as? Data)?.count == 32
+        (try? masterKeyStore.read(account: keychainAccount))?.count == 32
     }
 
     private func findFirstRecord() -> URL? {
@@ -314,21 +310,23 @@ final class SSHKeyVault {
     }
 
     private func masterKey() throws -> Data {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecSuccess, let data = item as? Data, data.count == 32 {
-            return data
+        // Only a definite "absent from both keychains" may mint a new key;
+        // any read failure throws so a transient lock can never replace
+        // (and thereby orphan) the key every vault record is sealed with.
+        let existing: Data?
+        do {
+            existing = try masterKeyStore.read(account: keychainAccount)
+        } catch let error as KeychainStatusError {
+            throw SSHKeyVaultError.keychainUnavailable(error.status)
         }
-        if status != errSecItemNotFound {
-            throw SSHKeyVaultError.keychainUnavailable(status)
+        if let existing {
+            guard existing.count == 32 else {
+                throw SSHKeyVaultError.keychainUnavailable(errSecDecode)
+            }
+            return existing
+        }
+        if findFirstRecord() != nil {
+            logger.warning("Vault master key missing while vault records exist; generating a new key — existing records will not decrypt")
         }
 
         var bytes = Data(count: 32)
@@ -339,19 +337,12 @@ final class SSHKeyVault {
             throw SSHKeyVaultError.keychainUnavailable(randomStatus)
         }
 
-        var addQuery = query
-        addQuery.removeValue(forKey: kSecReturnData as String)
-        addQuery.removeValue(forKey: kSecMatchLimit as String)
-        addQuery[kSecValueData as String] = bytes
-        // Pin the accessibility class explicitly — readable only while the
-        // device is unlocked, never migrated to another device — matching
-        // AdvancedAuthenticationStore and the iOS KeychainManager. Existing
-        // installs keep the class their item was created with; only newly
-        // created master keys get the pinned attribute.
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw SSHKeyVaultError.keychainUnavailable(addStatus)
+        // WhenUnlockedThisDeviceOnly, enforced by the data-protection
+        // keychain (see DeviceLocalKeychainStore).
+        do {
+            try masterKeyStore.write(account: keychainAccount, data: bytes)
+        } catch let error as KeychainStatusError {
+            throw SSHKeyVaultError.keychainUnavailable(error.status)
         }
         return bytes
     }
@@ -391,14 +382,12 @@ final class SSHKeyVault {
         try resourceURL.setResourceValues(values)
     }
 
+    /// Resolve for display only. A stale bookmark is not refreshed here —
+    /// metadata has no profile to persist it on; `SSHKeyAccessCoordinator`
+    /// refreshes and persists it on the next connect. No access is started,
+    /// so there is nothing to stop.
     private static func resolveBookmark(_ data: Data) throws -> URL {
-        var isStale = false
-        return try URL(
-            resolvingBookmarkData: data,
-            options: [.withSecurityScope],
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        )
+        try SecurityScopedBookmark.resolve(data).url
     }
 
     private static func readAdjacentPublicKey(for privateKeyURL: URL) -> String? {

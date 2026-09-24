@@ -108,12 +108,14 @@ targets:
         # with `development` and Release with `production`.
         com.apple.developer.aps-environment: $(PGAGENT_APS_ENVIRONMENT)
         # `keychain-access-groups` requires a provisioning profile (Apple
-        # ties access groups to a Team ID), so it can't coexist with
-        # ad-hoc signing. Keychain APIs still work via the implicit
-        # per-bundle access group. Re-add this when switching to
-        # Developer ID for distribution.
-        # keychain-access-groups:
-        #   - $(AppIdentifierPrefix)com.pgagent.macos
+        # ties access groups to a Team ID) — like the iCloud entitlements
+        # above. The app's own group must stay first (device-local items
+        # default to it); `com.pgagent.shared` carries iCloud-synced
+        # passwords between the Mac and iOS apps. Unsigned CI builds fall
+        # back to the implicit per-bundle group at runtime.
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.pgagent.macos
+          - $(AppIdentifierPrefix)com.pgagent.shared
     settings:
       base:
         INFOPLIST_FILE: PgAgentApp/Info.plist
@@ -205,6 +207,7 @@ targets:
       properties:
         keychain-access-groups:
           - $(AppIdentifierPrefix)com.pgagent.mobile
+          - $(AppIdentifierPrefix)com.pgagent.shared
         com.apple.security.application-groups:
           - group.com.pgagent.pgagent
         # CloudKit alert relay (roadmap 1.1): subscription-driven pushes from

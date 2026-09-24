@@ -120,26 +120,55 @@ class ConnectionStoreManager: ObservableObject {
         save()
     }
 
+    /// Keychain deletions are enqueued on the keychain's serial queue rather
+    /// than run inline: they can block on a locked keychain / ACL prompt,
+    /// and enqueuing (not `Task {}`) keeps them ordered before any save the
+    /// caller enqueues right after.
     private func deleteStaleCredentials(previous: ConnectionProfile, updated: ConnectionProfile) {
         if previous.keychainAccount != updated.keychainAccount {
             deleteCredentials(for: previous)
             return
         }
 
+        let account = updated.keychainAccount
+        var kinds: [FfiCredentialKind] = []
         switch updated.authMethod {
         case .password:
-            KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: updated.keychainAccount)
+            kinds = [.sshKeyPassphrase]
         case .publicKey:
-            KeychainManager.shared.deletePassword(kind: .sshPassword, account: updated.keychainAccount)
+            kinds = [.sshPassword]
             if previous.sshKeyReference != updated.sshKeyReference || updated.sshKeyReference?.needsStoredPassphrase == false {
-                KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: updated.keychainAccount)
+                kinds.append(.sshKeyPassphrase)
+            }
+        }
+        enqueueDeletion(kinds: kinds, account: account)
+    }
+
+    private func deleteCredentials(for profile: ConnectionProfile) {
+        enqueueDeletion(kinds: [.sshPassword, .sshKeyPassphrase], account: profile.keychainAccount)
+    }
+
+    private func enqueueDeletion(kinds: [FfiCredentialKind], account: String) {
+        guard !kinds.isEmpty else { return }
+        KeychainStorage.enqueue {
+            let storage = KeychainStorage()
+            for kind in kinds {
+                storage.deletePassword(kind: kind, account: account)
             }
         }
     }
 
-    private func deleteCredentials(for profile: ConnectionProfile) {
-        KeychainManager.shared.deletePassword(kind: .sshPassword, account: profile.keychainAccount)
-        KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: profile.keychainAccount)
+    /// Replace a profile's security-scoped bookmark with a refreshed one
+    /// (the system reported the old one stale). Compare-and-swap on the
+    /// stored reference so a concurrent edit that picked a different key
+    /// isn't overwritten.
+    func refreshKeyBookmark(profileId: String, from old: Data, to new: Data) {
+        guard let idx = connections.firstIndex(where: { $0.id == profileId }),
+              connections[idx].sshKeyReference == .securityScopedBookmark(old)
+        else { return }
+        connections[idx].sshKeyReference = .securityScopedBookmark(new)
+        save()
+        logger.info("Refreshed stale SSH key bookmark for \(profileId, privacy: .public)")
     }
 
     // MARK: - Folder CRUD
@@ -270,22 +299,24 @@ class ConnectionStoreManager: ObservableObject {
     /// to the deleted folder's parent, never to root unless that's
     /// where the deleted folder lived. Picks the gentle option —
     /// users can always re-organise after, but losing connections
-    /// on an accidental delete is irreversible.
+    /// on an accidental delete is irreversible. A child whose name is
+    /// already taken at the parent level is merged into that folder (see
+    /// `ConnectionFolderTree.deletingFolder`). The new hierarchy is computed
+    /// on a copy and committed only as a whole.
     func deleteFolder(id: String) throws {
-        guard let idx = folders.firstIndex(where: { $0.id == id }) else {
+        guard let folder = folders.first(where: { $0.id == id }) else {
             throw FolderError.notFound
         }
-        let folder = folders[idx]
-
-        // Re-parent direct child folders.
-        for child in folders where child.parentPath == folder.path {
-            try? moveFolder(id: child.id, to: folder.parentPath)
+        let current = ConnectionFolderTree(folders: folders, connections: connections)
+        let updated: ConnectionFolderTree
+        do {
+            updated = try current.deletingFolder(id: id)
+        } catch {
+            logger.error("Deleting folder \(folder.path, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            throw FolderError.notFound
         }
-        // Move profiles up.
-        for i in connections.indices where connections[i].folderPath == folder.path {
-            connections[i].folderPath = folder.parentPath
-        }
-        folders.removeAll { $0.id == id }
+        folders = updated.folders
+        connections = updated.connections
         save()
         logger.info("Deleted folder \(folder.path, privacy: .public); children re-parented")
     }

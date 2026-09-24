@@ -117,11 +117,17 @@ final class SecureEnclaveSSHIdentityStore {
         let context = LAContext()
         context.localizedReason = "Create a Secure Enclave SSH identity."
 
+        // `.userPresence` = Touch ID OR the login password, matching the
+        // `.deviceOwnerAuthentication` policy approvals use elsewhere. The
+        // old `.biometryCurrentSet` failed outright on Macs without enrolled
+        // Touch ID and permanently invalidated the key whenever a
+        // fingerprint was added or removed. Keys created with the old flag
+        // keep their original policy (it is baked into the SE key).
         var accessError: Unmanaged<CFError>?
         guard let accessControl = SecAccessControlCreateWithFlags(
             nil,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            [.privateKeyUsage, .biometryCurrentSet],
+            [.privateKeyUsage, .userPresence],
             &accessError
         ) else {
             if let error = accessError?.takeRetainedValue() {
@@ -210,48 +216,36 @@ final class SecureEnclaveSSHIdentityStore {
         )
     }
 
+    /// Key references live in the data-protection keychain (legacy
+    /// items are migrated on first read) so ThisDeviceOnly is enforced.
+    private var keyReferenceStore: DeviceLocalKeychainStore {
+        DeviceLocalKeychainStore(service: keychainService)
+    }
+
     func loadKeyReference(account: String) throws -> Data {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else {
-            throw status == errSecItemNotFound
-                ? AdvancedAuthenticationError.identityNotFound
-                : AdvancedAuthenticationError.keychainStatus(status)
+        do {
+            guard let data = try keyReferenceStore.read(account: account) else {
+                throw AdvancedAuthenticationError.identityNotFound
+            }
+            return data
+        } catch let error as KeychainStatusError {
+            throw AdvancedAuthenticationError.keychainStatus(error.status)
         }
-        return data
     }
 
     func deleteKeyReference(account: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: account,
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw AdvancedAuthenticationError.keychainStatus(status)
+        do {
+            try keyReferenceStore.delete(account: account)
+        } catch let error as KeychainStatusError {
+            throw AdvancedAuthenticationError.keychainStatus(error.status)
         }
     }
 
     private func saveKeyReference(_ data: Data, account: String) throws {
-        try? deleteKeyReference(account: account)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            kSecValueData as String: data,
-        ]
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw AdvancedAuthenticationError.keychainStatus(status)
+        do {
+            try keyReferenceStore.write(account: account, data: data)
+        } catch let error as KeychainStatusError {
+            throw AdvancedAuthenticationError.keychainStatus(error.status)
         }
     }
 
