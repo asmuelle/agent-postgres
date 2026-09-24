@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import Combine
 import PgAgentMacOS
@@ -66,6 +67,31 @@ struct ContentView: View {
             guard case .showCommandPalette = event else { return }
             toggleCommandPalette()
         }
+        .registersSettingsOpener()
+        .onOpenURL { url in
+            applyDeepLink(PgAgentDeepLink(url: url))
+        }
+    }
+
+    // MARK: - Deep links (pgAgent://)
+
+    /// Route a `pgAgent://` URL (widget tap, alert, Live Activity) onto the
+    /// existing navigation state. Unknown profiles/URLs only activate the app.
+    private func applyDeepLink(_ link: PgAgentDeepLink) {
+        NSApp.activate(ignoringOtherApps: true)
+        switch link {
+        case .monitoring(let profileId), .profile(let profileId):
+            guard postgresStore.profile(withId: profileId) != nil else { return }
+            if selectedPostgresProfileId != profileId {
+                selectedPostgresProfileId = profileId
+                selectedNode = nil
+            }
+        case .monitoringOverview:
+            // The fleet overview on macOS is the Monitoring Hub pane.
+            SettingsWindowOpener.shared.open(tab: .monitoringHub)
+        case .activate:
+            break
+        }
     }
 
     // MARK: - Command palette
@@ -95,6 +121,9 @@ struct ContentView: View {
             selectProfile: { profile in
                 selectedPostgresProfileId = profile.id
                 selectedNode = nil
+            },
+            openSettings: { tab in
+                SettingsWindowOpener.shared.open(tab: tab)
             }
         )
         isCommandPaletteVisible = true

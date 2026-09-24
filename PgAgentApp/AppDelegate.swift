@@ -6,6 +6,7 @@ import OSLog
 /// - Initializes the Rust bridge on launch (`applicationDidFinishLaunching`)
 /// - Tears it down on termination (`applicationWillTerminate`)
 /// - Uses `os_log` for structured logging
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "com.mc-ssh", category: "appdelegate")
 
@@ -23,6 +24,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             CloudSyncEngine.shared.startIfEnabled()
         }
+
+        // Mirror the monitoring hub's fleet health into the App Group so the
+        // macOS widget has data, and push WidgetKit reloads on change.
+        WidgetSnapshotPublisher.shared.start()
 
         // Persist the main window's frame across launches via AppKit's
         // built-in autosave. SwiftUI's WindowGroup doesn't expose a
@@ -66,7 +71,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         BridgeManager.shared.shutdown()
     }
 
+    /// Closing the main window quits the app — except in monitoring-hub
+    /// mode, where the menu bar extra keeps polling and relaying alerts and
+    /// its "Open pgAgent" item (`openWindow(id: "main")`) brings the window
+    /// back.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        !FleetMonitorSettings.shared.hubModeEnabled
+    }
+
+    /// Dock-icon click while the app lingers windowless in hub mode: un-hide
+    /// a minimised window if there is one; otherwise returning `true` lets
+    /// SwiftUI's default handling re-open the `Window("main")` scene.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag, let minimised = sender.windows.first(where: { $0.isMiniaturized }) {
+            minimised.deminiaturize(nil)
+            return false
+        }
+        return true
     }
 }

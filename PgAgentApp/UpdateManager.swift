@@ -24,7 +24,7 @@ final class UpdateManager: ObservableObject {
            let url = URL(string: raw) {
             return url
         }
-        return URL(string: "https://github.com/asmuelle/mc-ssh/releases/latest/download/appcast.xml")!
+        return URL(string: "https://github.com/asmuelle/agent-postgres/releases/latest/download/appcast.xml")!
     }
 
     /// Current app version from Info.plist.
@@ -86,30 +86,69 @@ final class UpdateManager: ObservableObject {
 
     // MARK: - Appcast generation helper
 
+    enum AppcastError: LocalizedError, Equatable {
+        case missingSignature
+        case malformedSignature
+
+        var errorDescription: String? {
+            switch self {
+            case .missingSignature:
+                return "Appcast needs the enclosure's EdDSA signature. Run Sparkle's `sign_update <dmg>` (or `just mac-sparkle-appcast <dir>`) and pass its sparkle:edSignature value."
+            case .malformedSignature:
+                return "The EdDSA signature must be the base64 value printed by Sparkle's `sign_update`."
+            }
+        }
+    }
+
     /// Generate the appcast XML for a new release.
     /// Called by the CI/release script, not at runtime.
-    static func generateAppcast(version: String, build: String, downloadURL: String, size: UInt64) -> String {
-        """
+    ///
+    /// Sparkle 2 rejects any enclosure without a valid `sparkle:edSignature`
+    /// once `SUPublicEDKey` is set, so an unsigned appcast is a release
+    /// that silently never installs — refuse to generate one. Pass the
+    /// base64 signature printed by Sparkle's `sign_update <dmg>`.
+    nonisolated static func generateAppcast(
+        version: String,
+        build: String,
+        downloadURL: String,
+        size: UInt64,
+        edSignature: String
+    ) throws -> String {
+        let signature = edSignature.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !signature.isEmpty else { throw AppcastError.missingSignature }
+        // Ed25519 signatures are 64 bytes → 88 base64 characters.
+        guard let raw = Data(base64Encoded: signature), raw.count == 64 else {
+            throw AppcastError.malformedSignature
+        }
+        return """
         <?xml version="1.0" encoding="utf-8"?>
         <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
             <channel>
                 <title>pgAgent Changelog</title>
                 <item>
-                    <title>Version \(version)</title>
-                    <sparkle:version>\(build)</sparkle:version>
-                    <sparkle:shortVersionString>\(version)</sparkle:shortVersionString>
-                    <enclosure url="\(downloadURL)"
+                    <title>Version \(xmlEscaped(version))</title>
+                    <sparkle:version>\(xmlEscaped(build))</sparkle:version>
+                    <sparkle:shortVersionString>\(xmlEscaped(version))</sparkle:shortVersionString>
+                    <enclosure url="\(xmlEscaped(downloadURL))"
                                length="\(size)"
                                type="application/octet-stream"
-                               sparkle:edSignature=""/>
+                               sparkle:edSignature="\(signature)"/>
                     <description><![CDATA[
-                        <h2>pgAgent \(version)</h2>
+                        <h2>pgAgent \(xmlEscaped(version))</h2>
                         <p>See the full changelog on GitHub.</p>
                     ]]></description>
                 </item>
             </channel>
         </rss>
         """
+    }
+
+    private nonisolated static func xmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     private func presentConfigurationAlert() {

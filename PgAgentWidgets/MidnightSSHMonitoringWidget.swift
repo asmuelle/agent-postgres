@@ -8,6 +8,8 @@ struct MonitoringTimelineEntry: TimelineEntry {
 }
 
 struct MonitoringTimelineProvider: TimelineProvider {
+    private static let selfRefreshInterval: TimeInterval = 15 * 60
+
     func placeholder(in context: Context) -> MonitoringTimelineEntry {
         loadEntry(now: Date())
     }
@@ -18,7 +20,10 @@ struct MonitoringTimelineProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<MonitoringTimelineEntry>) -> Void) {
         let now = Date()
-        let nextRefresh = Calendar.current.date(byAdding: .minute, value: 1, to: now) ?? now.addingTimeInterval(60)
+        // The app pushes `WidgetCenter.reloadTimelines` whenever fleet health
+        // changes (WidgetSnapshotPublisher); this self-refresh only re-derives
+        // freshness ("aging"/"stale") while the app is quiet or not running.
+        let nextRefresh = now.addingTimeInterval(Self.selfRefreshInterval)
         completion(Timeline(entries: [loadEntry(now: now)], policy: .after(nextRefresh)))
     }
 
@@ -64,28 +69,12 @@ struct MonitoringTimelineProvider: TimelineProvider {
         )
     }
 
+    /// App Group container only (`containerURL(forSecurityApplicationGroupIdentifier:)`).
+    /// Inside the widget's sandbox `homeDirectoryForCurrentUser` is the
+    /// widget's own container, so a hand-built ~/Library/Group Containers
+    /// path can't reach the app's data — no fallback path.
     private static func loadSnapshotFile() throws -> WidgetMonitorSnapshotFile? {
-        do {
-            return try WidgetSnapshotStore().loadSnapshotFile()
-        } catch {
-            if let fallbackFile = try loadSnapshotFileFromMacOSGroupContainer() {
-                return fallbackFile
-            }
-            throw error
-        }
-    }
-
-    private static func loadSnapshotFileFromMacOSGroupContainer() throws -> WidgetMonitorSnapshotFile? {
-        #if os(macOS)
-        let directoryURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Group Containers")
-            .appendingPathComponent(WidgetSnapshotConfiguration.appGroupIdentifier)
-        let store = WidgetSnapshotStore(directoryURL: directoryURL)
-        return try store.loadSnapshotFile()
-        #else
-        return nil
-        #endif
+        try WidgetSnapshotStore().loadSnapshotFile()
     }
 
     private static func snapshotLoadErrorSummary(for error: Error) -> String {
@@ -158,7 +147,7 @@ private struct SmallMonitoringWidgetView: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .center, spacing: 6) {
                 StatusGlyph(state: model.overallState, size: 18)
-                Text("Midnight SSH")
+                Text("pgAgent")
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -260,7 +249,7 @@ private struct MediumMonitoringWidgetView: View {
                         .minimumScaleFactor(0.8)
                 }
 
-                Text("Midnight SSH")
+                Text("pgAgent")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
 
@@ -363,7 +352,7 @@ private struct LargeMonitoringWidgetView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         StatusGlyph(state: model.overallState, size: 18)
-                        Text("Midnight SSH")
+                        Text("pgAgent")
                             .font(.headline)
                             .lineLimit(1)
                     }
@@ -553,8 +542,8 @@ struct MidnightSSHMonitoringWidget: Widget {
         StaticConfiguration(kind: kind, provider: MonitoringTimelineProvider()) { entry in
             MonitoringWidgetView(entry: entry)
         }
-        .configurationDisplayName("Midnight SSH")
-        .description("Shows recent monitoring checks.")
+        .configurationDisplayName("pgAgent Fleet")
+        .description("Health of the Postgres instances watched by the monitoring hub.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }

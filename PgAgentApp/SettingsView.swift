@@ -35,7 +35,6 @@ struct SettingsView: View {
     @AppStorage("SUEnableAutomaticChecks") private var automaticUpdateChecks = true
     @AppStorage("SUAllowsAutomaticUpdates") private var automaticUpdateInstall = true
     @AppStorage("privacy.shareUsageDiagnostics") private var shareUsageDiagnostics = false
-    @AppStorage("privacy.includeUnifiedLogsInDiagnostics") private var includeUnifiedLogsInDiagnostics = true
 
     @EnvironmentObject private var updateManager: UpdateManager
     @EnvironmentObject private var entitlementsStore: EntitlementsStore
@@ -49,6 +48,19 @@ struct SettingsView: View {
     @State private var syncError: String?
 
     @ObservedObject private var panelRouter = SettingsPanelRouter.shared
+
+    /// The Settings toolbar never wraps: tabs that don't fit collapse into a
+    /// "»" overflow menu, hiding panes like Privacy. Size the window to the
+    /// tab strip — ~92 pt per toolbar item (icon + the longest labels,
+    /// "Monitoring Hub" / "Advanced Auth") plus window chrome — never
+    /// narrower than the 660 pt the forms were laid out for.
+    private static var visibleTabCount: Int {
+        FeatureFlags.networkPolish.isEnabled ? 9 : 8
+    }
+
+    private static var windowWidth: CGFloat {
+        max(660, CGFloat(visibleTabCount) * 92 + 40)
+    }
 
     var body: some View {
         TabView(selection: $panelRouter.selectedTab) {
@@ -90,7 +102,7 @@ struct SettingsView: View {
                 .tabItem { Label("Privacy", systemImage: "lock.shield") }
                 .tag(SettingsTab.privacy)
         }
-        .frame(width: 660, height: 560)
+        .frame(width: Self.windowWidth, height: 560)
         .confirmationDialog(
             "Import CSV",
             isPresented: Binding(
@@ -584,7 +596,6 @@ struct SettingsView: View {
             }
 
             Section {
-                Toggle("Include redacted unified logs in diagnostics export", isOn: $includeUnifiedLogsInDiagnostics)
                 Toggle("Share anonymous usage diagnostics", isOn: $shareUsageDiagnostics)
 
                 Button("Open Application Support Folder") {

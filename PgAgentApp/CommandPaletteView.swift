@@ -40,9 +40,13 @@ struct CommandPaletteItem: Identifiable {
 enum CommandPaletteItems {
     /// Assemble the palette's entries from live app state. Rebuilt each time
     /// the palette opens — cheap (reads already-loaded stores only).
+    /// `openSettings` opens the Settings scene on the given tab (nil keeps
+    /// the current one). Injected because the only supported opener on
+    /// macOS 14+ is the view-environment `openSettings` action.
     static func build(
         selectedProfileId: String?,
-        selectProfile: @escaping @MainActor (PostgresProfile) -> Void
+        selectProfile: @escaping @MainActor (PostgresProfile) -> Void,
+        openSettings: @escaping @MainActor (SettingsTab?) -> Void
     ) -> [CommandPaletteItem] {
         var items: [CommandPaletteItem] = []
         let manager = PostgresConnectionManager.shared
@@ -141,11 +145,15 @@ enum CommandPaletteItems {
             }
         }
 
-        items.append(contentsOf: actionItems(selectedProfileId: selectedProfileId))
+        items.append(contentsOf: actionItems(
+            selectedProfileId: selectedProfileId, openSettings: openSettings))
         return items
     }
 
-    private static func actionItems(selectedProfileId: String?) -> [CommandPaletteItem] {
+    private static func actionItems(
+        selectedProfileId: String?,
+        openSettings: @escaping @MainActor (SettingsTab?) -> Void
+    ) -> [CommandPaletteItem] {
         var items: [CommandPaletteItem] = []
 
         if let profileId = selectedProfileId {
@@ -182,7 +190,7 @@ enum CommandPaletteItems {
             subtitle: "⌘,",
             systemImage: "gearshape",
             section: .actions,
-            action: { openSettingsWindow() }
+            action: { openSettings(nil) }
         ))
         items.append(CommandPaletteItem(
             id: "action:open-audit-log",
@@ -190,19 +198,9 @@ enum CommandPaletteItems {
             subtitle: "Settings · Audit",
             systemImage: "list.bullet.rectangle",
             section: .actions,
-            action: {
-                SettingsPanelRouter.shared.selectedTab = .audit
-                openSettingsWindow()
-            }
+            action: { openSettings(.audit) }
         ))
         return items
-    }
-
-    private static func openSettingsWindow() {
-        // SwiftUI's Settings scene has no public programmatic opener on
-        // macOS 13; the app-level responder action is the supported bridge.
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
