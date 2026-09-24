@@ -47,12 +47,12 @@ struct PostgresBrowseState: Hashable, Sendable {
     /// page so the common case reads clean in the editor.
     func sql() -> String {
         let projection = hasRowIdentity ? "*, ctid AS \(POSTGRES_ROWID_COLUMN)" : "*"
-        var s = "SELECT \(projection) FROM \(Self.quoteIdent(schema)).\(Self.quoteIdent(table))"
+        var s = "SELECT \(projection) FROM \(pgQuoteIdent(schema)).\(pgQuoteIdent(table))"
         if let whereClause {
             s += " WHERE \(whereClause)"
         }
         if let sortColumn {
-            s += " ORDER BY \(Self.quoteIdent(sortColumn)) \(sortAscending ? "ASC" : "DESC")"
+            s += " ORDER BY \(pgQuoteIdent(sortColumn)) \(sortAscending ? "ASC" : "DESC")"
         }
         s += " LIMIT \(pageSize)"
         if page > 0 {
@@ -85,12 +85,6 @@ struct PostgresBrowseState: Hashable, Sendable {
         var next = self
         next.page = max(0, newPage)
         return next
-    }
-
-    /// Postgres double-quote escaping — embedded double quotes become
-    /// two double quotes, and the whole identifier is wrapped.
-    static func quoteIdent(_ s: String) -> String {
-        "\"\(s.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 }
 

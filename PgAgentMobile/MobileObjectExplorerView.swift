@@ -979,17 +979,23 @@ struct MobileObjectExplorerView: View {
                     } else {
                         expandedRelations.insert(fullKey)
                         selectedNodeId = relNode.id
-                        Task {
-                            if store.columnsState[key] == nil || store.columnsState[key]?.isLoaded == false {
-                                await store.loadColumns(database: database, schema: schema, table: relNode.name)
-                            }
-                            if store.metaState[key] == nil || store.metaState[key]?.isLoaded == false {
-                                await store.loadMeta(database: database, schema: schema, table: relNode.name)
+                        // Column / key introspection always runs against the
+                        // connected database — for any other database it
+                        // would describe a same-named table from the wrong
+                        // one, so don't load it at all.
+                        if isConnectedDb {
+                            Task {
+                                if store.columnsState[key] == nil || store.columnsState[key]?.isLoaded == false {
+                                    await store.loadColumns(database: database, schema: schema, table: relNode.name)
+                                }
+                                if store.metaState[key] == nil || store.metaState[key]?.isLoaded == false {
+                                    await store.loadMeta(database: database, schema: schema, table: relNode.name)
+                                }
                             }
                         }
                     }
                 }
-                if isConnectedDb, let parsed = parseRelationId(relNode.id) {
+                if isConnectedDb, let parsed = parseNodeId(relNode) {
                     onOpenNodeTab(profile, relNode, ["kind": "relation", "schema": parsed.schema, "name": parsed.name])
                 }
             } label: {
@@ -1024,12 +1030,12 @@ struct MobileObjectExplorerView: View {
             }
             .buttonStyle(.plain)
             .onTapGesture(count: 2) {
-                if isConnectedDb, let parsed = parseRelationId(relNode.id) {
+                if isConnectedDb, let parsed = parseNodeId(relNode) {
                     onOpenNodeTab(profile, relNode, ["kind": "relation", "schema": parsed.schema, "name": parsed.name])
                 }
             }
             .contextMenu {
-                if isConnectedDb, let parsed = parseRelationId(relNode.id) {
+                if isConnectedDb, let parsed = parseNodeId(relNode) {
                     Button {
                         onOpenNodeTab(profile, relNode, ["kind": "relation", "schema": parsed.schema, "name": parsed.name])
                     } label: {
@@ -1039,8 +1045,15 @@ struct MobileObjectExplorerView: View {
             }
             
             if isExpanded {
-                relationChildrenMobileView(profile: profile, store: store, database: database, schema: schema, table: relNode.name)
-                    .padding(.leading, 24)
+                if isConnectedDb {
+                    relationChildrenMobileView(profile: profile, store: store, database: database, schema: schema, table: relNode.name)
+                        .padding(.leading, 24)
+                } else {
+                    Text("Connect to “\(database)” to browse its columns.")
+                        .font(MidnightMobileDesign.FontToken.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 24)
+                }
             }
         }
     }
@@ -1119,7 +1132,7 @@ struct MobileObjectExplorerView: View {
                                     Image(systemName: "key.fill")
                                         .foregroundStyle(.yellow)
                                         .font(.caption2)
-                                    Text(keyNode.name)
+                                    Text(keyNode.label)
                                         .font(MidnightMobileDesign.FontToken.caption)
                                         .foregroundStyle(isKeySelected ? MidnightColors.accentCyan : .primary)
                                     Spacer()
@@ -1147,7 +1160,7 @@ struct MobileObjectExplorerView: View {
                                     Image(systemName: "lock.shield")
                                         .foregroundStyle(.orange)
                                         .font(.caption2)
-                                    Text(constNode.name)
+                                    Text(constNode.label)
                                         .font(MidnightMobileDesign.FontToken.caption)
                                         .foregroundStyle(isConstSelected ? MidnightColors.accentCyan : .primary)
                                     Spacer()
@@ -1471,68 +1484,16 @@ struct MobileObjectExplorerView: View {
         return nil
     }
 
+    /// (database, schema, name) for the schema-content kinds, via the
+    /// shared escape-aware `PgNodeID` parser.
     private func parseNodeId(_ node: PgSchemaNode) -> (database: String, schema: String, name: String)? {
         switch node.kind {
-        case .relation: return parseRelationId(node.id)
-        case .sequence: return parseSequenceId(node.id)
-        case .routine: return parseRoutineId(node.id)
-        case .objectType: return parseObjectTypeId(node.id)
-        default: return nil
+        case .relation, .sequence, .routine, .objectType:
+            guard let t = PgNodeID.target(for: node) else { return nil }
+            return (t.database, t.schema, t.name)
+        default:
+            return nil
         }
-    }
-
-    private func parseRelationId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "rel:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    private func parseSequenceId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "seq:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    private func parseRoutineId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "fn:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let parenStart = afterDb.firstIndex(of: "(") else { return nil }
-        let nameAndSchema = String(afterDb[afterDb.startIndex..<parenStart])
-        guard let lastDot = nameAndSchema.lastIndex(of: ".") else { return nil }
-        let schema = String(nameAndSchema[nameAndSchema.startIndex..<lastDot])
-        let name = String(nameAndSchema[nameAndSchema.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    private func parseObjectTypeId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "type:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
     }
 
     private func formatRowCount(_ rows: Float) -> String {

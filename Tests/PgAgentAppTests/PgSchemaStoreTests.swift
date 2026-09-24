@@ -141,7 +141,8 @@ final class PgSchemaStoreTests: XCTestCase {
         // Verify nodes for Routines
         let routineNodes = bundle.nodes(for: .routines)
         XCTAssertEqual(routineNodes.count, 1)
-        XCTAssertEqual(routineNodes[0].id, "fn:prod_db.public.calculate_revenue(date, date)")
+        // The signature is its own escaped id component (PgNodeID).
+        XCTAssertEqual(routineNodes[0].id, "fn:prod_db.public.calculate_revenue.(date, date)")
         XCTAssertEqual(routineNodes[0].name, "calculate_revenue")
         XCTAssertEqual(routineNodes[0].owner, "postgres")
         if case .routine(let kind, let sig, let ret) = routineNodes[0].kind {

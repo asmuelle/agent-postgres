@@ -564,7 +564,7 @@ struct PostgresObjectWizardView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(tableName.isEmpty || columns.isEmpty || isExecuting)
+            .disabled(!canExecute || isExecuting)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -585,64 +585,21 @@ struct PostgresObjectWizardView: View {
     }
     
     private func generateDDL() -> String {
-        let sc = schemaName.isEmpty ? "public" : schemaName
-        let tb = tableName.isEmpty ? "[table_name]" : tableName
-        
-        var ddl = "-- PostgreSQL Visual Design Generated DDL\n"
-        ddl += "CREATE TABLE IF NOT EXISTS \(sc).\(tb) (\n"
-        
-        let colLines = columns.map { col -> String in
-            let colName = col.name.isEmpty ? "[column_name]" : col.name
-            var line = "    \(colName) \(col.type)"
-            
-            if !col.length.isEmpty, let _ = Int(col.length) {
-                line += "(\(col.length))"
-            }
-            
-            if !col.isNullable {
-                line += " NOT NULL"
-            }
-            
-            if col.isPrimaryKey {
-                line += " PRIMARY KEY"
-            }
-            
-            if !col.defaultValue.isEmpty {
-                line += " DEFAULT \(col.defaultValue)"
-            }
-            return line
-        }
-        
-        ddl += colLines.joined(separator: ",\n")
-        ddl += "\n);\n"
-        
-        // Append Indexes
-        for idx in indexes {
-            let idxName = idx.name.isEmpty ? "idx_\(tb)_idx" : idx.name
-            if !idx.columns.isEmpty {
-                let colStr = idx.columns.joined(separator: ", ")
-                var idxDdl = "\nCREATE INDEX IF NOT EXISTS \(idxName) ON \(sc).\(tb) USING \(idx.type) (\(colStr))"
-                if !idx.condition.isEmpty {
-                    idxDdl += " WHERE \(idx.condition)"
-                }
-                ddl += idxDdl + ";\n"
-            }
-        }
-        
-        // Append Constraints
-        for fk in constraints {
-            let fkName = fk.name.isEmpty ? "fk_\(tb)_fk" : fk.name
-            if !fk.localColumn.isEmpty && !fk.foreignTable.isEmpty && !fk.foreignColumn.isEmpty {
-                ddl += "\nALTER TABLE \(sc).\(tb) ADD CONSTRAINT \(fkName)\n"
-                ddl += "    FOREIGN KEY (\(fk.localColumn)) \n"
-                ddl += "    REFERENCES \(fk.foreignSchema).\(fk.foreignTable) (\(fk.foreignColumn))\n"
-                ddl += "    ON DELETE \(fk.onDelete);\n"
-            }
-        }
-        
-        return ddl
+        PostgresObjectWizardDDL.generate(
+            schema: schemaName,
+            table: tableName,
+            columns: columns,
+            indexes: indexes,
+            constraints: constraints
+        )
     }
-    
+
+    /// Execute only a complete design — the preview's `[placeholder]`
+    /// names are deliberately invalid SQL, never real identifiers.
+    private var canExecute: Bool {
+        PostgresObjectWizardDDL.isComplete(table: tableName, columns: columns)
+    }
+
     private func executeDesign() {
         guard let connectionId else {
             executionError = "Database connection is not available."
@@ -680,6 +637,126 @@ struct PostgresObjectWizardView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - DDL generation (pure)
+
+/// Renders the wizard's design as DDL. Every identifier (schema, table,
+/// columns, index / constraint names, referenced objects) is quoted with
+/// `pgQuoteIdent`, so mixed case survives and reserved words / spaces
+/// work. Types, index methods and ON DELETE actions come from fixed pick
+/// lists and are emitted verbatim; the index WHERE condition is a SQL
+/// expression by design.
+enum PostgresObjectWizardDDL {
+    /// Keywords / functions a DEFAULT may be written as bare. Anything
+    /// else that isn't recognisably an expression is treated as text.
+    private static let bareDefaultKeywords: Set<String> = [
+        "NULL", "TRUE", "FALSE", "DEFAULT",
+        "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+        "LOCALTIME", "LOCALTIMESTAMP", "CURRENT_USER", "SESSION_USER",
+        "CURRENT_ROLE", "CURRENT_SCHEMA", "CURRENT_CATALOG", "USER",
+    ]
+
+    /// Every name needed to execute is filled in.
+    static func isComplete(table: String, columns: [WizardColumn]) -> Bool {
+        !trimmed(table).isEmpty
+            && !columns.isEmpty
+            && columns.allSatisfy { !trimmed($0.name).isEmpty }
+    }
+
+    static func generate(
+        schema: String,
+        table: String,
+        columns: [WizardColumn],
+        indexes: [WizardIndex],
+        constraints: [WizardConstraint]
+    ) -> String {
+        let schemaName = trimmed(schema).isEmpty ? "public" : schema
+        let qualified = trimmed(table).isEmpty
+            ? "\(pgQuoteIdent(schemaName)).[table_name]"
+            : "\(pgQuoteIdent(schemaName)).\(pgQuoteIdent(table))"
+        let rawTable = trimmed(table).isEmpty ? "table" : table
+
+        var ddl = "-- PostgreSQL Visual Design Generated DDL\n"
+        ddl += "CREATE TABLE IF NOT EXISTS \(qualified) (\n"
+
+        // A single PK column is declared inline; a composite key needs a
+        // table constraint (repeating `PRIMARY KEY` inline is an error).
+        let pkColumns = columns.filter(\.isPrimaryKey)
+        let inlinePK = pkColumns.count == 1
+
+        var lines = columns.map { col -> String in
+            var line = "    \(columnIdent(col.name)) \(col.type)"
+            if !col.length.isEmpty, Int(col.length) != nil {
+                line += "(\(col.length))"
+            }
+            if !col.isNullable {
+                line += " NOT NULL"
+            }
+            if col.isPrimaryKey && inlinePK {
+                line += " PRIMARY KEY"
+            }
+            let rawDefault = trimmed(col.defaultValue)
+            if !rawDefault.isEmpty {
+                line += " DEFAULT \(defaultExpression(rawDefault))"
+            }
+            return line
+        }
+        if pkColumns.count > 1 {
+            lines.append("    PRIMARY KEY (\(pkColumns.map { columnIdent($0.name) }.joined(separator: ", ")))")
+        }
+
+        ddl += lines.joined(separator: ",\n")
+        ddl += "\n);\n"
+
+        for idx in indexes where !idx.columns.isEmpty {
+            let idxName = trimmed(idx.name).isEmpty ? "idx_\(rawTable)_idx" : idx.name
+            let colStr = idx.columns.map(pgQuoteIdent).joined(separator: ", ")
+            var idxDdl = "\nCREATE INDEX IF NOT EXISTS \(pgQuoteIdent(idxName)) ON \(qualified) USING \(idx.type) (\(colStr))"
+            let condition = trimmed(idx.condition)
+            if !condition.isEmpty {
+                idxDdl += " WHERE \(condition)"
+            }
+            ddl += idxDdl + ";\n"
+        }
+
+        for fk in constraints
+        where !fk.localColumn.isEmpty && !trimmed(fk.foreignTable).isEmpty && !trimmed(fk.foreignColumn).isEmpty {
+            let fkName = trimmed(fk.name).isEmpty ? "fk_\(rawTable)_fk" : fk.name
+            let refSchema = trimmed(fk.foreignSchema).isEmpty ? schemaName : fk.foreignSchema
+            ddl += "\nALTER TABLE \(qualified) ADD CONSTRAINT \(pgQuoteIdent(fkName))\n"
+            ddl += "    FOREIGN KEY (\(pgQuoteIdent(fk.localColumn)))\n"
+            ddl += "    REFERENCES \(pgQuoteIdent(refSchema)).\(pgQuoteIdent(fk.foreignTable)) (\(pgQuoteIdent(fk.foreignColumn)))\n"
+            ddl += "    ON DELETE \(fk.onDelete);\n"
+        }
+
+        return ddl
+    }
+
+    /// The DEFAULT clause body. Expressions pass through untouched —
+    /// already-quoted literals, numbers, casts, function calls
+    /// (`now()`, `gen_random_uuid()`), parenthesised expressions and the
+    /// SQL value keywords. Any other bare text is a string value and is
+    /// emitted as an escaped literal (`it's` → `'it''s'`), where it used
+    /// to be pasted in raw and parse as a column reference.
+    static func defaultExpression(_ raw: String) -> String {
+        let value = trimmed(raw)
+        if value.hasPrefix("'") || value.uppercased().hasPrefix("E'")
+            || value.contains("(") || value.contains("::")
+            || Double(value) != nil
+            || bareDefaultKeywords.contains(value.uppercased()) {
+            return value
+        }
+        return pgQuoteLiteral(value)
+    }
+
+    private static func columnIdent(_ name: String) -> String {
+        trimmed(name).isEmpty ? "[column_name]" : pgQuoteIdent(name)
+    }
+
+    private static func trimmed(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
