@@ -139,7 +139,7 @@ public struct WidgetMonitorSnapshot: Codable, Identifiable, Equatable, Sendable 
             lastCheckedAt: nil,
             lastChangedAt: now,
             summary: "Monitoring not configured",
-            detail: "Choose watched hosts in Midnight SSH.",
+            detail: "Turn on the monitoring hub in pgAgent Settings.",
             openURL: nil
         )
     }
@@ -153,7 +153,7 @@ public struct WidgetMonitorSnapshot: Codable, Identifiable, Equatable, Sendable 
             lastCheckedAt: nil,
             lastChangedAt: now,
             summary: "No matching checks",
-            detail: "Adjust widget scope in Midnight SSH.",
+            detail: "Adjust widget scope in pgAgent.",
             openURL: WidgetSnapshotPresenter.monitoringOverviewURL
         )
     }
@@ -319,8 +319,11 @@ public final class WidgetSnapshotStore {
     public func save(_ snapshotFile: WidgetMonitorSnapshotFile) throws {
         let target = try snapshotsURL
         let data = try Self.encoder.encode(snapshotFile)
+        // App Group container only: the sandboxed widget reads the same
+        // `group.com.pgagent.pgagent` container. Never write into another
+        // app's ~/Library/Containers/… — macOS 14+ gates that behind the
+        // "access data from other apps" TCC prompt.
         try write(data, to: target)
-        try mirrorToMacOSWidgetContainerIfNeeded(data: data, primaryTarget: target)
         try? WatchStatusSnapshotStore(directoryURL: directoryOverride).refresh(monitoringSnapshotFile: snapshotFile)
     }
 
@@ -374,24 +377,6 @@ public final class WidgetSnapshotStore {
             try? fileManager.removeItem(at: temporaryURL)
             throw error
         }
-    }
-
-    private func mirrorToMacOSWidgetContainerIfNeeded(data: Data, primaryTarget: URL) throws {
-        #if os(macOS)
-        guard directoryOverride == nil else { return }
-        let mirrorTarget = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Containers")
-            .appendingPathComponent("com.pgagent.macos.widgets")
-            .appendingPathComponent("Data")
-            .appendingPathComponent("Library")
-            .appendingPathComponent("Group Containers")
-            .appendingPathComponent(appGroupIdentifier)
-            .appendingPathComponent(fileName)
-
-        guard primaryTarget.standardizedFileURL != mirrorTarget.standardizedFileURL else { return }
-        try? write(data, to: mirrorTarget)
-        #endif
     }
 
     private static var encoder: JSONEncoder {

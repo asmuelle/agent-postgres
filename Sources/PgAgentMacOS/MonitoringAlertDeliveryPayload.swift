@@ -54,6 +54,7 @@ public struct MonitoringAlertDeliveryPayload: Codable, Equatable, Sendable {
     }
 
     public var userInfo: [String: String] {
+        let iso8601 = Self.makeISO8601Formatter()
         var info = [
             Self.payloadKindKey: Self.payloadKind,
             Self.idKey: id,
@@ -63,10 +64,10 @@ public struct MonitoringAlertDeliveryPayload: Codable, Equatable, Sendable {
             Self.sourceKey: source.rawValue,
             Self.ruleIdKey: ruleId,
             Self.snapshotIdKey: snapshotId,
-            Self.occurredAtKey: Self.iso8601Formatter.string(from: occurredAt),
+            Self.occurredAtKey: iso8601.string(from: occurredAt),
         ]
         if let checkedAt {
-            info[Self.checkedAtKey] = Self.iso8601Formatter.string(from: checkedAt)
+            info[Self.checkedAtKey] = iso8601.string(from: checkedAt)
         }
         if let openURL {
             info[Self.openURLKey] = openURL
@@ -75,6 +76,7 @@ public struct MonitoringAlertDeliveryPayload: Codable, Equatable, Sendable {
     }
 
     public init?(userInfo: [AnyHashable: Any]) {
+        let iso8601 = Self.makeISO8601Formatter()
         guard userInfo[Self.payloadKindKey] as? String == Self.payloadKind,
               let id = userInfo[Self.idKey] as? String,
               let title = userInfo[Self.titleKey] as? String,
@@ -86,11 +88,11 @@ public struct MonitoringAlertDeliveryPayload: Codable, Equatable, Sendable {
               let ruleId = userInfo[Self.ruleIdKey] as? String,
               let snapshotId = userInfo[Self.snapshotIdKey] as? String,
               let occurredAtRaw = userInfo[Self.occurredAtKey] as? String,
-              let occurredAt = Self.iso8601Formatter.date(from: occurredAtRaw)
+              let occurredAt = iso8601.date(from: occurredAtRaw)
         else { return nil }
 
         let checkedAt = (userInfo[Self.checkedAtKey] as? String)
-            .flatMap(Self.iso8601Formatter.date(from:))
+            .flatMap(iso8601.date(from:))
 
         self.init(
             id: id,
@@ -119,9 +121,13 @@ public struct MonitoringAlertDeliveryPayload: Codable, Equatable, Sendable {
     private static let checkedAtKey = "msshAlertCheckedAt"
     public static let openURLKey = "msshAlertOpenURL"
 
-    private static let iso8601Formatter: ISO8601DateFormatter = {
+    // Built per call rather than cached in a static: ISO8601DateFormatter
+    // isn't Sendable, and payloads are built/parsed from any isolation domain.
+    // (Date.ISO8601FormatStyle is Sendable but truncates instead of rounding
+    // milliseconds and parses fraction-less input, so it isn't wire-identical.)
+    private static func makeISO8601Formatter() -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
-    }()
+    }
 }

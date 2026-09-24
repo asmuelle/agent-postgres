@@ -114,11 +114,6 @@ struct MonospacedCodeView: View {
     }
 }
 
-// MARK: - Safe SQL Literal Helper
-private func escapeLiteral(_ s: String) -> String {
-    s.replacingOccurrences(of: "'", with: "''")
-}
-
 // =============================================================================
 // 2. SEQUENCES VISUALIZER
 // =============================================================================
@@ -272,14 +267,16 @@ struct PostgresSequenceVisualizerView: View {
             }
         }
         do {
+            // Anchor the comment on the sequence's own OID (schema-
+            // qualified via to_regclass) — a relname-only pg_class join
+            // duplicates rows / picks the wrong comment when two schemas
+            // hold same-named sequences.
+            let regclassArg = pgQuoteLiteral(pgQuoteIdent(schema) + "." + pgQuoteIdent(name))
             let sql = """
-            SELECT s.last_value, s.increment_by, s.start_value, s.min_value, s.max_value, s.cache_size, s.is_cycled,
-                   d.description
+            SELECT s.last_value, s.increment_by, s.start_value, s.min_value, s.max_value, s.cache_size, s.cycle,
+                   obj_description(to_regclass(\(regclassArg)), 'pg_class')
             FROM pg_sequences s
-            LEFT JOIN pg_class c ON c.relname = s.sequencename
-            LEFT JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.schemaname
-            LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-            WHERE s.schemaname = '\(escapeLiteral(schema))' AND s.sequencename = '\(escapeLiteral(name))'
+            WHERE s.schemaname = \(pgQuoteLiteral(schema)) AND s.sequencename = \(pgQuoteLiteral(name))
             """
             
             let result = try await BridgeManager.shared.pgExecute(
@@ -294,7 +291,7 @@ struct PostgresSequenceVisualizerView: View {
                 return
             }
             
-            let lastValue = row.cells[0] ?? "1"
+            let lastValue = row.cells[0] ?? "—"
             let incrementBy = row.cells[1] ?? "1"
             let startValue = row.cells[2] ?? "1"
             let minValue = row.cells[3] ?? "1"
@@ -303,23 +300,16 @@ struct PostgresSequenceVisualizerView: View {
             let cycledRaw = row.cells[6] ?? "f"
             let isCycled = cycledRaw == "t" || cycledRaw == "true"
             let description = row.cells.count > 7 ? row.cells[7] : nil
-            
-            var ddlText = """
-            -- Sequence: \(schema).\(name)
-            -- Reconstructed DDL
 
-            CREATE SEQUENCE IF NOT EXISTS \(schema).\(name)
-                INCREMENT BY \(incrementBy)
-                START WITH \(startValue)
-                MINVALUE \(minValue)
-                MAXVALUE \(maxValue)
-                CACHE \(cacheSize)
-                \(isCycled ? "CYCLE" : "NO CYCLE");
-            """
-            
-            if let desc = description, !desc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                ddlText += "\n\nCOMMENT ON SEQUENCE \(schema).\(name) IS '\(desc.replacingOccurrences(of: "'", with: "''"))';"
-            }
+            // DDL comes from the shared engine (quoted identifiers,
+            // escaped comment literal, data type, OWNED BY).
+            let ddlRows = try await BridgeManager.shared.pgExecute(
+                connectionId: connectionId,
+                sessionId: sessionId,
+                sql: PostgresNodeDDL.sequenceQuery(schema: schema, name: name),
+                pageSize: 10
+            ).rows.map(\.cells)
+            let ddlText = PostgresNodeDDL.renderSequenceDDL(rows: ddlRows, schema: schema, name: name)
             
             let props = SequenceProperties(
                 lastValue: lastValue,
@@ -692,10 +682,11 @@ struct PostgresObjectTypeVisualizerView: View {
                    rng.rngsubtype
             FROM pg_type t
             JOIN pg_namespace n ON n.oid = t.typnamespace
-            LEFT JOIN pg_description d ON d.objoid = t.oid
+            LEFT JOIN pg_description d
+              ON d.objoid = t.oid AND d.classoid = 'pg_type'::regclass AND d.objsubid = 0
             LEFT JOIN pg_type bt ON bt.oid = t.typbasetype
             LEFT JOIN pg_range rng ON rng.rngtypid = t.oid
-            WHERE n.nspname = '\(escapeLiteral(schema))' AND t.typname = '\(escapeLiteral(name))'
+            WHERE n.nspname = \(pgQuoteLiteral(schema)) AND t.typname = \(pgQuoteLiteral(name))
             """
             
             let result = try await BridgeManager.shared.pgExecute(
@@ -710,7 +701,12 @@ struct PostgresObjectTypeVisualizerView: View {
                 return
             }
             
-            let oid = firstRow.cells[0] ?? ""
+            // The OID is interpolated into the follow-up catalog queries,
+            // so insist on a real unsigned integer.
+            guard let oid = firstRow.cells[0], UInt32(oid) != nil else {
+                state = .error(VisualizerError.invalidResponse.localizedDescription)
+                return
+            }
             let typtype = firstRow.cells[1] ?? ""
             let typname = firstRow.cells[2] ?? ""
             let description = firstRow.cells.count > 3 ? firstRow.cells[3] : nil
@@ -720,7 +716,6 @@ struct PostgresObjectTypeVisualizerView: View {
             let typNotNull = typNotNullRaw == "t" || typNotNullRaw == "true"
             
             var structure: UdtStructure = .otherType(details: "Type: \(typname), OID: \(oid)")
-            var ddlText = ""
             
             if typtype == "e" {
                 // Enum
@@ -736,15 +731,6 @@ struct PostgresObjectTypeVisualizerView: View {
                     return cell
                 }
                 structure = .enumType(variants: variants)
-                
-                ddlText = """
-                -- Object Type: \(schema).\(name)
-                -- Reconstructed UDT (Enum)
-
-                CREATE TYPE \(schema).\(name) AS ENUM (
-                    \(variants.map { "'\($0)'" }.joined(separator: ",\n    "))
-                );
-                """
             } else if typtype == "c" {
                 // Composite
                 let compSql = """
@@ -771,15 +757,6 @@ struct PostgresObjectTypeVisualizerView: View {
                     attributes.append(CompositeAttr(name: attrName, type: attrType, attnum: attnum))
                 }
                 structure = .compositeType(attributes: attributes)
-                
-                ddlText = """
-                -- Object Type: \(schema).\(name)
-                -- Reconstructed UDT (Composite)
-
-                CREATE TYPE \(schema).\(name) AS (
-                    \(attributes.map { "\($0.name) \($0.type)" }.joined(separator: ",\n    "))
-                );
-                """
             } else if typtype == "d" {
                 // Domain
                 let domSql = """
@@ -802,20 +779,6 @@ struct PostgresObjectTypeVisualizerView: View {
                 }
                 let base = baseTypeName ?? "unknown"
                 structure = .domainType(baseType: base, defaultVal: typDefault, notNull: typNotNull, constraints: constraints)
-                
-                var constrLines = ""
-                if !constraints.isEmpty {
-                    constrLines = "\n    " + constraints.map { "CONSTRAINT \($0.name) \($0.definition)" }.joined(separator: ",\n    ")
-                }
-                
-                ddlText = """
-                -- Object Type: \(schema).\(name)
-                -- Reconstructed UDT (Domain)
-
-                CREATE DOMAIN \(schema).\(name) AS \(base)
-                    \(typDefault != nil ? "DEFAULT \(typDefault!)" : "")
-                    \(typNotNull ? "NOT NULL" : "NULL")\(constrLines);
-                """
             } else if typtype == "r" {
                 // Range
                 let rngSql = """
@@ -839,27 +802,33 @@ struct PostgresObjectTypeVisualizerView: View {
                     let opc = rRow.cells.count > 1 ? rRow.cells[1] : nil
                     let coll = rRow.cells.count > 2 ? rRow.cells[2] : nil
                     structure = .rangeType(subtype: subTypeName, opclass: opc, collation: coll)
-                    
-                    ddlText = """
-                    -- Object Type: \(schema).\(name)
-                    -- Reconstructed UDT (Range)
-
-                    CREATE TYPE \(schema).\(name) AS RANGE (
-                        SUBTYPE = \(subTypeName)
-                        \(opc != nil ? ", SUBTYPE_OPCLASS = \(opc!)" : "")
-                        \(coll != nil ? ", COLLATION = \(coll!)" : "")
-                    );
-                    """
                 } else {
                     structure = .otherType(details: "Range details missing for \(name)")
                 }
             } else {
                 structure = .otherType(details: "Type: \(typname) (typtype: \(typtype)), OID: \(oid)")
+            }
+
+            // DDL comes from the shared engine (quoted identifiers and
+            // enum labels, escaped comment literal).
+            var ddlText: String
+            if let kind = PostgresNodeDDL.objectTypeKind(typtype: typtype) {
+                let ddlRows = try await BridgeManager.shared.pgExecute(
+                    connectionId: connectionId,
+                    sessionId: sessionId,
+                    sql: PostgresNodeDDL.objectTypeQuery(kind: kind, schema: schema, name: name),
+                    pageSize: 1000
+                ).rows.map(\.cells)
+                ddlText = PostgresNodeDDL.renderObjectTypeDDL(
+                    kind: kind, rows: ddlRows, schema: schema, name: name)
+            } else {
                 ddlText = "-- Dynamic DDL not supported for type kind '\(typtype)'."
             }
-            
-            if let desc = description, !desc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                ddlText += "\n\nCOMMENT ON TYPE \(schema).\(name) IS '\(desc.replacingOccurrences(of: "'", with: "''"))';"
+            let commentKeyword = typtype == "d" ? "DOMAIN" : "TYPE"
+            if let comment = PostgresNodeDDL.commentDDL(
+                on: commentKeyword, schema: schema, name: name, comment: description
+            ) {
+                ddlText += "\n\n" + comment
             }
             
             let props = ObjectTypeProperties(

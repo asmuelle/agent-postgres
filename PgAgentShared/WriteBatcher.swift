@@ -14,7 +14,11 @@ import OSLog
 /// Concurrent writes for different connections live in separate
 /// `WriteBatcher` instances and have no ordering relationship by design
 /// (different SSH sessions).
-final class WriteBatcher {
+///
+/// `@unchecked Sendable`: all mutable state is confined to the serial `queue`
+/// (see Threading above); the type is only shared so the delayed flush work
+/// item can be scheduled back onto that same queue.
+final class WriteBatcher: @unchecked Sendable {
     private let connectionId: String
     private let queue: DispatchQueue
     private let logger = Logger(subsystem: "com.mc-ssh", category: "write-batch")

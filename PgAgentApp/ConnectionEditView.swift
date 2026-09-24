@@ -596,20 +596,21 @@ struct ConnectionEditView: View {
 
         storeManager.saveOrUpdate(p)
 
-        // Save password/passphrase to Keychain
+        // Save password/passphrase to Keychain — enqueued on the keychain's
+        // serial queue (after the stale-credential cleanup `saveOrUpdate`
+        // just enqueued) so a slow keychain never blocks the sheet.
+        let account = p.keychainAccount
         if authMethod == .password && !password.isEmpty {
-            KeychainManager.shared.savePassword(
-                kind: .sshPassword,
-                account: p.keychainAccount,
-                secret: password
-            )
+            let secret = password
+            KeychainStorage.enqueue {
+                KeychainStorage().savePassword(kind: .sshPassword, account: account, secret: secret)
+            }
         }
         if authMethod == .publicKey && shouldPersistPassphrase(for: p.sshKeyReference) && !passphrase.isEmpty {
-            KeychainManager.shared.savePassword(
-                kind: .sshKeyPassphrase,
-                account: p.keychainAccount,
-                secret: passphrase
-            )
+            let secret = passphrase
+            KeychainStorage.enqueue {
+                KeychainStorage().savePassword(kind: .sshKeyPassphrase, account: account, secret: secret)
+            }
         }
         return true
     }

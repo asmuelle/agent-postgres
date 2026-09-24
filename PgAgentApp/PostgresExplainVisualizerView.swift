@@ -27,14 +27,19 @@ struct PgPlanNode: Decodable, Identifiable, Sendable, Hashable {
     let alias: String?
     let startupCost: Double?
     let totalCost: Double?
-    let planRows: Int?
-    let planWidth: Int?
+    // Every count is decoded as Double: Postgres 18 reports
+    // "Actual Rows" as a per-loop average with two decimals (0.50), and
+    // an Int decode of any one node would fail the whole plan. Treating
+    // the other counters the same way keeps the decoder tolerant of
+    // future format changes; display goes through `formatCount`.
+    let planRows: Double?
+    let planWidth: Double?
     let actualStartupTime: Double?
     let actualTotalTime: Double?
-    let actualRows: Int?
-    let actualLoops: Int?
-    let sharedHitBlocks: Int?
-    let sharedReadBlocks: Int?
+    let actualRows: Double?
+    let actualLoops: Double?
+    let sharedHitBlocks: Double?
+    let sharedReadBlocks: Double?
     let plans: [PgPlanNode]?
     
     // Hashable conformance
@@ -54,17 +59,26 @@ struct PgPlanNode: Decodable, Identifiable, Sendable, Hashable {
         self.alias = try container.decodeIfPresent(String.self, forKey: .alias)
         self.startupCost = try container.decodeIfPresent(Double.self, forKey: .startupCost)
         self.totalCost = try container.decodeIfPresent(Double.self, forKey: .totalCost)
-        self.planRows = try container.decodeIfPresent(Int.self, forKey: .planRows)
-        self.planWidth = try container.decodeIfPresent(Int.self, forKey: .planWidth)
+        self.planRows = try container.decodeIfPresent(Double.self, forKey: .planRows)
+        self.planWidth = try container.decodeIfPresent(Double.self, forKey: .planWidth)
         self.actualStartupTime = try container.decodeIfPresent(Double.self, forKey: .actualStartupTime)
         self.actualTotalTime = try container.decodeIfPresent(Double.self, forKey: .actualTotalTime)
-        self.actualRows = try container.decodeIfPresent(Int.self, forKey: .actualRows)
-        self.actualLoops = try container.decodeIfPresent(Int.self, forKey: .actualLoops)
-        self.sharedHitBlocks = try container.decodeIfPresent(Int.self, forKey: .sharedHitBlocks)
-        self.sharedReadBlocks = try container.decodeIfPresent(Int.self, forKey: .sharedReadBlocks)
+        self.actualRows = try container.decodeIfPresent(Double.self, forKey: .actualRows)
+        self.actualLoops = try container.decodeIfPresent(Double.self, forKey: .actualLoops)
+        self.sharedHitBlocks = try container.decodeIfPresent(Double.self, forKey: .sharedHitBlocks)
+        self.sharedReadBlocks = try container.decodeIfPresent(Double.self, forKey: .sharedReadBlocks)
         self.plans = try container.decodeIfPresent([PgPlanNode].self, forKey: .plans)
     }
     
+    /// Whole numbers print without decimals (`1200`); fractional
+    /// per-loop averages keep two (`0.50`).
+    static func formatCount(_ value: Double) -> String {
+        if value.rounded() == value, abs(value) < 1e15 {
+            return String(Int64(value))
+        }
+        return String(format: "%.2f", value)
+    }
+
     enum CodingKeys: String, CodingKey {
         case nodeType = "Node Type"
         case relationName = "Relation Name"
@@ -260,10 +274,10 @@ struct PostgresExplainVisualizerView: View {
                             .padding(.top, 4)
                         
                         if let rows = node.planRows {
-                            inspectorRow(label: "Planned Rows", value: "\(rows)")
+                            inspectorRow(label: "Planned Rows", value: PgPlanNode.formatCount(rows))
                         }
                         if let width = node.planWidth {
-                            inspectorRow(label: "Planned Width", value: "\(width) bytes")
+                            inspectorRow(label: "Planned Width", value: "\(PgPlanNode.formatCount(width)) bytes")
                         }
                         if let startCost = node.startupCost, let totalCost = node.totalCost {
                             inspectorRow(label: "Startup Cost", value: String(format: "%.2f", startCost))
@@ -280,10 +294,10 @@ struct PostgresExplainVisualizerView: View {
                             .padding(.top, 4)
                         
                         if let rows = node.actualRows {
-                            inspectorRow(label: "Actual Rows", value: "\(rows)")
+                            inspectorRow(label: "Actual Rows", value: PgPlanNode.formatCount(rows))
                         }
                         if let loops = node.actualLoops {
-                            inspectorRow(label: "Actual Loops", value: "\(loops)")
+                            inspectorRow(label: "Actual Loops", value: PgPlanNode.formatCount(loops))
                         }
                         if let start = node.actualStartupTime {
                             inspectorRow(label: "Actual Startup", value: String(format: "%.3f ms", start))
@@ -303,10 +317,10 @@ struct PostgresExplainVisualizerView: View {
                                 .padding(.top, 4)
                             
                             if let hit = node.sharedHitBlocks {
-                                inspectorRow(label: "Shared Cache Hits", value: "\(hit) blocks")
+                                inspectorRow(label: "Shared Cache Hits", value: "\(PgPlanNode.formatCount(hit)) blocks")
                             }
                             if let read = node.sharedReadBlocks {
-                                inspectorRow(label: "Shared Read Hits", value: "\(read) blocks")
+                                inspectorRow(label: "Shared Read Hits", value: "\(PgPlanNode.formatCount(read)) blocks")
                             }
                         }
                     }
@@ -479,15 +493,20 @@ struct PgExplainTreeNodeView: View {
     }
     
     private func nodeColor(_ node: PgPlanNode) -> Color {
-        let planRows = Double(node.planRows ?? 0)
-        let actualRows = Double(node.actualRows ?? 0)
+        // Estimate-vs-actual only means something with runtime metrics;
+        // an estimated plan has no actuals and must not read as a 0-row
+        // misestimate on every node. Both figures are per-loop.
+        guard let actualRows = node.actualRows else { return .green }
+        let planRows = node.planRows ?? 0
         let ratio = planRows > 0 ? (actualRows / planRows) : 1.0
         
         if ratio > 10.0 || ratio < 0.1 {
             return .red
         }
         
-        if node.nodeType.contains("Seq Scan") && actualRows > 10000 {
+        // Total rows produced across all loops.
+        let totalRows = actualRows * (node.actualLoops ?? 1)
+        if node.nodeType.contains("Seq Scan") && totalRows > 10000 {
             return .orange
         }
         

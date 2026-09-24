@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import os
 #if canImport(PgAgentMacOS)
 import PgAgentMacOS
 #endif
@@ -18,7 +19,12 @@ import PgAgentMacOS
 /// serial control queue for ordering; remote commands, monitor reads, and
 /// short SFTP probes use a separate utility queue so slow host commands do
 /// not delay interactive typing.
-final class BridgeManager {
+///
+/// Concurrency: `@unchecked Sendable` because the mutable state is
+/// queue-confined — `eventCallback` and `writeBatchers` are only touched on the
+/// serial `dispatchQueue`, and `isInitialized` is guarded by a lock. The FFI
+/// work closures themselves are `@Sendable`.
+final class BridgeManager: @unchecked Sendable {
     static let shared = BridgeManager()
     private let logger = Logger(subsystem: "com.mc-ssh", category: "bridge")
 
@@ -29,7 +35,13 @@ final class BridgeManager {
     /// terminal input writes.
     private let utilityQueue: DispatchQueue
 
-    private(set) var isInitialized = false
+    private let initializedState = OSAllocatedUnfairLock(initialState: false)
+
+    /// Whether `rshellInit()` has succeeded (and `shutdown()` not been called).
+    private(set) var isInitialized: Bool {
+        get { initializedState.withLock { $0 } }
+        set { initializedState.withLock { $0 = newValue } }
+    }
 
     /// Strong reference — Rust holds a callback handle but we keep a
     /// Swift reference too, so the object isn't deallocated while Rust
@@ -51,17 +63,17 @@ final class BridgeManager {
         )
     }
 
-    private func runOnControlQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+    private func runOnControlQueue<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
         try await run(on: dispatchQueue, work)
     }
 
-    private func runOnUtilityQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+    private func runOnUtilityQueue<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
         try await run(on: utilityQueue, work)
     }
 
     private func run<T>(
         on queue: DispatchQueue,
-        _ work: @escaping () throws -> T
+        _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {

@@ -80,9 +80,9 @@ extension PostgresResultsTable.Coordinator {
     // MARK: - CSV export
 
     /// Save the currently-loaded result as RFC 4180 CSV. Skips
-    /// hidden `__pg_*` columns. NULL renders as an empty field
-    /// (the standard CSV convention; spreadsheets distinguish
-    /// empty from "NULL"-the-string by parsing).
+    /// hidden `__pg_*` columns. NULL renders as an unquoted empty
+    /// field and the empty string as `""` (PostgreSQL `COPY … CSV`
+    /// convention).
     ///
     /// "Visible rows" means whatever's been fetched so far —
     /// users wanting the full result hit "Load more" until the
@@ -176,20 +176,16 @@ extension PostgresResultsTable.Coordinator {
         }
 
         var output = String()
-        output.append(columnPlan.map { csvEscape($0.displayName) }.joined(separator: ","))
+        output.append(columnPlan.map { PostgresExportEncoding.csvField($0.displayName) }.joined(separator: ","))
         output.append("\n")
         // Already ordered by the caller (display order or selection).
+        // NULL → unquoted empty field, "" → `""` (see `csvField`).
         for r in dataRowIndices where r < result.rows.count {
-            let row = result.rows[r]
-            let line = columnPlan.map { plan -> String in
-                guard plan.resultIdx < row.cells.count else { return "" }
-                if let value = row.cells[plan.resultIdx] {
-                    return csvEscape(value)
-                }
-                return ""
+            let cells = result.rows[r].cells
+            let fields = columnPlan.map { plan -> String? in
+                plan.resultIdx < cells.count ? cells[plan.resultIdx] : nil
             }
-            .joined(separator: ",")
-            output.append(line)
+            output.append(PostgresExportEncoding.csvRow(fields))
             output.append("\n")
         }
 
@@ -198,18 +194,6 @@ extension PostgresResultsTable.Coordinator {
         } catch {
             presentAlert(title: "Export failed", message: error.localizedDescription)
         }
-    }
-
-    /// RFC 4180 quoting: a field gets wrapped in double-quotes if
-    /// it contains comma, double-quote, or newline. Internal
-    /// double-quotes are doubled. Other strings pass through
-    /// verbatim.
-    private func csvEscape(_ s: String) -> String {
-        let needsQuoting = s.contains(",") || s.contains("\"")
-            || s.contains("\n") || s.contains("\r")
-        if !needsQuoting { return s }
-        let escaped = s.replacingOccurrences(of: "\"", with: "\"\"")
-        return "\"\(escaped)\""
     }
 
     private func copyToClipboard(includeHeader: Bool) {
@@ -255,15 +239,10 @@ extension PostgresResultsTable.Coordinator {
         writeToPasteboard(lines.joined(separator: "\n"))
     }
 
-    /// Tabs / newlines in cell values would corrupt TSV. Tabs
-    /// become a single space (lossy but the common convention);
-    /// newlines become the literal `\n`. Quoting CSV-style would
-    /// be more rigorous but most spreadsheets treat `\t`-pasted
-    /// data without quote handling.
+    /// Tabs / line breaks in cell values would corrupt TSV — see
+    /// `PostgresExportEncoding.tsvField` (handles LF, CR and CRLF).
     private func escapeForClipboard(_ s: String) -> String {
-        s.replacingOccurrences(of: "\t", with: " ")
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\n", with: "\\n")
+        PostgresExportEncoding.tsvField(s)
     }
 
     private func writeToPasteboard(_ text: String) {

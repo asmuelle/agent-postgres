@@ -30,6 +30,16 @@ final class FleetHealthStore: ObservableObject {
     private var probeConnections: [String: String] = [:]
     private var probeConnectionKeys: [String: String] = [:]
 
+    /// Refreshes and shutdowns run strictly one at a time: overlapping
+    /// refreshes (e.g. a hub stop→start) opened two probes for one profile
+    /// and leaked the one whose id was overwritten.
+    private let queue = SerialAsyncQueue()
+
+    /// Bumped by `shutdown()`. A refresh still in flight when it changes
+    /// discards its results and closes any probe it opened meanwhile, so a
+    /// stopped poller can't leave connections behind.
+    private var generation: UInt64 = 0
+
     init(snapshotStore: FleetSnapshotStore = FleetSnapshotStore()) {
         self.snapshotStore = snapshotStore
     }
@@ -41,32 +51,48 @@ final class FleetHealthStore: ObservableObject {
     /// Refresh every profile concurrently. Each instance fails independently —
     /// one unreachable host never blocks the rest of the fleet.
     func refresh(profiles: [PostgresProfile]) async {
+        await queue.run { [weak self] in
+            await self?.performRefresh(profiles: profiles)
+        }
+    }
+
+    private func performRefresh(profiles: [PostgresProfile]) async {
         guard !profiles.isEmpty else {
-            await shutdown()
+            await closeAllProbes()
             health = [:]
             isRefreshing = false
             return
         }
+        let generation = self.generation
         isRefreshing = true
+        defer { isRefreshing = false }
         for batch in FleetPollingPolicy.batches(profiles) {
+            guard isCurrent(generation) else { return }
             await withTaskGroup(of: Void.self) { group in
                 for profile in batch {
-                    group.addTask { await self.refreshOne(profile: profile) }
+                    group.addTask {
+                        await self.refreshOne(profile: profile, generation: generation)
+                    }
                 }
             }
         }
+        guard isCurrent(generation) else { return }
         await removeRetiredConnections(keeping: Set(profiles.map(\.id)))
-        isRefreshing = false
         onRefreshCompleted?(profiles)
     }
 
-    private func refreshOne(profile: PostgresProfile) async {
+    private func isCurrent(_ generation: UInt64) -> Bool {
+        self.generation == generation
+    }
+
+    private func refreshOne(profile: PostgresProfile, generation: UInt64) async {
         let started = Date()
         do {
-            let connectionId = try await probeConnection(for: profile)
+            let connectionId = try await probeConnection(for: profile, generation: generation)
             let sessions = try await BridgeManager.shared.pgListSessions(connectionId: connectionId)
             let locks = try await BridgeManager.shared.pgListLocks(connectionId: connectionId)
-            let metrics = await loadMetrics(connectionId: connectionId, profileId: profile.id)
+            let metricsOutcome = await loadMetrics(connectionId: connectionId, profileId: profile.id)
+            guard isCurrent(generation) else { return }
             let now = Date().timeIntervalSince1970
 
             let threshold = TimeInterval(
@@ -89,16 +115,20 @@ final class FleetHealthStore: ObservableObject {
                 activeBackends: activeBackends,
                 longRunningCount: longRunning,
                 blockedLockCount: blocked,
-                errorMessage: nil,
+                // Reachable but the posture probe failed (commonly missing
+                // pg_monitor privileges): say so instead of "no metrics".
+                errorMessage: metricsOutcome.errorMessage,
                 lastUpdated: Date(),
                 latencyMilliseconds: Date().timeIntervalSince(started) * 1_000,
-                metrics: metrics,
+                metrics: metricsOutcome.metrics,
                 rootBlockerPid: fleetRootBlockerPid(waitPairs: waitPairs)
             )
             if let current = health[profile.id] {
                 await persistSnapshot(current)
             }
         } catch {
+            // Shut down meanwhile: the probe is already closed; record nothing.
+            guard isCurrent(generation) else { return }
             await invalidateProbeConnection(profileId: profile.id)
             let current = FleetInstanceHealth(
                 profileId: profile.id,
@@ -115,13 +145,21 @@ final class FleetHealthStore: ObservableObject {
         }
     }
 
-    private func probeConnection(for profile: PostgresProfile) async throws -> String {
+    private func probeConnection(for profile: PostgresProfile, generation: UInt64) async throws -> String {
         let key = connectionKey(profile)
         if let existing = probeConnections[profile.id], probeConnectionKeys[profile.id] == key {
             return existing
         }
         await invalidateProbeConnection(profileId: profile.id)
         let connectionId = try await BridgeManager.shared.pgConnect(profile: profile)
+        guard isCurrent(generation) else {
+            // Shut down while connecting — nobody will ever close this probe.
+            await BridgeManager.shared.pgDisconnect(connectionId: connectionId)
+            throw CancellationError()
+        }
+        if let stale = probeConnections[profile.id], stale != connectionId {
+            await BridgeManager.shared.pgDisconnect(connectionId: stale)
+        }
         probeConnections[profile.id] = connectionId
         probeConnectionKeys[profile.id] = key
         return connectionId
@@ -136,7 +174,12 @@ final class FleetHealthStore: ObservableObject {
         ].joined(separator: "|")
     }
 
-    private func loadMetrics(connectionId: String, profileId: String) async -> FleetProbeMetrics? {
+    /// Posture metrics, or why they couldn't be collected. A failure here
+    /// doesn't make the instance unreachable — sessions/locks already worked.
+    private func loadMetrics(
+        connectionId: String,
+        profileId: String
+    ) async -> (metrics: FleetProbeMetrics?, errorMessage: String?) {
         let sessionId = "fleet-posture-\(profileId)"
         defer {
             Task {
@@ -144,13 +187,21 @@ final class FleetHealthStore: ObservableObject {
                     connectionId: connectionId, sessionId: sessionId)
             }
         }
-        guard let result = try? await BridgeManager.shared.pgExecute(
-            connectionId: connectionId,
-            sessionId: sessionId,
-            sql: FleetProbeSQL.posture,
-            pageSize: 1
-        ), let row = result.rows.first else { return nil }
-        return try? FleetProbeParser.parse(row.cells)
+        do {
+            let result = try await BridgeManager.shared.pgExecute(
+                connectionId: connectionId,
+                sessionId: sessionId,
+                sql: FleetProbeSQL.posture,
+                pageSize: 1
+            )
+            guard let row = result.rows.first else {
+                return (nil, "Metrics unavailable: the posture probe returned no rows.")
+            }
+            return (try FleetProbeParser.parse(row.cells), nil)
+        } catch {
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return (nil, "Metrics unavailable: \(detail)")
+        }
     }
 
     private func persistSnapshot(_ current: FleetInstanceHealth) async {
@@ -180,7 +231,17 @@ final class FleetHealthStore: ObservableObject {
         }
     }
 
+    /// Close every probe. Any refresh still in flight is invalidated at once
+    /// (it closes what it opens and records nothing); the close itself waits
+    /// its turn behind that refresh so nothing is opened after it.
     func shutdown() async {
+        generation &+= 1
+        await queue.run { [weak self] in
+            await self?.closeAllProbes()
+        }
+    }
+
+    private func closeAllProbes() async {
         for profileId in Array(probeConnections.keys) {
             await invalidateProbeConnection(profileId: profileId)
         }

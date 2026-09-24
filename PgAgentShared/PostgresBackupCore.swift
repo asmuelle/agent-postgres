@@ -321,3 +321,123 @@ actor PostgresBackupJobStore {
         return records.filter { seen.insert($0.id).inserted }.prefix(limit).map { $0 }
     }
 }
+
+// MARK: - Job runner
+
+/// Everything a single backup/restore run needs, captured when the operator
+/// presses Start so later form edits can't change what the job does.
+struct PostgresBackupJobPlan: Equatable, Sendable {
+    let kind: PostgresBackupJobKind
+    let path: String
+    let preflight: String
+    let command: String
+    let token: String
+}
+
+enum PostgresBackupJobEvent: Equatable, Sendable {
+    case phase(String)
+    /// Preflight passed; the job is about to be launched remotely.
+    case launching(preflightOutput: String)
+    /// Latest console text (preflight + remote job log tail).
+    case console(String)
+}
+
+enum PostgresBackupJobOutcome: Equatable, Sendable {
+    /// Remote job finished; `exitCode` is its status. `output` is the poll
+    /// output (status line + log tail).
+    case finished(exitCode: Int, output: String, preflightOutput: String)
+    /// A local/transport error. `launched` tells whether the remote job may
+    /// still be running.
+    case failed(message: String, launched: Bool)
+    /// Cancelled by the operator. When `launched` the remote cancel was sent;
+    /// `remoteCancelError` is non-nil if that send failed (the job may still
+    /// be running on the server).
+    case cancelled(launched: Bool, remoteCancelError: String?)
+}
+
+/// Sequences resolve → preflight → launch → poll for one remote job, with
+/// cancellation honoured between every step.
+///
+/// The SSH command wrapper does not observe task cancellation (the FFI call
+/// is synchronous), so an in-flight step always runs to completion. The
+/// runner therefore re-checks cancellation after each step, never launches
+/// once cancelled, and — if cancellation lands after the launch was sent —
+/// issues the remote cancel itself, outside the cancelled task, so the job
+/// can't keep running untracked.
+enum PostgresBackupJobRunner {
+    typealias Execute = @Sendable (_ hostId: String, _ command: String) async throws -> String
+
+    static func run(
+        plan: PostgresBackupJobPlan,
+        resolveHost: @Sendable () async throws -> String,
+        execute: @escaping Execute,
+        onEvent: @MainActor @Sendable (PostgresBackupJobEvent) async -> Void,
+        pollIntervalNanoseconds: UInt64 = 1_000_000_000
+    ) async -> PostgresBackupJobOutcome {
+        var hostId: String?
+        var launched = false
+        do {
+            try Task.checkCancellation()
+            await onEvent(.phase("Resolving SSH host"))
+            let host = try await resolveHost()
+            hostId = host
+            try Task.checkCancellation()
+
+            await onEvent(.phase("Preflight"))
+            let preflightOutput = try await execute(host, plan.preflight)
+            await onEvent(.console(preflightOutput))
+            try Task.checkCancellation()
+
+            await onEvent(.launching(preflightOutput: preflightOutput))
+            await onEvent(.phase(plan.kind == .backup ? "Backup running" : "Restore running"))
+            // Last gate before anything runs on the server.
+            try Task.checkCancellation()
+            // Flag first: if the launch throws or cancellation lands while
+            // it is in flight, the job may already be running remotely.
+            launched = true
+            _ = try await execute(
+                host, PostgresRemoteJobProtocol.launch(token: plan.token, command: plan.command))
+
+            while true {
+                try Task.checkCancellation()
+                let output = try await execute(host, PostgresRemoteJobProtocol.poll(token: plan.token))
+                await onEvent(.console(preflightOutput + "\n" + output))
+                if let exitCode = PostgresRemoteJobProtocol.exitCode(fromPollOutput: output) {
+                    _ = try? await execute(host, PostgresRemoteJobProtocol.cleanup(token: plan.token))
+                    return .finished(exitCode: exitCode, output: output, preflightOutput: preflightOutput)
+                }
+                try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+            }
+        } catch {
+            let cancelled = error is CancellationError || Task.isCancelled
+            guard cancelled else {
+                return .failed(message: error.localizedDescription, launched: launched)
+            }
+            guard launched, let hostId else {
+                return .cancelled(launched: false, remoteCancelError: nil)
+            }
+            // Unstructured task: does not inherit this task's cancellation.
+            let token = plan.token
+            let remoteCancel = await Task {
+                try await execute(hostId, PostgresRemoteJobProtocol.cancel(token: token))
+            }.result
+            switch remoteCancel {
+            case .success:
+                return .cancelled(launched: true, remoteCancelError: nil)
+            case .failure(let cancelError):
+                return .cancelled(launched: true, remoteCancelError: cancelError.localizedDescription)
+            }
+        }
+    }
+}
+
+extension PostgresRemoteJobProtocol {
+    /// Exit status from a `poll(token:)` result, or nil while still running.
+    static func exitCode(fromPollOutput output: String) -> Int? {
+        guard output.hasPrefix("PGAGENT_DONE\t") else { return nil }
+        let first = output.split(separator: "\n", maxSplits: 1).first ?? ""
+        let code = first.split(separator: "\t").last
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        return Int(code) ?? 1
+    }
+}

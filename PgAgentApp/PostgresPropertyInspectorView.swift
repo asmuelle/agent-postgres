@@ -177,7 +177,7 @@ struct PostgresPropertyInspectorView: View {
                                 }
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(editName.isEmpty || !isDirty || connectionId == nil)
+                            .disabled(editName.isEmpty || !isDirty || connectionId == nil || generatedDDL.hasPrefix("--"))
                         }
                         Spacer()
                     }
@@ -222,7 +222,7 @@ struct PostgresPropertyInspectorView: View {
         .onAppear {
             resetFields()
         }
-        .onChange(of: node) { _ in
+        .onChangeCompat(of: node) { _ in
             resetFields()
             if activeTab == .ddl {
                 Task {
@@ -230,7 +230,7 @@ struct PostgresPropertyInspectorView: View {
                 }
             }
         }
-        .onChange(of: activeTab) { newValue in
+        .onChangeCompat(of: activeTab) { newValue in
             if newValue == .ddl {
                 Task {
                     await loadReconstructedDDL()
@@ -250,52 +250,14 @@ struct PostgresPropertyInspectorView: View {
         }
     }
 
+    /// Shared, fully quoted statement builder. `node.name` is the real
+    /// object name (the tree's display text lives in `node.label`), so
+    /// renaming a key no longer bakes its definition into the new name.
     private var generatedDDL: String {
-        guard let parsed = PostgresNodeDDL.target(for: node) else { return "-- Unknown ID format" }
-        let sEsc = "\"\(parsed.schema)\""
-        let tEsc = parsed.table != nil ? "\"\(parsed.table!)\"" : ""
-        // The bare object name from the node id — `node.name` is a
-        // DISPLAY string that for keys/constraints carries the
-        // definition suffix ("users_pkey (PRIMARY KEY (id))"), which
-        // would render an invalid identifier in RENAME statements.
-        let nEsc = "\"\(parsed.name)\""
-        let newEsc = "\"\(editName)\""
-
-        switch node.kind {
-        case .column(let typeName, let notNull):
-            var sqls: [String] = []
-            if editName != node.name {
-                sqls.append("ALTER TABLE \(sEsc).\(tEsc) RENAME COLUMN \(nEsc) TO \(newEsc);")
-            }
-            if editType != typeName {
-                sqls.append("ALTER TABLE \(sEsc).\(tEsc) ALTER COLUMN \(newEsc) TYPE \(editType);")
-            }
-            if editNotNull != notNull {
-                if editNotNull {
-                    sqls.append("ALTER TABLE \(sEsc).\(tEsc) ALTER COLUMN \(newEsc) SET NOT NULL;")
-                } else {
-                    sqls.append("ALTER TABLE \(sEsc).\(tEsc) ALTER COLUMN \(newEsc) DROP NOT NULL;")
-                }
-            }
-            return sqls.isEmpty ? "-- No changes" : sqls.joined(separator: "\n")
-        case .key:
-            return "ALTER TABLE \(sEsc).\(tEsc) RENAME CONSTRAINT \(nEsc) TO \(newEsc);"
-        case .constraint:
-            return "ALTER TABLE \(sEsc).\(tEsc) RENAME CONSTRAINT \(nEsc) TO \(newEsc);"
-        case .trigger:
-            return "ALTER TABLE \(sEsc).\(tEsc) RENAME TRIGGER \(nEsc) TO \(newEsc);"
-        case .sequence:
-            return "ALTER SEQUENCE \(sEsc).\(nEsc) RENAME TO \(newEsc);"
-        case .routine(let rkind, let signature, _):
-            let typeKeyword = rkind == .procedure ? "PROCEDURE" : "FUNCTION"
-            // The identity-argument signature pins the exact overload
-            // (it carries no parentheses of its own).
-            return "ALTER \(typeKeyword) \(sEsc).\"\(parsed.name)\"(\(signature)) RENAME TO \(newEsc);"
-        case .objectType:
-            return "ALTER TYPE \(sEsc).\(nEsc) RENAME TO \(newEsc);"
-        default:
-            return "-- Editing not supported for this element"
-        }
+        PostgresNodeAlterDDL.statements(
+            for: node,
+            edit: .init(name: editName, type: editType, notNull: editNotNull)
+        )
     }
 
     private func executeDDL() async {
@@ -359,7 +321,7 @@ struct PostgresPropertyInspectorView: View {
         case .column(let typeName, let notNull):
             editType = typeName
             editNotNull = notNull
-        case .key(let type):
+        case .key(let type, _):
             editType = "Key Type: \(type)"
         case .constraint(let type, _):
             editType = "Constraint Type: \(type)"

@@ -305,10 +305,29 @@ struct PostgresProfile: Codable, Identifiable, Hashable, Sendable {
         syncPassword = try c.decodeIfPresent(Bool.self, forKey: .syncPassword) ?? false
     }
 
-    /// Stable account string for the keychain. Includes the database so the
-    /// same `(user, host, port)` triple can hold distinct credentials per
-    /// database — common when one Postgres server hosts multiple apps.
-    var keychainAccount: String { "\(user)@\(host):\(port)/\(database)" }
+    /// Keychain account holding this profile's password. Keyed by the
+    /// profile id — NOT the endpoint — so two profiles that share
+    /// user/host/port/database each own their secret: editing or deleting
+    /// one can never delete the other's password. Ids are stable across
+    /// devices (CloudSync keys records by id), so synced passwords still
+    /// rendezvous. Both platforms resolve through here: iOS via
+    /// `KeychainManager`, macOS via `toFfiConfig()` → the Rust keychain.
+    var keychainAccount: String { Self.keychainAccount(forProfileId: id) }
+
+    static func keychainAccount(forProfileId id: String) -> String {
+        "pgprofile:\(id)"
+    }
+
+    /// `user@host:port/database`. Identifies the endpoint a profile points
+    /// at — use it for duplicate detection (importers), never as a keychain
+    /// key.
+    var endpointIdentity: String { "\(user)@\(host):\(port)/\(database)" }
+
+    /// The endpoint-scoped account passwords were stored under before
+    /// `keychainAccount` became id-scoped. Read only by the one-time
+    /// migration (`PostgresKeychainAccountMigration`) and as a read
+    /// fallback until that migration has run.
+    var legacyKeychainAccount: String { endpointIdentity }
 
     /// The environment to badge with. Prefers the explicit `environment`
     /// tag; falls back to the legacy `color` highlight strings
@@ -348,8 +367,61 @@ final class PostgresProfileStore: ObservableObject {
         return dir.appendingPathComponent("postgres-profiles.json")
     }
 
+    /// Background run of the one-time keychain account migration (see
+    /// `PostgresKeychainAccountMigration`). Connect paths should
+    /// `await waitForKeychainMigration()` before resolving a password so a
+    /// launch-time connect can't race the copy.
+    private var keychainMigrationTask: Task<Void, Never>?
+    private let passwordKeychain: any PostgresPasswordKeychain = LivePostgresPasswordKeychain()
+
     private init() {
         load()
+        migrateKeychainAccounts(for: profiles)
+    }
+
+    /// Resolves once every profile known so far has been through the
+    /// keychain account migration.
+    func waitForKeychainMigration() async {
+        await keychainMigrationTask?.value
+    }
+
+    /// Copy legacy endpoint-scoped passwords to id-scoped accounts, off the
+    /// main thread. Chained so later batches (remote merges) run after
+    /// earlier ones.
+    private func migrateKeychainAccounts(for batch: [PostgresProfile]) {
+        guard !batch.isEmpty else { return }
+        let previous = keychainMigrationTask
+        let keychain = passwordKeychain
+        let logger = logger
+        keychainMigrationTask = Task.detached(priority: .utility) {
+            await previous?.value
+            let outcomes = await KeychainStorage.offMain {
+                batch.map { PostgresKeychainAccountMigration.migrate($0, keychain: keychain) }
+            }
+            let copied = outcomes.filter { $0 == .copied }.count
+            let failed = outcomes.filter { $0 == .failed }.count
+            if copied > 0 {
+                logger.notice("Migrated \(copied) Postgres password(s) to id-scoped keychain accounts")
+            }
+            if failed > 0 {
+                logger.error("Postgres keychain migration failed for \(failed) profile(s); will retry next launch")
+            }
+        }
+    }
+
+    /// Delete a legacy endpoint-scoped entry off the main thread, subject to
+    /// `PostgresKeychainAccountMigration.purgeLegacyAccount`'s guard.
+    private func purgeLegacyKeychainAccount(_ account: String, survivor: PostgresProfile?) {
+        let keychain = passwordKeychain
+        let pendingMigration = keychainMigrationTask
+        Task.detached(priority: .utility) {
+            await pendingMigration?.value
+            _ = await KeychainStorage.offMain {
+                PostgresKeychainAccountMigration.purgeLegacyAccount(
+                    account, survivor: survivor, keychain: keychain
+                )
+            }
+        }
     }
 
     func saveOrUpdate(_ profile: PostgresProfile) {
@@ -363,13 +435,13 @@ final class PostgresProfileStore: ObservableObject {
         if let idx = profiles.firstIndex(where: { $0.id == stamped.id }) {
             let previous = profiles[idx]
             reconnectRequired = Self.connectionSettingsChanged(from: previous, to: stamped)
-            // If the keychain account changed, drop the old entry so we
-            // don't accumulate orphaned secrets.
-            if previous.keychainAccount != stamped.keychainAccount {
-                KeychainManager.shared.deletePassword(
-                    kind: .postgresPassword,
-                    account: previous.keychainAccount
-                )
+            // The password account is id-scoped, so edits never move it. A
+            // legacy endpoint-scoped copy left behind by the migration is
+            // dropped once nothing maps to that endpoint any more.
+            if let legacy = PostgresKeychainAccountMigration.legacyAccountToDelete(
+                editing: previous, into: stamped, among: profiles
+            ) {
+                purgeLegacyKeychainAccount(legacy, survivor: stamped)
             }
             profiles[idx] = stamped
         } else {
@@ -399,10 +471,24 @@ final class PostgresProfileStore: ObservableObject {
     /// profile, its keychain entry, and its per-profile artifacts.
     private func removeLocally(_ profile: PostgresProfile) {
         profiles.removeAll { $0.id == profile.id }
-        KeychainManager.shared.deletePassword(
-            kind: .postgresPassword,
-            account: profile.keychainAccount
+        // Only this profile's own (id-scoped) secret goes unconditionally;
+        // the legacy endpoint-scoped entry is shared by every profile at
+        // the same endpoint and survives while any of them remains.
+        // Sequenced after any pending migration so a late copy can't
+        // resurrect the deleted profile's secret.
+        let keychain = passwordKeychain
+        let pendingMigration = keychainMigrationTask
+        let account = profile.keychainAccount
+        let legacy = PostgresKeychainAccountMigration.legacyAccountToDelete(
+            removing: profile, remaining: profiles
         )
+        Task.detached(priority: .utility) {
+            await pendingMigration?.value
+            _ = await KeychainStorage.offMain {
+                keychain.delete(account: account)
+                if let legacy { keychain.delete(account: legacy) }
+            }
+        }
         // Wipe per-profile artifacts — history and saved queries —
         // for the same privacy reason. Recreating a profile with
         // the same id (defensive — ids are UUIDs in practice)
@@ -417,6 +503,10 @@ final class PostgresProfileStore: ObservableObject {
     func applyRemoteMerge(upserts: [PostgresProfile], deleteIds: [String]) {
         guard !(upserts.isEmpty && deleteIds.isEmpty) else { return }
         var changed = false
+        // Profiles new to this device may have a synced password under the
+        // legacy account (written by an older build elsewhere).
+        let knownIds = Set(profiles.map(\.id))
+        migrateKeychainAccounts(for: upserts.filter { !knownIds.contains($0.id) })
         for profile in upserts {
             if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
                 if profiles[idx] != profile {

@@ -58,6 +58,12 @@ struct PostgresCellEdit {
     /// has no rowid; the UI gates editing on this being non-empty
     /// before invoking the closure.
     let rowId: String
+    /// The host's row-layout token (`PostgresResultsRevision.rowLayout`)
+    /// that `rowIndex` was resolved against. The host drops the in-memory
+    /// write-back when the rows were replaced or shifted since, instead of
+    /// painting the value into whatever row now sits at `rowIndex`. `nil`
+    /// means "resolve against the host's current layout".
+    var rowLayout: UInt64? = nil
 }
 
 enum PostgresCellEditOutcome {
@@ -105,6 +111,8 @@ struct PostgresCellInspection: Identifiable {
     var columnIndex: Int = -1
     /// The row's ctid from the hidden `__pg_rowid__` column, when present.
     var rowId: String? = nil
+    /// Row-layout token `rowIndex` refers to (see `PostgresCellEdit.rowLayout`).
+    var rowLayout: UInt64? = nil
 }
 
 /// Navigation request bubbled from the grid's FK menu items to the
@@ -126,6 +134,10 @@ struct PostgresFKNavigation {
 struct PostgresResultsRevision: Equatable {
     let tabId: UUID
     let value: UInt64
+    /// Row-*position* token: changes only when row indices stop meaning
+    /// what they did (result replaced, rows removed) — not on cell writes
+    /// or appends. Async index-addressed edits compare it before writing.
+    var rowLayout: UInt64 = 0
 }
 
 struct PostgresResultsTable: NSViewRepresentable {

@@ -84,8 +84,12 @@ struct PostgresWorkspaceView: View {
                 handleOpenTabNotification(notification)
             }
             .task(id: profile.id) {
-                await PostgresConnectionManager.shared.acquire(profile: profile)
-                defer { PostgresConnectionManager.shared.release(profileId: profile.id) }
+                // Claim before the first suspension so the release always
+                // pairs with it, even when the task is cancelled mid-connect.
+                let manager = PostgresConnectionManager.shared
+                let lease = manager.claim(profile: profile)
+                defer { manager.release(lease) }
+                await manager.connectIfNeeded(profile: profile)
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(3600))
                 }

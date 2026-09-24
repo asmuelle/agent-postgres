@@ -34,7 +34,7 @@ struct ConnectionCSVImportView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(MidnightColors.borderGray, lineWidth: 1))
                     .padding(.horizontal)
-                    .onChange(of: csvText) { _ in
+                    .onChange(of: csvText) { _, _ in
                         validateCSV()
                     }
                 

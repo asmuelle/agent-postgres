@@ -68,7 +68,7 @@ fmt:
 lint:
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
-    @command -v swift-format >/dev/null 2>&1 && (swift-format lint -r Sources Tests PgAgentApp PgAgentShared PgAgentMobile PgAgentWidgets PgAgentMobileWidgets PgAgentFileProvider PgAgentShareExtension PgAgentShortcutsExtension || xcrun swift-format lint -r Sources Tests PgAgentApp PgAgentShared PgAgentMobile PgAgentWidgets PgAgentMobileWidgets PgAgentFileProvider PgAgentShareExtension PgAgentShortcutsExtension) 2>/dev/null || echo "⚠️ swift-format not installed; skipping Swift lint"
+    @command -v swift-format >/dev/null 2>&1 && (swift-format lint -r Sources Tests PgAgentApp PgAgentShared PgAgentMobile PgAgentWidgets PgAgentMobileWidgets || xcrun swift-format lint -r Sources Tests PgAgentApp PgAgentShared PgAgentMobile PgAgentWidgets PgAgentMobileWidgets) 2>/dev/null || echo "⚠️ swift-format not installed; skipping Swift lint"
 
 # Local equivalent of CI checks that don't need signing certs.
 ci-local: check test-rust mac-ci-build ios-ci-build
@@ -149,16 +149,31 @@ mac-ci-build:
         CODE_SIGNING_ALLOWED=NO \
         build
 
-# Build with a real Developer ID (requires APPLE_SIGNING_IDENTITY env).
+# Requires:
+#   APPLE_SIGNING_IDENTITY                 e.g. "Developer ID Application: … (TEAMID)"
+#   APPLE_PROVISIONING_PROFILE_SPECIFIER   name/UUID of the app's Developer ID
+#                                          profile (iCloud container + Push) —
+#                                          iCloud/push entitlements without an
+#                                          embedded profile crash at launch.
+# Optional:
+#   APPLE_WIDGET_PROVISIONING_PROFILE_SPECIFIER  widget extension profile
+#                                          (authorizes the App Group on macOS 15+)
+# Release signs aps-environment=production (see project.yml).
+# Build with a real Developer ID (signing identity + provisioning profile).
 mac-build-signed:
     @just _ensure-xcodeproj
     @test -n "${APPLE_SIGNING_IDENTITY:-}" || (echo "❌ APPLE_SIGNING_IDENTITY not set"; exit 1)
+    @test -n "${APPLE_PROVISIONING_PROFILE_SPECIFIER:-}" || (echo "❌ APPLE_PROVISIONING_PROFILE_SPECIFIER not set — create a Developer ID provisioning profile for com.pgagent.macos with iCloud (iCloud.com.pgagent.pgagent) + Push Notifications, install it, and pass its name or UUID. Without it the iCloud/push entitlements make the signed app crash at launch."; exit 1)
+    @test -n "${APPLE_WIDGET_PROVISIONING_PROFILE_SPECIFIER:-}" || echo "⚠️  APPLE_WIDGET_PROVISIONING_PROFILE_SPECIFIER not set — widget signs without a profile; macOS 15+ may prompt before it can read the App Group."
     xcodebuild \
         -project {{xcode_proj}} \
         -scheme {{mac_scheme}} \
         -configuration Release \
         -derivedDataPath {{mac_build}} \
+        CODE_SIGN_STYLE=Manual \
         CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" \
+        PGAGENT_APP_PROFILE_SPECIFIER="$APPLE_PROVISIONING_PROFILE_SPECIFIER" \
+        PGAGENT_WIDGET_PROFILE_SPECIFIER="${APPLE_WIDGET_PROVISIONING_PROFILE_SPECIFIER:-}" \
         CODE_SIGNING_REQUIRED=YES \
         CODE_SIGNING_ALLOWED=YES \
         OTHER_CODE_SIGN_FLAGS="--timestamp" \

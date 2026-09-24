@@ -23,57 +23,14 @@ enum PostgresNodeDDL {
 
     // MARK: - Node-id parsing
 
-    /// Resolved identity of a tree node, split out of the composite
-    /// node id (`kind:db.schema[.table].name`).
-    struct Target: Equatable {
-        let database: String
-        let schema: String
-        /// Parent table for table-scoped children (columns, keys,
-        /// constraints, triggers); `nil` otherwise.
-        let table: String?
-        let name: String
-    }
+    /// Resolved identity of a tree node — see `PgNodeTarget`.
+    typealias Target = PgNodeTarget
 
-    /// Kind-aware parse of the node's composite id. Splits with
-    /// `maxSplits` so the trailing object name may itself contain
-    /// dots, and strips the routine argument signature using the
-    /// *known* signature carried on `node.kind` — the signature has
-    /// no surrounding parentheses (`integer, text`), so the old
-    /// "search for a `(`" approach mangled every routine that takes
-    /// arguments.
+    /// Kind-aware parse of the node's id. Delegates to `PgNodeID`, the
+    /// single escape-aware parser shared by every platform, so names
+    /// containing dots (`my.app`, `v1.2`) resolve to the right object.
     static func target(for node: PgSchemaNode) -> Target? {
-        let parts = node.id.split(separator: ":", maxSplits: 1)
-        guard parts.count == 2 else { return nil }
-        let rest = String(parts[1])
-
-        switch node.kind {
-        case .database:
-            return Target(database: rest, schema: "", table: nil, name: rest)
-        case .role, .tablespace:
-            return Target(database: "", schema: "", table: nil, name: rest)
-        case .schema, .language:
-            let p = rest.split(separator: ".", maxSplits: 1).map(String.init)
-            guard p.count == 2 else { return nil }
-            return Target(database: p[0], schema: p[1], table: nil, name: p[1])
-        case .routine(_, let signature, _):
-            let p = rest.split(separator: ".", maxSplits: 2).map(String.init)
-            guard p.count == 3 else { return nil }
-            var name = p[2]
-            if !signature.isEmpty, name.hasSuffix(signature) {
-                name = String(name.dropLast(signature.count))
-            }
-            return Target(database: p[0], schema: p[1], table: nil, name: name)
-        case .relation, .sequence, .objectType:
-            let p = rest.split(separator: ".", maxSplits: 2).map(String.init)
-            guard p.count == 3 else { return nil }
-            return Target(database: p[0], schema: p[1], table: nil, name: p[2])
-        case .column, .key, .constraint, .trigger:
-            let p = rest.split(separator: ".", maxSplits: 3).map(String.init)
-            guard p.count == 4 else { return nil }
-            return Target(database: p[0], schema: p[1], table: p[2], name: p[3])
-        case .category:
-            return nil
-        }
+        PgNodeID.target(for: node)
     }
 
     // MARK: - Entry point
@@ -238,7 +195,7 @@ enum PostgresNodeDDL {
     }
 
     /// Sequence parameters from `pg_sequences` (PG10+) plus the
-    /// OWNED BY column resolved through `pg_depend`.
+    /// OWNED BY column resolved through `pg_depend` and the comment.
     static func sequenceQuery(schema: String, name: String) -> String {
         """
         SELECT s.data_type::text, s.start_value::text, s.increment_by::text,
@@ -254,7 +211,8 @@ enum PostgresNodeDDL {
                  WHERE d.objid = to_regclass(\(regclassLiteral(schema, name)))
                    AND d.classid = 'pg_class'::regclass
                    AND d.deptype IN ('a', 'i')
-                 LIMIT 1)
+                 LIMIT 1),
+               obj_description(to_regclass(\(regclassLiteral(schema, name))), 'pg_class')
         FROM pg_sequences s
         WHERE s.schemaname = \(pgQuoteLiteral(schema))
           AND s.sequencename = \(pgQuoteLiteral(name));
@@ -481,7 +439,31 @@ enum PostgresNodeDDL {
         if let ownedBy = cell(row, 7), !ownedBy.isEmpty {
             out += "\n\nALTER SEQUENCE \(qualified) OWNED BY \(ownedBy);"
         }
+        if let comment = commentDDL(on: "SEQUENCE", schema: schema, name: name, comment: cell(row, 8)) {
+            out += "\n\n" + comment
+        }
         return out
+    }
+
+    /// `COMMENT ON <keyword> "schema"."name" IS '…';`, or `nil` for a
+    /// missing / blank comment. The comment is a properly escaped literal.
+    static func commentDDL(on keyword: String, schema: String, name: String, comment: String?) -> String? {
+        guard let comment, !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return "COMMENT ON \(keyword) \(pgQuoteIdent(schema)).\(pgQuoteIdent(name)) IS \(pgQuoteLiteral(comment));"
+    }
+
+    /// Map a `pg_type.typtype` code to the tree's display kind; `nil`
+    /// for kinds the DDL engine doesn't render (base, pseudo, multirange).
+    static func objectTypeKind(typtype: String) -> PgObjectTypeDisplayKind? {
+        switch typtype {
+        case "c": return .composite
+        case "e": return .enum
+        case "d": return .domain
+        case "r": return .range
+        default: return nil
+        }
     }
 
     static func renderObjectTypeDDL(

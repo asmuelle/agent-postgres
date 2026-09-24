@@ -155,7 +155,7 @@ enum PostgresJSONTree {
             let arrow = (isLast && leafIsScalar) ? "->>" : "->"
             switch segment {
             case .key(let key):
-                expr += "\(arrow)'\(key.replacingOccurrences(of: "'", with: "''"))'"
+                expr += arrow + pgQuoteLiteral(key)
             case .index(let idx):
                 expr += "\(arrow)\(idx)"
             }
@@ -188,18 +188,11 @@ enum PostgresJSONTree {
 
     // MARK: - Quoting helpers
 
-    /// Quote a column reference only when it isn't already a plain
-    /// lower-case identifier — keeps the common `payload->'a'` output
-    /// clean while staying correct for `"Weird Column"`.
+    /// Quote a column reference only when it has to be — keeps the
+    /// common `payload->'a'` output clean while staying correct for
+    /// `"Weird Column"` and reserved words (`"user"->'k'`).
     static func quoteIdentIfNeeded(_ ident: String) -> String {
-        guard !ident.isEmpty else { return pgQuoteIdent(ident) }
-        let scalars = ident.unicodeScalars
-        let first = scalars.first!
-        let firstOK = (first >= "a" && first <= "z") || first == "_"
-        let restOK = scalars.dropFirst().allSatisfy {
-            ($0 >= "a" && $0 <= "z") || ($0 >= "0" && $0 <= "9") || $0 == "_" || $0 == "$"
-        }
-        return (firstOK && restOK) ? ident : pgQuoteIdent(ident)
+        pgQuoteIdentIfNeeded(ident)
     }
 
     private static func isPlainJsonpathIdentifier(_ key: String) -> Bool {

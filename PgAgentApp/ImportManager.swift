@@ -11,7 +11,7 @@ import PgAgentMacOS
 /// Import sources (in priority order):
 /// 1. Direct JSON file drag-and-drop or file picker
 /// 2. Automatic scan of the Tauri app's Application Support directory
-class ImportManager {
+final class ImportManager: Sendable {
     static let shared = ImportManager()
     private let logger = Logger(subsystem: "com.mc-ssh", category: "import")
 
@@ -89,11 +89,8 @@ class ImportManager {
 
         // Convert connections
         for entry in container.connections {
-            let auth: AuthMethod
-            switch entry.authMethod?.lowercased() {
-            case "publickey", "publickey": auth = .publicKey
-            default: auth = .password
-            }
+            let auth = Self.authMethod(
+                forExportValue: entry.authMethod, privateKeyPath: entry.privateKeyPath)
 
             // Tauri exports use `protocol: "SSH" | "SFTP" | "FTP" | …`.
             // Map SFTP to `.sftp`; everything else (including unknowns
@@ -129,6 +126,30 @@ class ImportManager {
         }
 
         return ConnectionStoreData(connections: profiles, folders: folders)
+    }
+
+    /// Map the export's free-form `authMethod` onto `AuthMethod`.
+    ///
+    /// The Tauri app's schema isn't pinned anywhere in this repo (no
+    /// fixtures, no source), so accept every plausible spelling of key
+    /// auth — `publicKey` (camelCase, matching our own
+    /// `AuthMethod.publicKey` raw value), `public_key` / `public-key`
+    /// (serde snake/kebab case), `key`, `privateKey`, `sshKey`, `pubkey`,
+    /// plus `agent` (key-based via ssh-agent). Compare case- and separator-insensitively. A missing
+    /// value with a private key path is key auth too; everything else
+    /// stays password (the non-destructive default).
+    static func authMethod(forExportValue raw: String?, privateKeyPath: String?) -> AuthMethod {
+        let hasKeyPath = !(privateKeyPath?.trimmingCharacters(in: .whitespaces).isEmpty ?? true)
+        guard let raw else { return hasKeyPath ? .publicKey : .password }
+        let normalized = raw.lowercased().filter { $0.isLetter }
+        switch normalized {
+        case "publickey", "pubkey", "key", "privatekey", "sshkey", "keyfile", "agent", "sshagent":
+            return .publicKey
+        case "":
+            return hasKeyPath ? .publicKey : .password
+        default:
+            return .password
+        }
     }
 
     private func parseDate(_ string: String?) -> Date? {

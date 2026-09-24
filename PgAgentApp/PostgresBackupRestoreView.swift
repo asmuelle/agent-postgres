@@ -25,9 +25,11 @@ struct PostgresBackupRestoreView: View {
     @State private var phase = "Ready"
     @State private var isExecuting = false
     @State private var executionSuccess: Bool?
-    @State private var currentToken: String?
-    @State private var currentLiveSshId: String?
+    /// Identity of the job that owns the UI. A job's task only touches view
+    /// state while this still equals its id, so a stale task can never
+    /// clobber a newer job.
     @State private var currentJobId: String?
+    @State private var isCancelling = false
     @State private var jobTask: Task<Void, Never>?
     @State private var history: [PostgresBackupJobRecord] = []
     @State private var showingRestoreConfirmation = false
@@ -96,7 +98,10 @@ struct PostgresBackupRestoreView: View {
                     HStack {
                         Button("Close") { dismiss() }.disabled(isExecuting)
                         if isExecuting {
-                            Button("Cancel Job", role: .destructive) { cancelCurrentJob() }
+                            Button(isCancelling ? "Cancelling…" : "Cancel Job", role: .destructive) {
+                                cancelCurrentJob()
+                            }
+                            .disabled(isCancelling)
                         }
                         Spacer()
                         Button(activeTab == "Backup" ? "Start Verified Backup" : "Start Restore") {
@@ -262,75 +267,125 @@ struct PostgresBackupRestoreView: View {
     private func startExecution(sshId: String) {
         guard !isExecuting else { return }
         isExecuting = true
+        isCancelling = false
         executionSuccess = nil
-        phase = "Resolving SSH host"
         consoleLogs = ""
-        let token = UUID().uuidString.lowercased()
         let jobId = UUID().uuidString
-        currentToken = token
         currentJobId = jobId
         let startedAt = Date()
+        // Capture the whole job up front: later edits to the form (or the
+        // tab) must not change what this job records or runs.
+        let (kind, path, preflight, command) = makeCommands()
+        let plan = PostgresBackupJobPlan(
+            kind: kind, path: path, preflight: preflight, command: command,
+            token: UUID().uuidString.lowercased())
 
         jobTask = Task {
-            do {
-                let liveSshId = try await SSHTunnelResolver.liveConnectionId(
-                    forSSHProfileReference: sshId)
-                currentLiveSshId = liveSshId
-                let (kind, path, preflight, command) = makeCommands()
-                phase = "Preflight"
-                let preflightOutput = try await BridgeManager.shared.executeCommand(
-                    connectionId: liveSshId, command: preflight)
-                consoleLogs = preflightOutput
-
-                let running = jobRecord(
-                    id: jobId, kind: kind, path: path, startedAt: startedAt,
-                    state: .running, evidence: nil, message: "Remote token \(token)")
-                try? await jobStore.append(running)
-
-                phase = kind == .backup ? "Backup running" : "Restore running"
-                _ = try await BridgeManager.shared.executeCommand(
-                    connectionId: liveSshId,
-                    command: PostgresRemoteJobProtocol.launch(token: token, command: command))
-                let result = try await pollJob(
-                    liveSshId: liveSshId, token: token, preflightOutput: preflightOutput)
-                guard !Task.isCancelled else { return }
-
-                if result.exitCode == 0 {
-                    let evidence = kind == .backup
-                        ? try PostgresBackupEvidenceParser.parse(result.output) : nil
-                    let final = jobRecord(
-                        id: jobId, kind: kind, path: path, startedAt: startedAt,
-                        state: .succeeded, evidence: evidence, message: "Verified")
-                    try await jobStore.append(final)
-                    executionSuccess = true
-                    phase = kind == .backup ? "Backup verified" : "Restore completed"
-                    consoleLogs = preflightOutput + "\n" + result.output
-                    audit(job: final)
-                } else {
-                    throw BackupExecutionError.remoteExit(result.exitCode)
+            let outcome = await PostgresBackupJobRunner.run(
+                plan: plan,
+                resolveHost: {
+                    try await SSHTunnelResolver.liveConnectionId(forSSHProfileReference: sshId)
+                },
+                execute: { hostId, command in
+                    try await BridgeManager.shared.executeCommand(connectionId: hostId, command: command)
+                },
+                onEvent: { event in
+                    await handle(event, jobId: jobId, plan: plan, startedAt: startedAt)
                 }
-                _ = try? await BridgeManager.shared.executeCommand(
-                    connectionId: liveSshId,
-                    command: PostgresRemoteJobProtocol.cleanup(token: token))
-            } catch is CancellationError {
-                // cancelCurrentJob records the terminal state.
-            } catch {
-                let kind: PostgresBackupJobKind = activeTab == "Backup" ? .backup : .restore
-                let failed = jobRecord(
-                    id: jobId, kind: kind, path: selectedPath, startedAt: startedAt,
-                    state: .failed, evidence: nil, message: error.localizedDescription)
-                try? await jobStore.append(failed)
-                executionSuccess = false
-                phase = "Failed"
-                consoleLogs += "\nERROR: \(error.localizedDescription)"
-                audit(job: failed)
-            }
-            isExecuting = false
-            currentToken = nil
-            currentLiveSshId = nil
-            currentJobId = nil
-            await loadHistory()
+            )
+            await finish(jobId: jobId, plan: plan, startedAt: startedAt, outcome: outcome)
         }
+    }
+
+    private func handle(
+        _ event: PostgresBackupJobEvent, jobId: String,
+        plan: PostgresBackupJobPlan, startedAt: Date
+    ) async {
+        switch event {
+        case .launching:
+            // Persist before the launch command is sent so a crash mid-job
+            // still leaves a record carrying the remote token.
+            let running = jobRecord(
+                id: jobId, kind: plan.kind, path: plan.path, startedAt: startedAt,
+                state: .running, evidence: nil, message: "Remote token \(plan.token)")
+            try? await jobStore.append(running)
+        case .phase(let text):
+            guard currentJobId == jobId, !isCancelling else { return }
+            phase = text
+        case .console(let text):
+            guard currentJobId == jobId else { return }
+            consoleLogs = text
+        }
+    }
+
+    /// Record the terminal state (always — records are keyed by job id) and,
+    /// only if this job still owns the UI, update and release it.
+    private func finish(
+        jobId: String, plan: PostgresBackupJobPlan, startedAt: Date,
+        outcome: PostgresBackupJobOutcome
+    ) async {
+        let state: PostgresBackupJobState
+        let message: String
+        var evidence: PostgresBackupEvidence?
+        var console: String?
+        switch outcome {
+        case .finished(0, let output, let preflightOutput):
+            console = preflightOutput + "\n" + output
+            do {
+                evidence = plan.kind == .backup ? try PostgresBackupEvidenceParser.parse(output) : nil
+                state = .succeeded
+                message = "Verified"
+            } catch {
+                state = .failed
+                message = error.localizedDescription
+            }
+        case .finished(let exitCode, let output, let preflightOutput):
+            console = preflightOutput + "\n" + output
+            state = .failed
+            message = BackupExecutionError.remoteExit(exitCode).localizedDescription
+        case .failed(let detail, let launched):
+            state = .failed
+            message = launched
+                ? "\(detail) The remote job (token \(plan.token)) may still be running."
+                : detail
+        case .cancelled(false, _):
+            state = .cancelled
+            message = "Cancelled by operator before launch — nothing ran on the server"
+        case .cancelled(true, nil):
+            state = .cancelled
+            message = "Cancelled by operator; remote job signalled"
+        case .cancelled(true, let remoteError?):
+            // Couldn't confirm the stop: don't claim a clean cancel.
+            state = .failed
+            message = "Cancel requested but the remote cancel failed (\(remoteError)); job \(plan.token) may still be running"
+        }
+
+        let record = jobRecord(
+            id: jobId, kind: plan.kind, path: plan.path, startedAt: startedAt,
+            state: state, evidence: evidence, message: message)
+        try? await jobStore.append(record)
+        if state != .cancelled { audit(job: record) }
+
+        guard currentJobId == jobId else { return }
+        if let console { consoleLogs = console }
+        switch state {
+        case .succeeded:
+            executionSuccess = true
+            phase = plan.kind == .backup ? "Backup verified" : "Restore completed"
+        case .cancelled:
+            executionSuccess = false
+            phase = "Cancelled"
+            consoleLogs += "\n\(message)"
+        case .failed, .running:
+            executionSuccess = false
+            phase = "Failed"
+            consoleLogs += "\nERROR: \(message)"
+        }
+        isExecuting = false
+        isCancelling = false
+        currentJobId = nil
+        jobTask = nil
+        await loadHistory()
     }
 
     private func makeCommands() -> (
@@ -358,46 +413,15 @@ struct PostgresBackupRestoreView: View {
                 PostgresBackupCommandBuilder.restore(for: request))
     }
 
-    private func pollJob(
-        liveSshId: String, token: String, preflightOutput: String
-    ) async throws -> (exitCode: Int, output: String) {
-        while !Task.isCancelled {
-            let output = try await BridgeManager.shared.executeCommand(
-                connectionId: liveSshId,
-                command: PostgresRemoteJobProtocol.poll(token: token))
-            consoleLogs = preflightOutput + "\n" + output
-            if output.hasPrefix("PGAGENT_DONE\t") {
-                let first = output.split(separator: "\n", maxSplits: 1).first ?? ""
-                let code = Int(first.split(separator: "\t").last ?? "1") ?? 1
-                return (code, output)
-            }
-            try await Task.sleep(for: .seconds(1))
-        }
-        throw CancellationError()
-    }
-
+    /// Request cancellation. The job task itself decides what that means —
+    /// before launch nothing runs remotely; after launch it sends the remote
+    /// cancel — and records the terminal state, so the UI stays busy
+    /// ("Cancelling…") until the outcome is known.
     private func cancelCurrentJob() {
-        guard let token = currentToken, let liveSshId = currentLiveSshId else {
-            jobTask?.cancel()
-            return
-        }
+        guard isExecuting, !isCancelling else { return }
+        isCancelling = true
+        phase = "Cancelling"
         jobTask?.cancel()
-        let jobId = currentJobId ?? UUID().uuidString
-        let kind: PostgresBackupJobKind = activeTab == "Backup" ? .backup : .restore
-        let path = selectedPath
-        Task {
-            _ = try? await BridgeManager.shared.executeCommand(
-                connectionId: liveSshId,
-                command: PostgresRemoteJobProtocol.cancel(token: token))
-            let cancelled = jobRecord(
-                id: jobId, kind: kind, path: path, startedAt: Date(),
-                state: .cancelled, evidence: nil, message: "Cancelled by operator")
-            try? await jobStore.append(cancelled)
-            phase = "Cancelled"
-            executionSuccess = false
-            isExecuting = false
-            await loadHistory()
-        }
     }
 
     private func jobRecord(

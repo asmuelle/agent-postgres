@@ -19,15 +19,6 @@ extension SidebarView {
         return nil
     }
 
-    /// Recover a constraint/key's bare name from its node id —
-    /// `loadMeta` bakes the human-readable definition into
-    /// `node.name` ("pk_users (PRIMARY KEY (id))"), which is wrong
-    /// for generated DDL.
-    func bareMetaName(id: String, prefix: String) -> String? {
-        guard id.hasPrefix(prefix) else { return nil }
-        return String(id.dropFirst(prefix.count))
-    }
-
     func postOpenTabNotification(profile: PostgresProfile, node: PgSchemaNode, details: [String: Any]) {
         var info = details
         info["profileId"] = profile.id
@@ -39,58 +30,17 @@ extension SidebarView {
         )
     }
 
-    func parseRelationId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "rel:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    func parseSequenceId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "seq:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    func parseRoutineId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "fn:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let parenStart = afterDb.firstIndex(of: "(") else { return nil }
-        let nameAndSchema = String(afterDb[afterDb.startIndex..<parenStart])
-        guard let lastDot = nameAndSchema.lastIndex(of: ".") else { return nil }
-        let schema = String(nameAndSchema[nameAndSchema.startIndex..<lastDot])
-        let name = String(nameAndSchema[nameAndSchema.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    func parseObjectTypeId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "type:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
+    /// (database, schema, bare name) of a schema-content node, via the
+    /// shared escape-aware `PgNodeID` parser — the one parser every
+    /// platform uses, so names containing dots resolve correctly.
+    func parseContentNode(_ node: PgSchemaNode) -> (database: String, schema: String, name: String)? {
+        switch node.kind {
+        case .relation, .sequence, .routine, .objectType:
+            guard let t = PgNodeID.target(for: node) else { return nil }
+            return (t.database, t.schema, t.name)
+        default:
+            return nil
+        }
     }
 
     func presentForeignDatabaseAlert(profile: PostgresProfile, database: String) {

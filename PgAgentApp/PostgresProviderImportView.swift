@@ -89,8 +89,10 @@ struct PostgresProviderImportView: View {
                 }
                 Spacer()
                 Button("Import \(model.selectedIds.count) Connection\(model.selectedIds.count == 1 ? "" : "s")") {
-                    resultSummary = model.importSelection(into: store)
-                    dismiss()
+                    Task {
+                        resultSummary = await model.importSelection(into: store)
+                        dismiss()
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(model.selectedIds.isEmpty)

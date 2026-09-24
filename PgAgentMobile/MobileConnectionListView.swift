@@ -247,7 +247,7 @@ extension View {
         overlay(
             Rectangle()
                 .frame(height: 1)
-                .foregroundColor(color),
+                .foregroundStyle(color),
             alignment: .top
         )
     }

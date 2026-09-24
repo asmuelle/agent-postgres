@@ -67,7 +67,7 @@ extension PostgresResultsTable.Coordinator {
             rowIndex: table.clickedRow,
             columnIndex: resultColIdx,
             newValue: nil,
-            original: result.rows[table.clickedRow].cells[resultColIdx],
+            original: cellValue(row: table.clickedRow, column: resultColIdx),
             rowId: rowId
         )
     }
@@ -164,6 +164,7 @@ extension PostgresResultsTable.Coordinator {
         rows: [Int]
     ) {
         guard values.count == rows.count, let table = lastTable, let onCellEdit else { return }
+        let layout = rowLayoutKey
         var work: [(rowIndex: Int, rowId: String, value: String)] = []
         for (idx, row) in rows.enumerated() {
             guard row < result.rows.count, let rid = rowId(forRow: row) else { continue }
@@ -177,7 +178,8 @@ extension PostgresResultsTable.Coordinator {
             successCount: 0,
             conflictCount: 0,
             onCellEdit: onCellEdit,
-            table: table
+            table: table,
+            layout: layout
         )
     }
 
@@ -188,7 +190,8 @@ extension PostgresResultsTable.Coordinator {
         successCount: Int,
         conflictCount: Int,
         onCellEdit: @escaping (PostgresCellEdit, @escaping (PostgresCellEditOutcome) -> Void) -> Void,
-        table: NSTableView
+        table: NSTableView,
+        layout: RowLayoutKey
     ) {
         guard index < work.count else {
             if conflictCount > 0 {
@@ -199,14 +202,22 @@ extension PostgresResultsTable.Coordinator {
             }
             return
         }
+        // Each step is async: the result may have been re-run, paged, or
+        // had rows deleted since the work list was built. Stop rather than
+        // index into rows that no longer mean what they did.
         let item = work[index]
+        guard stillAddressable(layout: layout, row: item.rowIndex, column: descriptor.resultIdx) else {
+            presentLayoutChangedAlert(updated: successCount, remaining: work.count - index)
+            return
+        }
         let edit = PostgresCellEdit(
             rowIndex: item.rowIndex,
             columnIndex: descriptor.resultIdx,
             columnName: descriptor.name,
             columnType: descriptor.type,
             newValue: item.value,
-            rowId: item.rowId
+            rowId: item.rowId,
+            rowLayout: layout.rowLayout
         )
         let original = result.rows[item.rowIndex].cells[descriptor.resultIdx]
         onCellEdit(edit) { [weak self] outcome in
@@ -217,7 +228,8 @@ extension PostgresResultsTable.Coordinator {
                     self.applyEditOutcome(
                         edit: edit,
                         outcome: .applied,
-                        previousValue: original
+                        previousValue: original,
+                        layout: layout
                     )
                     self.distributedLoop(
                         descriptor: descriptor,
@@ -226,10 +238,11 @@ extension PostgresResultsTable.Coordinator {
                         successCount: successCount + 1,
                         conflictCount: conflictCount,
                         onCellEdit: onCellEdit,
-                        table: table
+                        table: table,
+                        layout: layout
                     )
                 case .conflict:
-                    self.reloadRow(item.rowIndex)
+                    self.reloadRow(item.rowIndex, layout: layout)
                     self.distributedLoop(
                         descriptor: descriptor,
                         work: work,
@@ -237,14 +250,15 @@ extension PostgresResultsTable.Coordinator {
                         successCount: successCount,
                         conflictCount: conflictCount + 1,
                         onCellEdit: onCellEdit,
-                        table: table
+                        table: table,
+                        layout: layout
                     )
                 case .failed(let message):
                     self.presentAlert(
                         title: "Update failed after \(successCount) row(s)",
                         message: message
                     )
-                    self.reloadRow(item.rowIndex)
+                    self.reloadRow(item.rowIndex, layout: layout)
                 }
             }
         }
@@ -280,6 +294,7 @@ extension PostgresResultsTable.Coordinator {
         value: String?
     ) {
         guard let descriptor, let table = lastTable, let onCellEdit else { return }
+        let layout = rowLayoutKey
         let rows = table.selectedRowIndexes
         guard !rows.isEmpty else {
             presentAlert(
@@ -309,7 +324,9 @@ extension PostgresResultsTable.Coordinator {
             work: work,
             index: 0,
             successCount: 0,
-            conflictCount: 0
+            conflictCount: 0,
+            onCellEdit: onCellEdit,
+            layout: layout
         )
     }
 
@@ -322,7 +339,9 @@ extension PostgresResultsTable.Coordinator {
         work: [(rowIndex: Int, rowId: String)],
         index: Int,
         successCount: Int,
-        conflictCount: Int
+        conflictCount: Int,
+        onCellEdit: @escaping (PostgresCellEdit, @escaping (PostgresCellEditOutcome) -> Void) -> Void,
+        layout: RowLayoutKey
     ) {
         guard index < work.count else {
             if conflictCount > 0 {
@@ -334,16 +353,22 @@ extension PostgresResultsTable.Coordinator {
             return
         }
         let item = work[index]
+        // See `distributedLoop`: stop if the rows moved under the loop.
+        guard stillAddressable(layout: layout, row: item.rowIndex, column: descriptor.resultIdx) else {
+            presentLayoutChangedAlert(updated: successCount, remaining: work.count - index)
+            return
+        }
         let edit = PostgresCellEdit(
             rowIndex: item.rowIndex,
             columnIndex: descriptor.resultIdx,
             columnName: descriptor.name,
             columnType: descriptor.type,
             newValue: value,
-            rowId: item.rowId
+            rowId: item.rowId,
+            rowLayout: layout.rowLayout
         )
         let original = result.rows[item.rowIndex].cells[descriptor.resultIdx]
-        onCellEdit!(edit) { [weak self] outcome in
+        onCellEdit(edit) { [weak self] outcome in
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch outcome {
@@ -351,7 +376,8 @@ extension PostgresResultsTable.Coordinator {
                     self.applyEditOutcome(
                         edit: edit,
                         outcome: .applied,
-                        previousValue: original
+                        previousValue: original,
+                        layout: layout
                     )
                     self.applyToSelectionLoop(
                         descriptor: descriptor,
@@ -359,20 +385,24 @@ extension PostgresResultsTable.Coordinator {
                         work: work,
                         index: index + 1,
                         successCount: successCount + 1,
-                        conflictCount: conflictCount
+                        conflictCount: conflictCount,
+                        onCellEdit: onCellEdit,
+                        layout: layout
                     )
                 case .conflict:
                     // Swallow per-row conflicts; we'll summarize
                     // at the end. Reload that row to revert
                     // visually.
-                    self.reloadRow(item.rowIndex)
+                    self.reloadRow(item.rowIndex, layout: layout)
                     self.applyToSelectionLoop(
                         descriptor: descriptor,
                         value: value,
                         work: work,
                         index: index + 1,
                         successCount: successCount,
-                        conflictCount: conflictCount + 1
+                        conflictCount: conflictCount + 1,
+                        onCellEdit: onCellEdit,
+                        layout: layout
                     )
                 case .failed(let message):
                     // First hard failure stops the run — show
@@ -381,7 +411,7 @@ extension PostgresResultsTable.Coordinator {
                         title: "Update failed after \(successCount) row(s)",
                         message: message
                     )
-                    self.reloadRow(item.rowIndex)
+                    self.reloadRow(item.rowIndex, layout: layout)
                 }
             }
         }
@@ -410,7 +440,8 @@ extension PostgresResultsTable.Coordinator {
             columnName: result.columns[resultColIdx].name,
             columnType: result.columns[resultColIdx].typeName,
             original: textField.stringValue,
-            rowId: rid
+            rowId: rid,
+            layout: rowLayoutKey
         )
         return true
     }
@@ -428,6 +459,12 @@ extension PostgresResultsTable.Coordinator {
         // no longer maps to its data row — abandon the commit rather than
         // risk writing the wrong row.
         if isReordered {
+            textField.stringValue = pending.original
+            return
+        }
+        // Same for a re-run / page change / row delete while the editor was
+        // open: the captured row index now names a different row.
+        guard pending.layout == rowLayoutKey else {
             textField.stringValue = pending.original
             return
         }
@@ -452,7 +489,8 @@ extension PostgresResultsTable.Coordinator {
             columnIndex: pending.columnIndex,
             newValue: newValue,
             original: pending.original,
-            rowId: pending.rowId
+            rowId: pending.rowId,
+            layout: pending.layout
         )
     }
 
@@ -466,16 +504,19 @@ extension PostgresResultsTable.Coordinator {
         columnIndex: Int,
         newValue: String?,
         original: String?,
-        rowId: String
+        rowId: String,
+        layout capturedLayout: RowLayoutKey? = nil
     ) {
         guard let onCellEdit, columnIndex < result.columns.count else { return }
+        let layout = capturedLayout ?? rowLayoutKey
         let edit = PostgresCellEdit(
             rowIndex: rowIndex,
             columnIndex: columnIndex,
             columnName: result.columns[columnIndex].name,
             columnType: result.columns[columnIndex].typeName,
             newValue: newValue,
-            rowId: rowId
+            rowId: rowId,
+            rowLayout: layout.rowLayout
         )
         onCellEdit(edit) { [weak self] outcome in
             DispatchQueue.main.async {
@@ -483,17 +524,68 @@ extension PostgresResultsTable.Coordinator {
                 self.applyEditOutcome(
                     edit: edit,
                     outcome: outcome,
-                    previousValue: original
+                    previousValue: original,
+                    layout: layout
                 )
             }
         }
     }
 
+    // MARK: - Row-layout guards
+
+    /// The host's current row-position token plus the result's row count
+    /// (a fallback discriminator for hosts that don't supply revisions).
+    /// Async edit paths capture it up front and re-check it before every
+    /// index-addressed read or write.
+    struct RowLayoutKey: Equatable {
+        let tabId: UUID?
+        let rowLayout: UInt64?
+    }
+
+    var rowLayoutKey: RowLayoutKey {
+        RowLayoutKey(tabId: lastRevision?.tabId, rowLayout: lastRevision?.rowLayout)
+    }
+
+    /// `true` when `layout` is still current and (`row`, `column`) is in
+    /// bounds of the current result — i.e. an index captured under
+    /// `layout` still addresses the same cell.
+    func stillAddressable(layout: RowLayoutKey, row: Int, column: Int) -> Bool {
+        guard layout == rowLayoutKey,
+              row >= 0, row < result.rows.count,
+              column >= 0, column < result.rows[row].cells.count
+        else { return false }
+        return true
+    }
+
+    private func cellValue(row: Int, column: Int) -> String? {
+        guard row >= 0, row < result.rows.count,
+              column >= 0, column < result.rows[row].cells.count
+        else { return nil }
+        return result.rows[row].cells[column]
+    }
+
+    private func presentLayoutChangedAlert(updated: Int, remaining: Int) {
+        presentAlert(
+            title: "Stopped after \(updated) row(s)",
+            message: "The results changed while the update was running (re-run, page change, or deleted rows), so the remaining \(remaining) row(s) were not written. Re-select the rows and try again."
+        )
+    }
+
     private func applyEditOutcome(
         edit: PostgresCellEdit,
         outcome: PostgresCellEditOutcome,
-        previousValue: String?
+        previousValue: String?,
+        layout: RowLayoutKey
     ) {
+        // The rows were replaced/shifted while the write was in flight: the
+        // table already shows the newer result, and `edit.rowIndex` no
+        // longer names the edited row. Only surface failures.
+        guard layout == rowLayoutKey else {
+            if case .failed(let message) = outcome {
+                presentAlert(title: "Update failed", message: message)
+            }
+            return
+        }
         // Update the in-memory result so the next viewFor call
         // shows the right cell. Then trigger a row reload — the
         // host-side store mutation goes through SwiftUI which is
@@ -522,6 +614,13 @@ extension PostgresResultsTable.Coordinator {
             reloadRow(edit.rowIndex)
             _ = previousValue
         }
+    }
+
+    /// Reload one row, unless the rows moved since `layout` was captured
+    /// (then the table was already reloaded wholesale for the new result).
+    private func reloadRow(_ rowIndex: Int, layout: RowLayoutKey) {
+        guard layout == rowLayoutKey else { return }
+        reloadRow(rowIndex)
     }
 
     private func reloadRow(_ rowIndex: Int) {

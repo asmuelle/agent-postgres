@@ -16,7 +16,7 @@ import PgAgentMacOS
 //
 // Resolution order:
 //   1. A connection this resolver opened earlier for the profile, if the
-//      Rust manager still holds it (`rshellIsConnected`).
+//      Rust manager still holds it (`rshellIsConnected`, checked off-main).
 //   2. Auto-open: stored Keychain credentials / key vault / agent via the
 //      same CredentialResolver + SSHKeyAccessCoordinator the SSH flows
 //      use — silently (no prompts). Password profiles without a stored
@@ -45,16 +45,35 @@ enum SSHTunnelResolver {
         }
     }
 
+    /// A resolved tunnel plus the use counted for it. Obtain with
+    /// `acquireTunnel(for:)` before the Postgres connect is awaited, then
+    /// either `bindTunnelUse` (connect succeeded) or `cancelTunnelUse`
+    /// (connect failed) — exactly once.
+    struct TunnelLease: Sendable {
+        let liveConnectionId: String
+        /// Nil for a tunnel this resolver didn't open (a raw live id another
+        /// surface owns) — nothing to count or reclaim.
+        fileprivate let reservation: SSHTunnelUseLedger.Reservation?
+    }
+
     /// Connection ids opened by this resolver, keyed by SSH profile id.
     /// Validated against the Rust manager before every reuse — a
     /// dropped/disconnected session is reopened, not assumed.
     private static var liveConnections: [String: String] = [:]
 
-    /// Reclaim bookkeeping: how many live Postgres connections use each SSH
-    /// tunnel, and which tunnel each Postgres connection uses — so the SSH
-    /// connection is closed once its last Postgres consumer disconnects.
-    private static var tunnelRefCounts: [String: Int] = [:]   // ssh key -> count
-    private static var pgToSshKey: [String: String] = [:]     // pg conn id -> ssh key
+    /// Reclaim bookkeeping: how many Postgres connections (live or still
+    /// connecting) use each SSH tunnel, so the SSH connection is closed once
+    /// its last Postgres consumer disconnects.
+    private static var ledger = SSHTunnelUseLedger()
+
+    /// Every open for a profile uses the same fixed session id, i.e. the same
+    /// Rust connection key; a second concurrent open would replace (and so
+    /// disconnect) the first. Concurrent callers share one open instead.
+    private static let opens = InFlightTaskCoalescer<String, String>()
+
+    /// A resolved-then-closed race can repeat only if the tunnel keeps being
+    /// torn down underneath us; give up after a few rounds instead of looping.
+    private static let maxResolveAttempts = 3
 
     private static let logger = Logger(subsystem: "com.mc-ssh", category: "ssh-tunnel-resolver")
 
@@ -66,36 +85,22 @@ enum SSHTunnelResolver {
         try await liveConnectionId(forSSHProfileReference: tunnel.sshConnectionId)
     }
 
-    /// Record that a Postgres connection now depends on `tunnel`'s SSH
-    /// connection. Ignored for tunnels this resolver didn't open, or a
-    /// duplicate register for the same Postgres connection.
-    static func registerTunnelUse(pgConnectionId: String, tunnel: PostgresTunnel) {
-        let key = tunnel.sshConnectionId
-        guard liveConnections[key] != nil, pgToSshKey[pgConnectionId] == nil else { return }
-        pgToSshKey[pgConnectionId] = key
-        tunnelRefCounts[key, default: 0] += 1
-    }
-
-    /// Drop a Postgres connection's dependency; closes the SSH connection once
-    /// no Postgres connection uses it anymore.
-    static func releaseTunnelUse(pgConnectionId: String) {
-        guard let key = pgToSshKey.removeValue(forKey: pgConnectionId) else { return }
-        let count = tunnelRefCounts[key] ?? 0
-        if count <= 1 {
-            tunnelRefCounts.removeValue(forKey: key)
-            if let sshId = liveConnections.removeValue(forKey: key) {
-                BridgeManager.shared.disconnect(connectionId: sshId)
-                logger.log("Closed idle SSH tunnel host connection: \(sshId, privacy: .public)")
-            }
-        } else {
-            tunnelRefCounts[key] = count - 1
-        }
-    }
-
     /// Resolve `reference` — normally an SSH profile id; tolerated as a
     /// raw live connection id for forward compatibility — to an open
-    /// connection's id, connecting if necessary.
+    /// connection's id, connecting if necessary. No use is counted: the
+    /// connection stays open until a counted Postgres user releases it.
     static func liveConnectionId(forSSHProfileReference reference: String) async throws -> String {
+        try await resolve(reference: reference, countUse: false).liveConnectionId
+    }
+
+    /// Resolve `tunnel` to a live SSH connection and count a use of it in the
+    /// same main-actor step, so no concurrent release can close it before the
+    /// caller's Postgres connect finishes.
+    static func acquireTunnel(for tunnel: PostgresTunnel) async throws -> TunnelLease {
+        try await resolve(reference: tunnel.sshConnectionId, countUse: true)
+    }
+
+    private static func resolve(reference: String, countUse: Bool) async throws -> TunnelLease {
         guard
             let sshProfile = ConnectionStoreManager.shared.connections
                 .first(where: { $0.id == reference })
@@ -103,21 +108,81 @@ enum SSHTunnelResolver {
             // Not a known profile: accept a value that already names a
             // live connection (an id another surface opened), else the
             // reference is stale.
-            if rshellIsConnected(connectionId: reference) {
-                return reference
+            if await isConnected(reference) {
+                return TunnelLease(liveConnectionId: reference, reservation: nil)
             }
             throw ResolveError.profileMissing(reference)
         }
 
-        if let cached = liveConnections[sshProfile.id],
-           rshellIsConnected(connectionId: cached)
-        {
-            return cached
-        }
+        let key = sshProfile.id
+        for _ in 0..<maxResolveAttempts {
+            if let cached = liveConnections[key] {
+                let alive = await isConnected(cached)
+                // Re-check after the hop: a release may have closed (or an
+                // open replaced) the cached connection meanwhile.
+                guard liveConnections[key] == cached else { continue }
+                if alive {
+                    return lease(connectionId: cached, key: key, countUse: countUse)
+                }
+                liveConnections.removeValue(forKey: key)
+            }
 
-        let connectionId = try await open(sshProfile)
-        liveConnections[sshProfile.id] = connectionId
-        return connectionId
+            let opened = try await opens.run(key: key) {
+                let connectionId = try await open(sshProfile)
+                liveConnections[key] = connectionId
+                return connectionId
+            }
+            if liveConnections[key] == opened {
+                return lease(connectionId: opened, key: key, countUse: countUse)
+            }
+            // Closed again before this waiter resumed — resolve afresh.
+        }
+        throw ResolveError.connectFailed(
+            name: sshProfile.name,
+            detail: "The SSH connection closed while the tunnel was being set up."
+        )
+    }
+
+    private static func lease(connectionId: String, key: String, countUse: Bool) -> TunnelLease {
+        TunnelLease(
+            liveConnectionId: connectionId,
+            reservation: countUse ? ledger.reserve(key: key) : nil
+        )
+    }
+
+    /// Bind a lease's use to the Postgres connection it produced.
+    static func bindTunnelUse(_ lease: TunnelLease, pgConnectionId: String) {
+        guard let reservation = lease.reservation else { return }
+        closeIfUnused(ledger.bind(reservation, pgConnectionId: pgConnectionId))
+    }
+
+    /// Drop a lease whose Postgres connect failed.
+    static func cancelTunnelUse(_ lease: TunnelLease) {
+        guard let reservation = lease.reservation else { return }
+        closeIfUnused(ledger.cancel(reservation))
+    }
+
+    /// Drop a Postgres connection's dependency; closes the SSH connection once
+    /// no Postgres connection uses it anymore.
+    static func releaseTunnelUse(pgConnectionId: String) {
+        closeIfUnused(ledger.release(pgConnectionId: pgConnectionId))
+    }
+
+    private static func closeIfUnused(_ key: String?) {
+        guard let key, let sshId = liveConnections.removeValue(forKey: key) else { return }
+        // An open in flight for this key reuses the same Rust connection key
+        // and replaces this connection itself; disconnecting now would kill
+        // the replacement instead.
+        guard !opens.isInFlight(key) else { return }
+        BridgeManager.shared.disconnect(connectionId: sshId)
+        logger.log("Closed idle SSH tunnel host connection: \(sshId, privacy: .public)")
+    }
+
+    /// `rshellIsConnected` blocks on the Rust runtime — keep it off the main actor.
+    private static func isConnected(_ connectionId: String) async -> Bool {
+        await Task.detached(priority: .utility) {
+            rshellIsConnected(connectionId: connectionId)
+        }.value
     }
 
     private static func open(_ sshProfile: ConnectionProfile) async throws -> String {

@@ -39,8 +39,9 @@ struct MobileInstanceActivityView: View {
             }
         }
         .task {
-            await connectionManager.acquire(profile: profile)
-            defer { connectionManager.release(profileId: profile.id) }
+            let lease = connectionManager.claim(profile: profile)
+            defer { connectionManager.release(lease) }
+            await connectionManager.connectIfNeeded(profile: profile)
             while !Task.isCancelled {
                 await refresh()
                 try? await Task.sleep(for: Self.refreshInterval)

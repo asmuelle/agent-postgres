@@ -121,35 +121,48 @@ extension BridgeManager {
     func pgConnect(profile: PostgresProfile) async throws -> String {
         var config = profile.toFfiConfig()
 
-        #if os(iOS)
-        // The Rust core's keychain integration is macOS-only (it links the
-        // macOS Security framework); on iOS that path is a no-op stub that
-        // always reports "no keychain entry". The password actually lives in
-        // the native iOS Keychain, saved via `KeychainManager`. Resolve it
-        // here and pass it to the FFI as an explicit password so connecting
-        // never reaches the stub.
+        // Resolve `.keychain` passwords in Swift on both platforms and hand
+        // them to the FFI as an explicit password:
+        // - iOS: the Rust core's keychain is a macOS-only stub that always
+        //   reports "no keychain entry"; the password lives in the native
+        //   iOS Keychain.
+        // - macOS: the Rust keychain reads only the device-local item under
+        //   `keychainAccount`. It never sees iCloud-synced passwords
+        //   (`syncPassword` — a synchronizable data-protection item under a
+        //   different service) nor a legacy endpoint-scoped entry the
+        //   account migration hasn't copied yet.
+        // Wait for the one-time account migration first so a launch-time
+        // connect can't race the copy.
         if case .keychain = profile.auth {
-            let account = profile.keychainAccount
-            let stored = await MainActor.run {
-                KeychainManager.shared.loadPassword(kind: .postgresPassword, account: account)
-            }
-            guard let password = stored, !password.isEmpty else {
+            await PostgresProfileStore.shared.waitForKeychainMigration()
+            let stored = await KeychainManager.shared.loadPostgresPasswordAsync(for: profile)
+            if let password = stored, !password.isEmpty {
+                config.auth = .password(password: password)
+            } else {
+                #if os(iOS)
                 throw PostgresBridgeError.other(
                     "No saved password for \(profile.user)@\(profile.host). Edit the connection and re-enter it."
                 )
+                #endif
+                // macOS: leave `.keychain` so the core reports its usual
+                // missing-entry error.
             }
-            config.auth = .password(password: password)
         }
-        #endif
 
         // The profile stores either a saved SSH profile id (macOS) or an
         // inline SSH endpoint (iOS); the FFI needs the *live connection id*
         // the Rust manager holds. Resolve (auto-opening the SSH connection
         // with stored credentials if needed) and substitute before connecting.
+        // The tunnel use is counted *before* the Postgres connect is awaited,
+        // so a concurrent disconnect of the tunnel's last other user can't
+        // close the SSH connection underneath this connect.
+        var tunnelLease: SSHTunnelResolver.TunnelLease?
         if let tunnel = profile.tunnel {
             let liveId: String
             do {
-                liveId = try await SSHTunnelResolver.liveConnectionId(for: tunnel)
+                let lease = try await SSHTunnelResolver.acquireTunnel(for: tunnel)
+                tunnelLease = lease
+                liveId = lease.liveConnectionId
             } catch {
                 throw PostgresBridgeError.tunnel(
                     (error as? LocalizedError)?.errorDescription
@@ -163,38 +176,46 @@ extension BridgeManager {
             )
         }
 
+        let connectionId: String
         do {
-            let connectionId: String = try await runOnUtilityQueuePg {
-                try rshellPgConnect(config: config)
+            let ffiConfig = config
+            connectionId = try await runOnUtilityQueuePg {
+                try rshellPgConnect(config: ffiConfig)
             }
-            // Remember which profile owns this connection so the read-only
-            // guard and the write audit log can resolve it later — every
-            // Postgres connection on both platforms passes through here.
-            PostgresConnectionAuditRegistry.shared.register(
-                connectionId: connectionId,
-                profile: profile
-            )
-            // Track this Postgres connection's use of the shared SSH tunnel so
-            // the underlying SSH connection is reclaimed once the last Postgres
-            // consumer of it disconnects (see pgDisconnect).
-            if let tunnel = profile.tunnel {
-                await SSHTunnelResolver.registerTunnelUse(
-                    pgConnectionId: connectionId, tunnel: tunnel
-                )
-            }
-            do {
-                try await validateMinimumServerVersion(connectionId: connectionId)
-            } catch {
-                await pgDisconnect(connectionId: connectionId)
-                throw error
-            }
-            return connectionId
-        } catch let err as PostgresBridgeError {
-            throw err
-        } catch let err as FfiPgError {
-            throw PostgresBridgeError.from(err)
         } catch {
-            throw PostgresBridgeError.other(error.localizedDescription)
+            if let tunnelLease {
+                await SSHTunnelResolver.cancelTunnelUse(tunnelLease)
+            }
+            throw Self.pgConnectError(error)
+        }
+
+        // Remember which profile owns this connection so the read-only
+        // guard and the write audit log can resolve it later — every
+        // Postgres connection on both platforms passes through here.
+        PostgresConnectionAuditRegistry.shared.register(
+            connectionId: connectionId,
+            profile: profile
+        )
+        // Track this Postgres connection's use of the shared SSH tunnel so
+        // the underlying SSH connection is reclaimed once the last Postgres
+        // consumer of it disconnects (see pgDisconnect).
+        if let tunnelLease {
+            await SSHTunnelResolver.bindTunnelUse(tunnelLease, pgConnectionId: connectionId)
+        }
+        do {
+            try await validateMinimumServerVersion(connectionId: connectionId)
+        } catch {
+            await pgDisconnect(connectionId: connectionId)
+            throw Self.pgConnectError(error)
+        }
+        return connectionId
+    }
+
+    private static func pgConnectError(_ error: Error) -> PostgresBridgeError {
+        switch error {
+        case let err as PostgresBridgeError: return err
+        case let err as FfiPgError: return PostgresBridgeError.from(err)
+        default: return PostgresBridgeError.other(error.localizedDescription)
         }
     }
 
@@ -330,14 +351,15 @@ extension BridgeManager {
         // leased session. This protects against side-effecting SELECT
         // functions and user-defined functions that a lexical classifier
         // cannot prove safe. The core's smart multi-statement path executes
-        // this preamble before the user's statement on the same wire.
-        let effectiveSQL: String
+        // this preamble before the user's statement on the same wire;
+        // `PostgresSessionPreamble` keeps the user's statement on the
+        // cursor path and maps error positions back onto the user's text.
+        var preamble: PostgresSessionPreamble?
         if let audit {
             let readOnly = await Self.liveReadOnlyState(for: audit)
-            effectiveSQL = "SET default_transaction_read_only = \(readOnly ? "on" : "off");\n\(sql)"
-        } else {
-            effectiveSQL = sql
+            preamble = PostgresSessionPreamble.wrap(sql, readOnly: readOnly)
         }
+        let effectiveSQL = preamble?.sql ?? sql
         do {
             let result = try await pgWrapping {
                 try rshellPgExecute(
@@ -353,8 +375,24 @@ extension BridgeManager {
         } catch {
             Self.audit(audit, action: .execute, statement: sql,
                        error: Self.message(for: error), rowsAffected: nil)
-            throw error
+            throw Self.remapPosition(of: error, through: preamble)
         }
+    }
+
+    /// Rewrite a server error's position from the submitted (preamble-
+    /// prefixed) text onto the user's original SQL.
+    private static func remapPosition(
+        of error: Error,
+        through preamble: PostgresSessionPreamble?
+    ) -> Error {
+        guard let preamble,
+              case .database(let e) = error as? PostgresBridgeError,
+              let position = e.position else { return error }
+        return PostgresBridgeError.database(PostgresServerError(
+            sqlstate: e.sqlstate, message: e.message, detail: e.detail, hint: e.hint,
+            position: preamble.userPosition(fromServer: position),
+            constraint: e.constraint, column: e.column, table: e.table, schema: e.schema
+        ))
     }
 
     /// Fetch the next page from a cursor opened by `pgExecute` in the
@@ -628,7 +666,7 @@ extension BridgeManager {
         connectionId: String,
         sessionId: String,
         statement: String,
-        _ work: @escaping () throws -> Void
+        _ work: @escaping @Sendable () throws -> Void
     ) async throws {
         let audit = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
         do {
@@ -723,7 +761,7 @@ extension BridgeManager {
     /// Run a throwing FFI call on the bridge's utility queue and convert
     /// `FfiPgError` to `PostgresBridgeError` at the boundary. Keeps the
     /// pattern out of every method.
-    private func pgWrapping<T>(_ work: @escaping () throws -> T) async throws -> T {
+    private func pgWrapping<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
         do {
             return try await runOnUtilityQueuePg(work)
         } catch let err as FfiPgError {
@@ -737,7 +775,7 @@ extension BridgeManager {
     /// and this extension. Re-implemented inline because the original is
     /// `private`; mirroring the queue semantics keeps Postgres traffic on
     /// the same low-priority lane as monitor and SFTP probes.
-    fileprivate func runOnUtilityQueuePg<T>(_ work: @escaping () throws -> T) async throws -> T {
+    fileprivate func runOnUtilityQueuePg<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             postgresQueue.async {
                 do {
@@ -749,7 +787,7 @@ extension BridgeManager {
         }
     }
 
-    fileprivate func runOnUtilityQueuePgVoid(_ work: @escaping () -> Void) async {
+    fileprivate func runOnUtilityQueuePgVoid(_ work: @escaping @Sendable () -> Void) async {
         await withCheckedContinuation { continuation in
             postgresQueue.async {
                 work()
@@ -769,7 +807,7 @@ extension BridgeManager {
 // schema introspection runs while the monitor is sampling stats.
 // =============================================================================
 
-private nonisolated(unsafe) let postgresQueue: DispatchQueue = {
+private let postgresQueue: DispatchQueue = {
     DispatchQueue(
         label: "com.mc-ssh.bridge.postgres",
         qos: .utility,

@@ -22,7 +22,7 @@ extension SidebarView {
         case .relation:
             relationRow(profile: profile, store: store, database: database, schema: schema, rel: node)
         case .sequence:
-            let parsed = parseSequenceId(node.id)
+            let parsed = parseContentNode(node)
             let isConnectedDb = parsed?.database == profile.database
             HStack {
                 Label(node.name, systemImage: "number")
@@ -62,7 +62,7 @@ extension SidebarView {
                 )
             }
         case .routine(let rkind, let signature, let returnType):
-            let parsed = parseRoutineId(node.id)
+            let parsed = parseContentNode(node)
             let isConnectedDb = parsed?.database == profile.database
             HStack(spacing: 6) {
                 Label(node.name, systemImage: rkind.sfSymbol)
@@ -122,7 +122,7 @@ extension SidebarView {
                 )
             }
         case .objectType(let kind):
-            let parsed = parseObjectTypeId(node.id)
+            let parsed = parseContentNode(node)
             let isConnectedDb = parsed?.database == profile.database
             HStack(spacing: 6) {
                 Label(node.name, systemImage: kind.sfSymbol)
@@ -175,14 +175,14 @@ extension SidebarView {
         schema: String,
         rel: PgSchemaNode
     ) -> some View {
-        let key = "\(database).\(schema).\(rel.name)"
-        let fullKey = "\(profile.id).\(database).\(schema).\(rel.name)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: rel.name)
+        let fullKey = PgCompositeKey.make(profile.id, database, schema, rel.name)
         let isExpanded = expandedRelations.contains(fullKey)
         let symbol: String = {
             if case .relation(let kind) = rel.kind { return kind.sfSymbol }
             return "tablecells"
         }()
-        let parsed = parseRelationId(rel.id)
+        let parsed = parseContentNode(rel)
         let isConnectedDb = parsed?.database == profile.database
 
         DisclosureGroup(
@@ -191,6 +191,10 @@ extension SidebarView {
                 set: { expanded in
                     if expanded {
                         expandedRelations.insert(fullKey)
+                        // Column / key introspection always runs against the
+                        // connected database — for another database it would
+                        // describe a same-named table from the wrong one.
+                        guard isConnectedDb else { return }
                         Task {
                             if store.columnsState[key] == nil || store.columnsState[key]?.isLoaded == false {
                                 await store.loadColumns(database: database, schema: schema, table: rel.name)
@@ -205,8 +209,15 @@ extension SidebarView {
                 }
             )
         ) {
-            relationChildrenView(profile: profile, store: store, database: database, schema: schema, table: rel.name)
-                .padding(.leading, 12)
+            if isConnectedDb {
+                relationChildrenView(profile: profile, store: store, database: database, schema: schema, table: rel.name)
+                    .padding(.leading, 12)
+            } else {
+                Text("Connect to “\(database)” to browse its columns.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 12)
+            }
         } label: {
             // Interaction modifiers on the label only — see serverNodeRow.
             HStack {
@@ -265,6 +276,7 @@ extension SidebarView {
                     isConnectedDb: isConnectedDb,
                     post: { postOpenTabNotification(profile: profile, node: rel, details: $0) },
                     refresh: {
+                        guard isConnectedDb else { return }
                         Task {
                             await store.loadColumns(database: database, schema: schema, table: rel.name)
                             await store.loadMeta(database: database, schema: schema, table: rel.name)
@@ -284,8 +296,7 @@ extension SidebarView {
         schema: String,
         table: String
     ) -> some View {
-        let key = "\(database).\(schema).\(table)"
-
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         DisclosureGroup("Columns") {
             switch store.columnsState[key] ?? .idle {
             case .idle, .loading:
@@ -353,7 +364,7 @@ extension SidebarView {
                     ForEach(keys) { keyNode in
                         let isSelected = selectedNode?.id == keyNode.id
                         HStack {
-                            Label(keyNode.name, systemImage: "key.fill")
+                            Label(keyNode.label, systemImage: "key.fill")
                                 .foregroundStyle(.yellow)
                             Spacer()
                         }
@@ -370,7 +381,6 @@ extension SidebarView {
                         .contextMenu {
                             PostgresNodeContextMenu(
                                 node: keyNode,
-                                objectName: bareMetaName(id: keyNode.id, prefix: "key:\(database).\(schema).\(table).") ?? keyNode.name,
                                 database: database,
                                 schema: schema,
                                 table: table,
@@ -388,7 +398,7 @@ extension SidebarView {
                     ForEach(constraints) { constNode in
                         let isSelected = selectedNode?.id == constNode.id
                         HStack {
-                            Label(constNode.name, systemImage: "lock.shield")
+                            Label(constNode.label, systemImage: "lock.shield")
                                 .foregroundStyle(.orange)
                             Spacer()
                         }
@@ -405,7 +415,6 @@ extension SidebarView {
                         .contextMenu {
                             PostgresNodeContextMenu(
                                 node: constNode,
-                                objectName: bareMetaName(id: constNode.id, prefix: "const:\(database).\(schema).\(table).") ?? constNode.name,
                                 database: database,
                                 schema: schema,
                                 table: table,

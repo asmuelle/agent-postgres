@@ -101,11 +101,10 @@ struct PostgresActivityMonitorView: View {
             }
         }
         .background(MidnightMacDesign.ColorToken.windowBackground)
-        .onAppear {
-            startPollingTimer()
-        }
-        .onDisappear {
-            isPolling = false
+        // The poll loop is owned by the view: cancelled on disappear and
+        // restarted whenever the connection, toggle, or interval changes.
+        .task(id: pollingConfiguration) {
+            await runPollingLoop(pollingConfiguration)
         }
         .sheet(item: $pendingAction) { pending in
             PostgresSessionActionConfirmationView(
@@ -140,16 +139,13 @@ struct PostgresActivityMonitorView: View {
             Toggle("Live Polling", isOn: $isPolling)
                 .toggleStyle(.checkbox)
             
-            Picker("Interval", selection: $pollingInterval) {
-                Text("1s").tag(1.0)
-                Text("3s").tag(3.0)
-                Text("5s").tag(5.0)
-                Text("Pause").tag(9999.0)
+            Picker("Interval", selection: intervalSelection) {
+                Text("1s").tag(Double?.some(1.0))
+                Text("3s").tag(Double?.some(3.0))
+                Text("5s").tag(Double?.some(5.0))
+                Text("Pause").tag(Double?.none)
             }
             .frame(width: 130)
-            .onChange(of: pollingInterval) { newVal in
-                isPolling = newVal < 100.0
-            }
             
             Button {
                 Task { await fetchActivity() }
@@ -537,11 +533,44 @@ struct PostgresActivityMonitorView: View {
         }
     }
     
-    private func startPollingTimer() {
-        Task {
-            while isPolling {
-                await fetchActivity()
-                try? await Task.sleep(nanoseconds: UInt64(pollingInterval * 1_000_000_000))
+    /// Everything the poll loop depends on; a change restarts the loop.
+    private struct PollingConfiguration: Equatable {
+        let connectionId: String?
+        let isPolling: Bool
+        let interval: Double
+    }
+
+    private var pollingConfiguration: PollingConfiguration {
+        PollingConfiguration(
+            connectionId: connectionId,
+            isPolling: isPolling,
+            interval: pollingInterval
+        )
+    }
+
+    /// "Pause" is the Live Polling toggle turned off, not a very long interval.
+    private var intervalSelection: Binding<Double?> {
+        Binding(
+            get: { isPolling ? pollingInterval : nil },
+            set: { newValue in
+                if let newValue {
+                    pollingInterval = newValue
+                    isPolling = true
+                } else {
+                    isPolling = false
+                }
+            }
+        )
+    }
+
+    private func runPollingLoop(_ configuration: PollingConfiguration) async {
+        guard configuration.isPolling else { return }
+        while !Task.isCancelled {
+            await fetchActivity()
+            do {
+                try await Task.sleep(for: .seconds(configuration.interval))
+            } catch {
+                return // cancelled: view went away or the configuration changed
             }
         }
     }

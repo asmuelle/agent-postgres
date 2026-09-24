@@ -60,6 +60,56 @@ enum SSHKeyAccessError: LocalizedError {
     }
 }
 
+/// Security-scoped bookmark resolution shared by the connect path and the
+/// key-vault metadata view.
+enum SecurityScopedBookmark {
+    struct Resolved {
+        let url: URL
+        /// The system asks for the bookmark to be re-created.
+        let isStale: Bool
+    }
+
+    /// Resolve with security scope, falling back to plain path resolution
+    /// (which still works for keys the process can read without a grant).
+    static func resolve(_ data: Data) throws -> Resolved {
+        var isStale = false
+        do {
+            let url = try URL(
+                resolvingBookmarkData: data,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+            return Resolved(url: url, isStale: isStale)
+        } catch {
+            let scopedError = error.localizedDescription
+            do {
+                let url = try URL(
+                    resolvingBookmarkData: data,
+                    options: [],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &isStale
+                )
+                return Resolved(url: url, isStale: isStale)
+            } catch {
+                throw SSHKeyAccessError.bookmarkInvalid(
+                    "\(scopedError) Fallback path resolution also failed: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    /// Fresh read-only bookmark data for `url`. Call while access to `url`
+    /// is held (between start/stopAccessingSecurityScopedResource).
+    static func refreshedData(for url: URL) -> Data? {
+        try? url.bookmarkData(
+            options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+    }
+}
+
 enum SSHKeyAccessCoordinator {
     @MainActor
     static func prepare(
@@ -74,34 +124,24 @@ enum SSHKeyAccessCoordinator {
             return PreparedSSHKey(keyPath: path)
 
         case .securityScopedBookmark(let data):
-            var isStale = false
-            let url: URL
-            do {
-                url = try URL(
-                    resolvingBookmarkData: data,
-                    options: [.withSecurityScope],
-                    relativeTo: nil,
-                    bookmarkDataIsStale: &isStale
-                )
-            } catch {
-                let scopedError = error.localizedDescription
-                do {
-                    url = try URL(
-                        resolvingBookmarkData: data,
-                        options: [],
-                        relativeTo: nil,
-                        bookmarkDataIsStale: &isStale
-                    )
-                } catch {
-                    throw SSHKeyAccessError.bookmarkInvalid(
-                        "\(scopedError) Fallback path resolution also failed: \(error.localizedDescription)"
-                    )
-                }
-            }
+            let resolved = try SecurityScopedBookmark.resolve(data)
+            let url = resolved.url
             let didStartAccess = url.startAccessingSecurityScopedResource()
             guard didStartAccess || FileManager.default.isReadableFile(atPath: url.path) else {
+                // Nothing was started, so there is nothing to stop.
                 throw SSHKeyAccessError.bookmarkDenied(url.path)
             }
+            // A stale bookmark still resolves today but stops resolving
+            // after the next rename/move/OS migration. Re-create it while
+            // access is held and persist it on the profile it came from.
+            if resolved.isStale, let profile,
+               let refreshed = SecurityScopedBookmark.refreshedData(for: url) {
+                ConnectionStoreManager.shared.refreshKeyBookmark(
+                    profileId: profile.id, from: data, to: refreshed
+                )
+            }
+            // The cleanup closure is the single matching stop for the start
+            // above; PreparedSSHKey runs it on `stop()` or deinit, once.
             return PreparedSSHKey(keyPath: url.path) {
                 if didStartAccess {
                     url.stopAccessingSecurityScopedResource()

@@ -44,7 +44,9 @@ struct PgSchemaNode: Identifiable, Hashable, Sendable {
         // Children of relations
         case column(typeName: String, notNull: Bool)
         case constraint(type: String, definition: String)
-        case key(type: String)
+        /// Primary / unique / foreign key; `definition` is the
+        /// `pg_get_constraintdef` text.
+        case key(type: String, definition: String)
         case trigger
 
         case language
@@ -53,12 +55,35 @@ struct PgSchemaNode: Identifiable, Hashable, Sendable {
     }
 
     /// Stable id derived from the parent path so SwiftUI's diffing
-    /// distinguishes `public.users` from `app.users`.
+    /// distinguishes `public.users` from `app.users`. Built and parsed
+    /// only through `PgNodeID` (escaped components — names may contain
+    /// dots).
     let id: String
+    /// The real object name — always safe to quote into SQL.
     let name: String
     let kind: Kind
     let owner: String?
     let estimatedRows: Float?
+    /// Human-facing row text. Equals `name` except where the tree shows
+    /// extra context (keys/constraints append their definition). Never
+    /// use it to build SQL.
+    let label: String
+
+    init(
+        id: String,
+        name: String,
+        kind: Kind,
+        owner: String?,
+        estimatedRows: Float?,
+        label: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.owner = owner
+        self.estimatedRows = estimatedRows
+        self.label = label ?? name
+    }
 }
 
 /// Fixed category buckets under a schema, in the order DataGrip
@@ -165,7 +190,7 @@ struct PgSchemaContentsBundle: @unchecked Sendable {
         case .tables:
             return contents.tables.map { rel in
                 PgSchemaNode(
-                    id: "rel:\(database).\(schema).\(rel.name)",
+                    id: PgNodeID.make(.relation, database, schema, rel.name),
                     name: rel.name,
                     kind: .relation(kind: PgRelationDisplayKind(rel.kind)),
                     owner: rel.owner,
@@ -175,7 +200,7 @@ struct PgSchemaContentsBundle: @unchecked Sendable {
         case .views:
             return contents.views.map { rel in
                 PgSchemaNode(
-                    id: "rel:\(database).\(schema).\(rel.name)",
+                    id: PgNodeID.make(.relation, database, schema, rel.name),
                     name: rel.name,
                     kind: .relation(kind: PgRelationDisplayKind(rel.kind)),
                     owner: rel.owner,
@@ -185,7 +210,7 @@ struct PgSchemaContentsBundle: @unchecked Sendable {
         case .materializedViews:
             return contents.materializedViews.map { rel in
                 PgSchemaNode(
-                    id: "rel:\(database).\(schema).\(rel.name)",
+                    id: PgNodeID.make(.relation, database, schema, rel.name),
                     name: rel.name,
                     kind: .relation(kind: PgRelationDisplayKind(rel.kind)),
                     owner: rel.owner,
@@ -195,7 +220,7 @@ struct PgSchemaContentsBundle: @unchecked Sendable {
         case .sequences:
             return contents.sequences.map { s in
                 PgSchemaNode(
-                    id: "seq:\(database).\(schema).\(s.name)",
+                    id: PgNodeID.make(.sequence, database, schema, s.name),
                     name: s.name,
                     kind: .sequence,
                     owner: s.owner,
@@ -208,7 +233,7 @@ struct PgSchemaContentsBundle: @unchecked Sendable {
                     // Routine identity needs the argument signature
                     // — Postgres allows overloading, so name alone
                     // isn't unique within a schema.
-                    id: "fn:\(database).\(schema).\(r.name)\(r.argumentSignature)",
+                    id: PgNodeID.make(.routine, database, schema, r.name, r.argumentSignature),
                     name: r.name,
                     kind: .routine(
                         kind: PgRoutineDisplayKind(r.kind),
@@ -222,7 +247,7 @@ struct PgSchemaContentsBundle: @unchecked Sendable {
         case .objectTypes:
             return contents.objectTypes.map { t in
                 PgSchemaNode(
-                    id: "type:\(database).\(schema).\(t.name)",
+                    id: PgNodeID.make(.objectType, database, schema, t.name),
                     name: t.name,
                     kind: .objectType(kind: PgObjectTypeDisplayKind(t.kind)),
                     owner: t.owner,
@@ -401,19 +426,19 @@ final class PgSchemaStore: ObservableObject {
     /// Schemas per database name.
     @Published private(set) var schemasState: [String: PgLoadState<[PgSchemaNode]>] = [:]
 
-    /// Schema contents per `"<database>.<schema>"` composite key.
+    /// Schema contents per `PgCompositeKey.schema(database:schema:)` key.
     /// Holds the six category arrays the tree groups by; loaded
     /// in one round-trip via `pgListSchemaContents`.
     @Published private(set) var schemaContentsState: [String: PgLoadState<PgSchemaContentsBundle>] = [:]
 
-    /// Columns per `"<database>.<schema>.<table_name>"` composite key.
+    /// Columns per `PgCompositeKey.table(database:schema:table:)` key.
     @Published private(set) var columnsState: [String: PgLoadState<[PgSchemaNode]>] = [:]
 
-    /// Constraints, keys, and triggers per `"<database>.<schema>.<table_name>"` composite key.
+    /// Constraints, keys, and triggers per `PgCompositeKey.table(database:schema:table:)` key.
     @Published private(set) var metaState: [String: PgLoadState<[PgSchemaNode]>] = [:]
 
     /// Resolved FK constraints (both directions) per
-    /// `"<database>.<schema>.<table_name>"` composite key. Backs the
+    /// `PgCompositeKey.table(database:schema:table:)` key. Backs the
     /// result grid's "Go to referenced row" navigation.
     @Published private(set) var foreignKeysState: [String: PgLoadState<PgTableForeignKeys>] = [:]
 
@@ -433,8 +458,23 @@ final class PgSchemaStore: ObservableObject {
     /// Off by default — the noise outweighs the value for an explorer.
     @Published var showSystemSchemas: Bool = false
 
-    init(connectionId: String) {
+    /// The database the connection is bound to, when the owner knows it.
+    /// Column / constraint / trigger introspection has no per-database
+    /// routing in the core (`pgDescribeColumns` and `pgExecute` always hit
+    /// the connected database), so for any *other* database those loaders
+    /// fail honestly instead of returning a same-named table's metadata
+    /// from the wrong database. `nil` keeps the legacy unchecked behavior.
+    var connectedDatabase: String?
+
+    init(connectionId: String, connectedDatabase: String? = nil) {
         self.connectionId = connectionId
+        self.connectedDatabase = connectedDatabase
+    }
+
+    /// Error text when `database` is known not to be the connected one.
+    private func foreignDatabaseError(_ database: String) -> String? {
+        guard let connectedDatabase, connectedDatabase != database else { return nil }
+        return "“\(database)” isn't the connected database (“\(connectedDatabase)”) — its table details can't be loaded through this connection."
     }
 
     // The old flat `completionIdentifiers` list was replaced by the
@@ -449,7 +489,7 @@ final class PgSchemaStore: ObservableObject {
             let dbs = try await BridgeManager.shared.pgListDatabases(connectionId: connectionId)
             let nodes = dbs.map { db in
                 PgSchemaNode(
-                    id: "db:\(db.name)",
+                    id: PgNodeID.make(.database, db.name),
                     name: db.name,
                     kind: .database,
                     owner: db.owner,
@@ -477,7 +517,7 @@ final class PgSchemaStore: ObservableObject {
             let filtered = showSystemSchemas ? schemas : schemas.filter { !$0.isSystem }
             let nodes = filtered.map { s in
                 PgSchemaNode(
-                    id: "schema:\(database).\(s.name)",
+                    id: PgNodeID.make(.schema, database, s.name),
                     name: s.name,
                     kind: .schema(isSystem: s.isSystem),
                     owner: s.owner,
@@ -512,9 +552,16 @@ final class PgSchemaStore: ObservableObject {
     }
 
     func loadColumns(database: String, schema: String, table: String) async {
-        let key = "\(database).\(schema).\(table)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
+        if let message = foreignDatabaseError(database) {
+            columnsState[key] = .failed(message)
+            return
+        }
         columnsState[key] = .loading
         do {
+            // The core API takes no database: this always describes
+            // `schema.table` in the connected database, hence the
+            // guard above.
             let cols = try await BridgeManager.shared.pgDescribeColumns(
                 connectionId: connectionId,
                 schema: schema,
@@ -522,7 +569,7 @@ final class PgSchemaStore: ObservableObject {
             )
             let nodes = cols.map { col in
                 PgSchemaNode(
-                    id: "col:\(database).\(schema).\(table).\(col.name)",
+                    id: PgNodeID.make(.column, database, schema, table, col.name),
                     name: col.name,
                     kind: .column(typeName: col.typeName, notNull: col.notNull),
                     owner: nil,
@@ -536,104 +583,106 @@ final class PgSchemaStore: ObservableObject {
     }
 
     func loadMeta(database: String, schema: String, table: String) async {
-        let key = "\(database).\(schema).\(table)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
+        if let message = foreignDatabaseError(database) {
+            metaState[key] = .failed(message)
+            return
+        }
         metaState[key] = .loading
         let sessionId = "meta-loader-\(UUID().uuidString)"
         let connId = connectionId
+
+        // Resolve the table to its OID once via to_regclass on the safely
+        // quoted, schema-qualified identifier, then anchor both catalog
+        // queries on that OID. This is injection-safe (the identifier is
+        // quoted, not string-matched into a WHERE clause) and also resolves
+        // mixed-case / reserved-word object names correctly.
+        let regclassArg = pgQuoteLiteral(pgQuoteIdent(schema) + "." + pgQuoteIdent(table))
+
+        // 1. Fetch constraints and keys
+        let constraintSql = """
+        SELECT conname, pg_get_constraintdef(c.oid), contype
+        FROM pg_constraint c
+        WHERE c.conrelid = to_regclass(\(regclassArg));
+        """
+
+        // 2. Fetch triggers
+        let triggerSql = """
+        SELECT tgname, pg_get_triggerdef(t.oid)
+        FROM pg_trigger t
+        WHERE t.tgrelid = to_regclass(\(regclassArg))
+          AND NOT tgisinternal;
+        """
+
+        var nodes: [PgSchemaNode] = []
+        // Each query degrades independently — a permission-denied on one
+        // catalog shouldn't hide the other — but if *both* fail the pane
+        // reports the error instead of a misleading empty "loaded" state.
+        var failures: [String] = []
+
         do {
-            // Resolve the table to its OID once via to_regclass on the safely
-            // quoted, schema-qualified identifier, then anchor both catalog
-            // queries on that OID. This is injection-safe (the identifier is
-            // quoted, not string-matched into a WHERE clause) and also resolves
-            // mixed-case / reserved-word object names correctly.
-            let regclassArg = pgQuoteLiteral(pgQuoteIdent(schema) + "." + pgQuoteIdent(table))
-
-            // 1. Fetch constraints and keys
-            let constraintSql = """
-            SELECT conname, pg_get_constraintdef(c.oid), contype
-            FROM pg_constraint c
-            WHERE c.conrelid = to_regclass(\(regclassArg));
-            """
-
-            // 2. Fetch triggers
-            let triggerSql = """
-            SELECT tgname, pg_get_triggerdef(t.oid)
-            FROM pg_trigger t
-            WHERE t.tgrelid = to_regclass(\(regclassArg))
-              AND NOT tgisinternal;
-            """
-
-            var nodes: [PgSchemaNode] = []
-
-            // Execute constraints query
-            do {
-                let res = try await BridgeManager.shared.pgExecute(
-                    connectionId: connectionId,
-                    sessionId: sessionId,
-                    sql: constraintSql,
-                    pageSize: 100
-                )
-                for row in res.rows {
-                    if row.cells.count >= 3,
-                       let name = row.cells[0],
-                       let def = row.cells[1],
-                       let type = row.cells[2] {
-                        if type == "p" || type == "f" || type == "u" {
-                            nodes.append(PgSchemaNode(
-                                id: "key:\(database).\(schema).\(table).\(name)",
-                                name: "\(name) (\(def))",
-                                kind: .key(type: type),
-                                owner: nil,
-                                estimatedRows: nil
-                            ))
-                        } else {
-                            nodes.append(PgSchemaNode(
-                                id: "const:\(database).\(schema).\(table).\(name)",
-                                name: "\(name) (\(def))",
-                                kind: .constraint(type: type, definition: def),
-                                owner: nil,
-                                estimatedRows: nil
-                            ))
-                        }
-                    }
+            let res = try await BridgeManager.shared.pgExecute(
+                connectionId: connId,
+                sessionId: sessionId,
+                sql: constraintSql,
+                pageSize: 100
+            )
+            for row in res.rows {
+                guard row.cells.count >= 3,
+                      let name = row.cells[0],
+                      let def = row.cells[1],
+                      let type = row.cells[2]
+                else { continue }
+                if type == "p" || type == "f" || type == "u" {
+                    nodes.append(PgSchemaNode(
+                        id: PgNodeID.make(.key, database, schema, table, name),
+                        name: name,
+                        kind: .key(type: type, definition: def),
+                        owner: nil,
+                        estimatedRows: nil,
+                        label: "\(name) (\(def))"
+                    ))
+                } else {
+                    nodes.append(PgSchemaNode(
+                        id: PgNodeID.make(.constraint, database, schema, table, name),
+                        name: name,
+                        kind: .constraint(type: type, definition: def),
+                        owner: nil,
+                        estimatedRows: nil,
+                        label: "\(name) (\(def))"
+                    ))
                 }
-            } catch {
-                // Keep the metadata pane usable without constraints, but
-                // leave a trace — a permission-denied on pg_constraint is
-                // otherwise undiagnosable.
-                logger.warning("constraint introspection failed for \(schema, privacy: .public).\(table, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
-
-            // Execute triggers query
-            do {
-                let res = try await BridgeManager.shared.pgExecute(
-                    connectionId: connectionId,
-                    sessionId: sessionId,
-                    sql: triggerSql,
-                    pageSize: 100
-                )
-                for row in res.rows {
-                    if row.cells.count >= 1,
-                       let name = row.cells[0] {
-                        nodes.append(PgSchemaNode(
-                            id: "trig:\(database).\(schema).\(table).\(name)",
-                            name: name,
-                            kind: .trigger,
-                            owner: nil,
-                            estimatedRows: nil
-                        ))
-                    }
-                }
-            } catch {
-                // Same defensive posture as constraints above: don't fail
-                // the pane, but record why triggers are missing.
-                logger.warning("trigger introspection failed for \(schema, privacy: .public).\(table, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-
-            metaState[key] = .loaded(nodes)
         } catch {
-            metaState[key] = .failed(error.localizedDescription)
+            logger.warning("constraint introspection failed for \(schema, privacy: .public).\(table, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            failures.append(error.localizedDescription)
         }
+
+        do {
+            let res = try await BridgeManager.shared.pgExecute(
+                connectionId: connId,
+                sessionId: sessionId,
+                sql: triggerSql,
+                pageSize: 100
+            )
+            for row in res.rows {
+                guard let name = row.cells.first ?? nil else { continue }
+                nodes.append(PgSchemaNode(
+                    id: PgNodeID.make(.trigger, database, schema, table, name),
+                    name: name,
+                    kind: .trigger,
+                    owner: nil,
+                    estimatedRows: nil
+                ))
+            }
+        } catch {
+            logger.warning("trigger introspection failed for \(schema, privacy: .public).\(table, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            failures.append(error.localizedDescription)
+        }
+
+        metaState[key] = failures.count == 2
+            ? .failed(failures[0])
+            : .loaded(nodes)
         // Release the lease within this structured context — awaited on both
         // the success and failure paths — rather than via `defer { Task { … } }`,
         // whose unstructured task could race the next loader or be dropped.
@@ -647,7 +696,11 @@ final class PgSchemaStore: ObservableObject {
     /// Returns `nil` on failure — navigation simply doesn't light up.
     @discardableResult
     func loadForeignKeys(database: String, schema: String, table: String) async -> PgTableForeignKeys? {
-        let key = "\(database).\(schema).\(table)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
+        if let message = foreignDatabaseError(database) {
+            foreignKeysState[key] = .failed(message)
+            return nil
+        }
         switch foreignKeysState[key] ?? .idle {
         case .loaded(let cached):
             return cached
@@ -727,7 +780,7 @@ final class PgSchemaStore: ObservableObject {
             let nodes = res.rows.compactMap { row -> PgSchemaNode? in
                 guard let name = row.cells.first ?? nil else { return nil }
                 return PgSchemaNode(
-                    id: "lang:\(database).\(name)",
+                    id: PgNodeID.make(.language, database, name),
                     name: name,
                     kind: .language,
                     owner: nil,
@@ -756,7 +809,7 @@ final class PgSchemaStore: ObservableObject {
             let nodes = res.rows.compactMap { row -> PgSchemaNode? in
                 guard let name = row.cells.first ?? nil else { return nil }
                 return PgSchemaNode(
-                    id: "role:\(name)",
+                    id: PgNodeID.make(.role, name),
                     name: name,
                     kind: .role,
                     owner: nil,
@@ -785,7 +838,7 @@ final class PgSchemaStore: ObservableObject {
             let nodes = res.rows.compactMap { row -> PgSchemaNode? in
                 guard let name = row.cells.first ?? nil else { return nil }
                 return PgSchemaNode(
-                    id: "tspace:\(name)",
+                    id: PgNodeID.make(.tablespace, name),
                     name: name,
                     kind: .tablespace,
                     owner: nil,
@@ -906,7 +959,7 @@ final class PgSchemaStore: ObservableObject {
     /// item without invalidating the entire database tree.
     func invalidate(database: String, schema: String) {
         schemaContentsState[relationKey(database: database, schema: schema)] = nil
-        let prefix = "\(database).\(schema)."
+        let prefix = PgCompositeKey.prefix(database, schema)
         foreignKeysState = foreignKeysState.filter { !$0.key.hasPrefix(prefix) }
     }
 
@@ -914,7 +967,7 @@ final class PgSchemaStore: ObservableObject {
     /// schemas' contents.
     func invalidate(database: String) {
         schemasState[database] = nil
-        let prefix = "\(database)."
+        let prefix = PgCompositeKey.prefix(database)
         schemaContentsState = schemaContentsState.filter { !$0.key.hasPrefix(prefix) }
         foreignKeysState = foreignKeysState.filter { !$0.key.hasPrefix(prefix) }
     }
@@ -922,6 +975,6 @@ final class PgSchemaStore: ObservableObject {
     // MARK: - Private
 
     private func relationKey(database: String, schema: String) -> String {
-        "\(database).\(schema)"
+        PgCompositeKey.schema(database: database, schema: schema)
     }
 }

@@ -121,25 +121,25 @@ extension PostgresResultsTable {
                 }
             }
             if let sortColumn = sortColumnIndex, sortColumn < result.columns.count {
+                let column = result.columns[sortColumn]
+                let numeric = PostgresCellSort.isNumeric(
+                    typeOid: column.typeOid, typeName: column.typeName
+                )
+                let rows = result.rows
+                let ascending = sortAscending
                 indices.sort { a, b in
-                    let va = sortColumn < result.rows[a].cells.count ? result.rows[a].cells[sortColumn] : nil
-                    let vb = sortColumn < result.rows[b].cells.count ? result.rows[b].cells[sortColumn] : nil
-                    let order = Self.compareCells(va, vb)
-                    return sortAscending ? (order == .orderedAscending) : (order == .orderedDescending)
+                    let va = sortColumn < rows[a].cells.count ? rows[a].cells[sortColumn] : nil
+                    let vb = sortColumn < rows[b].cells.count ? rows[b].cells[sortColumn] : nil
+                    switch PostgresCellSort.compare(va, vb, numeric: numeric) {
+                    case .orderedAscending: return ascending
+                    case .orderedDescending: return !ascending
+                    // Ties keep fetch order, so equal keys don't shuffle
+                    // between re-sorts (`sort` itself isn't stable).
+                    case .orderedSame: return a < b
+                    }
                 }
             }
             displayOrder = indices
-        }
-
-        /// NULLs sort as largest (Postgres default); non-nulls use a locale- and
-        /// numeric-aware comparison so `img9` precedes `img10`.
-        static func compareCells(_ a: String?, _ b: String?) -> ComparisonResult {
-            switch (a, b) {
-            case (nil, nil): return .orderedSame
-            case (nil, _): return .orderedDescending
-            case (_, nil): return .orderedAscending
-            case let (.some(x), .some(y)): return x.localizedStandardCompare(y)
-            }
         }
 
         /// Edit context captured before the field editor opens.
@@ -151,6 +151,9 @@ extension PostgresResultsTable {
             let columnType: String
             let original: String
             let rowId: String
+            /// Row layout the editor was opened under; the commit is
+            /// abandoned if the rows moved while it was open.
+            let layout: RowLayoutKey
         }
         var pendingEdit: PendingEdit?
 

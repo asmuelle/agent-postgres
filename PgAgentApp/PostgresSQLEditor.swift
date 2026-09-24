@@ -40,8 +40,9 @@ struct PostgresSQLEditor: NSViewRepresentable {
     /// string). `nil` — the default for other hosts of this editor — opts
     /// out of snippet notifications entirely.
     var snippetChannel: String? = nil
-    /// 0-based character offset (into `text`) to underline as the last query
-    /// error location, or `nil` for none. Mapped from the server's position.
+    /// 0-based offset (into `text`) to underline as the last query error
+    /// location, or `nil` for none. Counted in Unicode scalars (code points) —
+    /// the unit of the server's error position — not Swift Characters.
     var errorCharOffset: Int?
     /// Snapshot of the loaded schema metadata for completion. Evaluated
     /// lazily (and cached briefly) when the user triggers completion, so it
@@ -137,6 +138,11 @@ struct PostgresSQLEditor: NSViewRepresentable {
 
     // MARK: - Coordinator
 
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.stopObservingSnippets()
+    }
+
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: PostgresSQLEditor
         weak var textView: PgSQLTextView?
@@ -162,20 +168,27 @@ struct PostgresSQLEditor: NSViewRepresentable {
                 object: nil,
                 queue: .main
             ) { [weak self] note in
-                guard let self,
-                      let channel = self.parent.snippetChannel,
-                      (note.userInfo?["channel"] as? String) == channel,
-                      let body = note.userInfo?["body"] as? String,
-                      let textView = self.textView,
-                      textView.isEditable
-                else { return }
-                textView.insertSnippet(PostgresSnippetPlaceholders.parse(body))
+                let channel = note.userInfo?["channel"] as? String
+                guard let body = note.userInfo?["body"] as? String else { return }
+                // Delivered on `.main` (queue: .main above).
+                MainActor.assumeIsolated {
+                    guard let self,
+                          let ownChannel = self.parent.snippetChannel,
+                          channel == ownChannel,
+                          let textView = self.textView,
+                          textView.isEditable
+                    else { return }
+                    textView.insertSnippet(PostgresSnippetPlaceholders.parse(body))
+                }
             }
         }
 
-        deinit {
+        /// Called from `dismantleNSView` (main actor) — a nonisolated deinit
+        /// can't touch the main-actor observer token under Swift 6.
+        func stopObservingSnippets() {
             if let snippetObserver {
                 NotificationCenter.default.removeObserver(snippetObserver)
+                self.snippetObserver = nil
             }
         }
 
@@ -239,24 +252,13 @@ struct PostgresSQLEditor: NSViewRepresentable {
         }
 
         /// UTF-16 range of the identifier-ish run starting at `charOffset`
-        /// (0-based, counted in Characters), guaranteed at least one character.
-        /// A position one past the end (e.g. `SELECT 1 +`) underlines the last
-        /// character rather than vanishing.
+        /// (0-based, counted in Unicode scalars — code points, as Postgres
+        /// reports positions), guaranteed non-empty. A position one past the
+        /// end (e.g. `SELECT 1 +`) underlines the last code point rather than
+        /// vanishing. Scanning scalars keeps a CRLF (one Character, two code
+        /// points) or an emoji sequence before the error from shifting it.
         static func errorWordRange(in text: String, charOffset: Int) -> NSRange? {
-            guard !text.isEmpty, charOffset >= 0, charOffset <= text.count else { return nil }
-            let clampedOffset = min(charOffset, text.count - 1)
-            let start = text.index(text.startIndex, offsetBy: clampedOffset)
-            var end = start
-            while end < text.endIndex {
-                let c = text[end]
-                if c.isLetter || c.isNumber || c == "_" {
-                    end = text.index(after: end)
-                } else {
-                    break
-                }
-            }
-            if end == start { end = text.index(after: start) }
-            return NSRange(start..<end, in: text)
+            SQLSyntaxHighlighting.errorWordRange(in: text, codePointOffset: charOffset)
         }
     }
 }
@@ -292,9 +294,8 @@ final class PgSQLTextView: NSTextView {
 
     private var snippetSession: SnippetSession?
 
-    deinit {
-        pendingCompletion?.cancel()
-    }
+    // No deinit cancel of `pendingCompletion`: the work item holds `self`
+    // weakly, so a completion that fires after deallocation is a no-op.
 
     /// Insert an expanded snippet at the caret (replacing any selection),
     /// then select the first tab stop. Tab / ⇧Tab move between stops while
@@ -491,8 +492,11 @@ final class PgSQLTextView: NSTextView {
 
     private func scheduleCompletion() {
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.window != nil else { return }
-            self.complete(nil)
+            // Scheduled on the main queue below.
+            MainActor.assumeIsolated {
+                guard let self, self.window != nil else { return }
+                self.complete(nil)
+            }
         }
         pendingCompletion = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.completionDebounce, execute: work)

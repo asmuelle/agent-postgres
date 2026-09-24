@@ -40,6 +40,9 @@ struct PostgresConnectionEditView: View {
     @State private var minIdleConnections: String = ""
     @State private var notes: String = ""
     @State private var saveError: String?
+    /// True while the keychain write runs off the main thread; blocks a
+    /// second Save so two writes can't interleave.
+    @State private var isSaving = false
     @State private var showNewSsh = false
 
     // Paste-to-connect (roadmap 2.1): a URL/DSN pasted here fills the form;
@@ -148,7 +151,7 @@ struct PostgresConnectionEditView: View {
                     SecureField("Password", text: $password)
                         .textFieldStyle(.roundedBorder)
                     Toggle("Save password to Keychain", isOn: $savePasswordToKeychain)
-                        .help("Stores the password under \(derivedKeychainAccount). Unchecked means password is held in memory only and lost on quit.")
+                        .help("Stores the password in the Keychain under this connection's own entry. Unchecked means password is held in memory only and lost on quit.")
                     if savePasswordToKeychain {
                         Toggle("Sync password via iCloud Keychain", isOn: $syncPasswordViaICloud)
                             .help("Stores the password as a synchronizable keychain item so your other devices can use it. The synced profile itself never contains the password.")
@@ -257,7 +260,7 @@ struct PostgresConnectionEditView: View {
                     save()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!canSave)
+                .disabled(!canSave || isSaving)
             }
             .padding()
         }
@@ -272,11 +275,6 @@ struct PostgresConnectionEditView: View {
     }
 
     // MARK: - Derived
-
-    private var derivedKeychainAccount: String {
-        let portValue = UInt16(port) ?? 5432
-        return "\(user)@\(host):\(portValue)/\(database)"
-    }
 
 
     private var canSave: Bool {
@@ -365,10 +363,14 @@ struct PostgresConnectionEditView: View {
         switch p.auth {
         case .keychain:
             savePasswordToKeychain = true
-            password = KeychainManager.shared.loadPassword(
-                kind: .postgresPassword,
-                account: p.keychainAccount
-            ) ?? ""
+            // Off the main thread: a locked keychain or ACL prompt would
+            // otherwise freeze the sheet. Falls back to the legacy
+            // endpoint-scoped entry until the account migration has run.
+            Task { @MainActor in
+                let stored = await KeychainManager.shared.loadPostgresPasswordAsync(for: p)
+                // Don't clobber anything the user typed meanwhile.
+                if password.isEmpty { password = stored ?? "" }
+            }
         case .ephemeralPassword(let pw):
             savePasswordToKeychain = false
             password = pw
@@ -436,18 +438,24 @@ struct PostgresConnectionEditView: View {
             syncPassword: savePasswordToKeychain && syncPasswordViaICloud
         )
 
-        guard KeychainManager.shared.persistPostgresPassword(
-            account: profile.keychainAccount,
-            password: password,
-            saveToKeychain: savePasswordToKeychain,
-            synchronizable: profile.syncPassword
-        ) else {
-            saveError = "Couldn't save the password to the Keychain. The profile was not saved."
-            return
+        let passwordToPersist = password
+        let saveToKeychain = savePasswordToKeychain
+        isSaving = true
+        Task { @MainActor in
+            defer { isSaving = false }
+            let persisted = await KeychainManager.shared.persistPostgresPasswordAsync(
+                account: profile.keychainAccount,
+                password: passwordToPersist,
+                saveToKeychain: saveToKeychain,
+                synchronizable: profile.syncPassword
+            )
+            guard persisted else {
+                saveError = "Couldn't save the password to the Keychain. The profile was not saved."
+                return
+            }
+            store.saveOrUpdate(profile)
+            logger.log("Saved Postgres profile \(profile.id, privacy: .public)")
+            dismiss()
         }
-
-        store.saveOrUpdate(profile)
-        logger.log("Saved Postgres profile \(profile.id, privacy: .public)")
-        dismiss()
     }
 }

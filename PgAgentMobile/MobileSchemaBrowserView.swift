@@ -444,7 +444,7 @@ struct MobileSchemaBrowserView: View {
     @ViewBuilder
     private func schemaSection(store: PgSchemaStore, database: String, schemaNode: PgSchemaNode) -> some View {
         let schemaName = schemaNode.name
-        let key = "\(database).\(schemaName)"
+        let key = PgCompositeKey.schema(database: database, schema: schemaName)
         let isExpanded = expandedSchemas.contains(key)
         
         VStack(alignment: .leading, spacing: 2) {
@@ -501,7 +501,7 @@ struct MobileSchemaBrowserView: View {
     
     @ViewBuilder
     private func categorySection(bundle: PgSchemaContentsBundle, category: PgCategoryKind) -> some View {
-        let key = "\(bundle.database).\(bundle.schema).\(category.rawValue)"
+        let key = PgCompositeKey.make(bundle.database, bundle.schema, category.rawValue)
         let isExpanded = expandedCategories.contains(key)
         let nodes = bundle.nodes(for: category)
         
@@ -558,7 +558,7 @@ struct MobileSchemaBrowserView: View {
     
     @ViewBuilder
     private func nodeRow(node: PgSchemaNode, bundle: PgSchemaContentsBundle) -> some View {
-        let key = "\(bundle.database).\(bundle.schema).\(node.name)"
+        let key = PgCompositeKey.table(database: bundle.database, schema: bundle.schema, table: node.name)
         let isExpanded = expandedRelations.contains(key)
         
         let isRelation: Bool = {
@@ -662,8 +662,7 @@ struct MobileSchemaBrowserView: View {
         schema: String,
         table: String
     ) -> some View {
-        let key = "\(database).\(schema).\(table)"
-        
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         VStack(alignment: .leading, spacing: 8) {
             // Columns
             mobileMetaSection(tableKey: key, title: "Columns", state: schemaStore.columnsState[key] ?? .idle) { nodes in
@@ -719,7 +718,7 @@ struct MobileSchemaBrowserView: View {
                                     Image(systemName: "key.fill")
                                         .foregroundStyle(.yellow)
                                         .font(.caption2)
-                                    Text(keyNode.name)
+                                    Text(keyNode.label)
                                         .font(MidnightMobileDesign.FontToken.caption)
                                     Spacer()
                                 }
@@ -740,7 +739,7 @@ struct MobileSchemaBrowserView: View {
                                     Image(systemName: "lock.shield")
                                         .foregroundStyle(.orange)
                                         .font(.caption2)
-                                    Text(constNode.name)
+                                    Text(constNode.label)
                                         .font(MidnightMobileDesign.FontToken.caption)
                                     Spacer()
                                 }

@@ -38,6 +38,12 @@ enum MidnightMacDesign {
         static let tertiaryText = Color(nsColor: .tertiaryLabelColor)
         static let selection = Color(nsColor: .selectedContentBackgroundColor)
         static let inactiveSelection = Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+        /// Inset controls (e.g. the search field) sitting on the translucent
+        /// sidebar material. Label-relative tints darken the glass in light
+        /// mode and lighten it in dark mode instead of punching an opaque
+        /// `controlBackgroundColor` hole in it.
+        static let sidebarFieldFill = Color(nsColor: .labelColor).opacity(0.06)
+        static let sidebarFieldStroke = Color(nsColor: .separatorColor).opacity(0.6)
     }
 
     static func statusColor(_ status: TerminalConnectionStatus) -> Color {

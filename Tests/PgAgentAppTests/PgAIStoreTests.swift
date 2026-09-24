@@ -63,8 +63,7 @@ final class PgAIErrorExplainStoreTests: XCTestCase {
     }
 
     func testFailureMovesToFailed() async {
-        var fake = FakePgAIAssistant()
-        fake.thrownError = .boom
+        let fake = FakePgAIAssistant(thrownError: .boom)
         let store = PgAIErrorExplainStore(makeAssistant: { _, _ in fake })
 
         await store.explain(sql: "x", errorMessage: "y", connectionId: "c", defaultSchema: "public").value
@@ -105,8 +104,7 @@ final class PgAINLToSQLStoreTests: XCTestCase {
     }
 
     func testFailureMovesToFailed() async {
-        var fake = FakePgAIAssistant()
-        fake.thrownError = .boom
+        let fake = FakePgAIAssistant(thrownError: .boom)
         let store = PgAINLToSQLStore(makeAssistant: { _, _ in fake })
         store.naturalLanguage = "all users"
 
@@ -145,8 +143,7 @@ final class PgAIExplainStoreTests: XCTestCase {
     }
 
     func testFailureMovesToFailed() async {
-        var fake = FakePgAIAssistant()
-        fake.thrownError = .boom
+        let fake = FakePgAIAssistant(thrownError: .boom)
         let store = PgAIExplainStore(makeAssistant: { _, _ in fake })
         await store.explain(sql: "SELECT 1", resultSample: nil, title: "T", connectionId: "c", defaultSchema: "public").value
         guard case .failed = store.phase else {

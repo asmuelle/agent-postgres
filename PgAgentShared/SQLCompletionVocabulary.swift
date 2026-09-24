@@ -90,7 +90,10 @@ enum SQLCompletionVocabulary {
                 || scalar == "_" || scalar == "$"
             if !ok { return true }
         }
-        return keywordSet.contains(name.uppercased())
+        // The completion vocabulary lists common keywords only; the full
+        // reserved set (`user`, `window`, `analyse`, …) must be quoted too.
+        let upper = name.uppercased()
+        return keywordSet.contains(upper) || pgReservedKeywords.contains(upper)
     }
 
     /// Identifier ready for insertion into SQL — quoted iff needed.

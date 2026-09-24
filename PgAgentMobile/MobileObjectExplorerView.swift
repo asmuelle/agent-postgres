@@ -24,6 +24,9 @@ struct MobileObjectExplorerView: View {
     
     // Tree Expansion States
     @State private var expandedServers: Set<String> = [] // profile.id
+    /// One lease per expanded server, released exactly once on collapse.
+    @State private var serverLeases: [String: PostgresConnectionLease] = [:]
+    @State private var connectionAcquireTasks: [String: Task<Void, Never>] = [:]
     @State private var expandedDatabasesGroup: Set<String> = [] // profile.id.databases
     @State private var expandedDatabases: Set<String> = [] // profile.id.databaseName
     @State private var expandedLanguagesGroup: Set<String> = [] // profile.id.databaseName.languages
@@ -53,7 +56,7 @@ struct MobileObjectExplorerView: View {
                 }
             }
         }
-        .onChange(of: selectedNodeId) { newValue in
+        .onChange(of: selectedNodeId) { _, newValue in
             if let id = newValue {
                 if let found = findNodeAcrossStores(id: id) {
                     selectedNode = found
@@ -65,9 +68,10 @@ struct MobileObjectExplorerView: View {
         .onDisappear {
             // Release every claim this sidebar holds so a torn-down explorer
             // never strands connections.
-            for id in expandedServers {
-                connectionManager.release(profileId: id)
-            }
+            connectionAcquireTasks.values.forEach { $0.cancel() }
+            connectionAcquireTasks.removeAll()
+            serverLeases.values.forEach { connectionManager.release($0) }
+            serverLeases.removeAll()
             expandedServers.removeAll()
         }
     }
@@ -181,13 +185,19 @@ struct MobileObjectExplorerView: View {
     /// Idempotent per expansion state so it can't double-acquire/double-release.
     private func setServerExpanded(_ profile: PostgresProfile, expanded: Bool) {
         if expanded {
-            guard !expandedServers.contains(profile.id) else { return }
-            expandedServers.insert(profile.id)
-            Task { await connectionManager.acquire(profile: profile) }
+            guard expandedServers.insert(profile.id).inserted else { return }
+            // Claim synchronously so the collapse below always has exactly
+            // this claim to release, however far the connect got.
+            serverLeases[profile.id] = connectionManager.claim(profile: profile)
+            connectionAcquireTasks[profile.id] = Task { @MainActor in
+                await connectionManager.connectIfNeeded(profile: profile)
+            }
         } else {
-            guard expandedServers.contains(profile.id) else { return }
-            expandedServers.remove(profile.id)
-            connectionManager.release(profileId: profile.id)
+            guard expandedServers.remove(profile.id) != nil else { return }
+            connectionAcquireTasks.removeValue(forKey: profile.id)?.cancel()
+            if let lease = serverLeases.removeValue(forKey: profile.id) {
+                connectionManager.release(lease)
+            }
         }
     }
 
@@ -371,7 +381,7 @@ struct MobileObjectExplorerView: View {
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
                             .background(envColor.opacity(0.12))
-                            .cornerRadius(4)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 4)
                                     .stroke(envColor.opacity(0.25), lineWidth: 0.5)
@@ -479,7 +489,7 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func databaseNodeRow(profile: PostgresProfile, store: PgSchemaStore, databaseNode: PgSchemaNode) -> some View {
-        let dbKey = "\(profile.id).\(databaseNode.name)"
+        let dbKey = PgCompositeKey.make(profile.id, databaseNode.name)
         let isExpanded = expandedDatabases.contains(dbKey)
         let isSelected = selectedNodeId == databaseNode.id
         
@@ -537,7 +547,7 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func languagesNodeGroup(profile: PostgresProfile, store: PgSchemaStore, database: String) -> some View {
-        let key = "\(profile.id).\(database).languages"
+        let key = PgCompositeKey.make(profile.id, database, "languages")
         let isExpanded = expandedLanguagesGroup.contains(key)
         
         VStack(alignment: .leading, spacing: 2) {
@@ -634,7 +644,7 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func schemasNodeGroup(profile: PostgresProfile, store: PgSchemaStore, database: String) -> some View {
-        let key = "\(profile.id).\(database).schemas"
+        let key = PgCompositeKey.make(profile.id, database, "schemas")
         let isExpanded = expandedSchemasGroup.contains(key)
         
         VStack(alignment: .leading, spacing: 2) {
@@ -701,8 +711,8 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func schemaNodeRow(profile: PostgresProfile, store: PgSchemaStore, database: String, schemaNode: PgSchemaNode) -> some View {
-        let key = "\(database).\(schemaNode.name)"
-        let fullKey = "\(profile.id).\(database).\(schemaNode.name)"
+        let key = PgCompositeKey.schema(database: database, schema: schemaNode.name)
+        let fullKey = PgCompositeKey.make(profile.id, database, schemaNode.name)
         let isExpanded = expandedSchemas.contains(fullKey)
         let isSelected = selectedNodeId == schemaNode.id
         
@@ -744,7 +754,7 @@ struct MobileObjectExplorerView: View {
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
                             .background(Color.white.opacity(0.08))
-                            .cornerRadius(3)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer()
                 }
@@ -767,7 +777,7 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func schemaContentsView(profile: PostgresProfile, store: PgSchemaStore, database: String, schema: String) -> some View {
-        let key = "\(database).\(schema)"
+        let key = PgCompositeKey.schema(database: database, schema: schema)
         switch store.schemaContentsState[key] ?? .idle {
         case .idle, .loading:
             ProgressView().controlSize(.small).padding(.leading, 32)
@@ -797,7 +807,7 @@ struct MobileObjectExplorerView: View {
     ) -> some View {
         let nodes = bundle.nodes(for: category)
         let count = bundle.count(for: category)
-        let key = "\(profile.id).\(bundle.database).\(bundle.schema).\(category.rawValue)"
+        let key = PgCompositeKey.make(profile.id, bundle.database, bundle.schema, category.rawValue)
         let isExpanded = expandedCategories.contains(key)
         
         VStack(alignment: .leading, spacing: 2) {
@@ -888,7 +898,7 @@ struct MobileObjectExplorerView: View {
                     onOpenNodeTab(profile, node, ["kind": "sequence", "schema": parsed.schema, "name": parsed.name])
                 }
             }
-        case .routine(let rkind, let signature, let returnType):
+        case .routine(let rkind, let signature, _):
             Button {
                 selectedNodeId = node.id
                 onOpenNodeTab(profile, node, ["kind": "properties"])
@@ -963,8 +973,8 @@ struct MobileObjectExplorerView: View {
         isSelected: Bool,
         isConnectedDb: Bool
     ) -> some View {
-        let key = "\(database).\(schema).\(relNode.name)"
-        let fullKey = "\(profile.id).\(database).\(schema).\(relNode.name)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: relNode.name)
+        let fullKey = PgCompositeKey.make(profile.id, database, schema, relNode.name)
         let isExpanded = expandedRelations.contains(fullKey)
         let symbol: String = {
             if case .relation(let kind) = relNode.kind { return kind.sfSymbol }
@@ -979,17 +989,23 @@ struct MobileObjectExplorerView: View {
                     } else {
                         expandedRelations.insert(fullKey)
                         selectedNodeId = relNode.id
-                        Task {
-                            if store.columnsState[key] == nil || store.columnsState[key]?.isLoaded == false {
-                                await store.loadColumns(database: database, schema: schema, table: relNode.name)
-                            }
-                            if store.metaState[key] == nil || store.metaState[key]?.isLoaded == false {
-                                await store.loadMeta(database: database, schema: schema, table: relNode.name)
+                        // Column / key introspection always runs against the
+                        // connected database — for any other database it
+                        // would describe a same-named table from the wrong
+                        // one, so don't load it at all.
+                        if isConnectedDb {
+                            Task {
+                                if store.columnsState[key] == nil || store.columnsState[key]?.isLoaded == false {
+                                    await store.loadColumns(database: database, schema: schema, table: relNode.name)
+                                }
+                                if store.metaState[key] == nil || store.metaState[key]?.isLoaded == false {
+                                    await store.loadMeta(database: database, schema: schema, table: relNode.name)
+                                }
                             }
                         }
                     }
                 }
-                if isConnectedDb, let parsed = parseRelationId(relNode.id) {
+                if isConnectedDb, let parsed = parseNodeId(relNode) {
                     onOpenNodeTab(profile, relNode, ["kind": "relation", "schema": parsed.schema, "name": parsed.name])
                 }
             } label: {
@@ -1024,12 +1040,12 @@ struct MobileObjectExplorerView: View {
             }
             .buttonStyle(.plain)
             .onTapGesture(count: 2) {
-                if isConnectedDb, let parsed = parseRelationId(relNode.id) {
+                if isConnectedDb, let parsed = parseNodeId(relNode) {
                     onOpenNodeTab(profile, relNode, ["kind": "relation", "schema": parsed.schema, "name": parsed.name])
                 }
             }
             .contextMenu {
-                if isConnectedDb, let parsed = parseRelationId(relNode.id) {
+                if isConnectedDb, let parsed = parseNodeId(relNode) {
                     Button {
                         onOpenNodeTab(profile, relNode, ["kind": "relation", "schema": parsed.schema, "name": parsed.name])
                     } label: {
@@ -1039,8 +1055,15 @@ struct MobileObjectExplorerView: View {
             }
             
             if isExpanded {
-                relationChildrenMobileView(profile: profile, store: store, database: database, schema: schema, table: relNode.name)
-                    .padding(.leading, 24)
+                if isConnectedDb {
+                    relationChildrenMobileView(profile: profile, store: store, database: database, schema: schema, table: relNode.name)
+                        .padding(.leading, 24)
+                } else {
+                    Text("Connect to “\(database)” to browse its columns.")
+                        .font(MidnightMobileDesign.FontToken.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 24)
+                }
             }
         }
     }
@@ -1053,8 +1076,7 @@ struct MobileObjectExplorerView: View {
         schema: String,
         table: String
     ) -> some View {
-        let key = "\(database).\(schema).\(table)"
-        
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         VStack(alignment: .leading, spacing: 4) {
             // Columns Subgroup
             mobileMetaSection(tableKey: key, title: "Columns", state: store.columnsState[key] ?? .idle) { nodes in
@@ -1119,7 +1141,7 @@ struct MobileObjectExplorerView: View {
                                     Image(systemName: "key.fill")
                                         .foregroundStyle(.yellow)
                                         .font(.caption2)
-                                    Text(keyNode.name)
+                                    Text(keyNode.label)
                                         .font(MidnightMobileDesign.FontToken.caption)
                                         .foregroundStyle(isKeySelected ? MidnightColors.accentCyan : .primary)
                                     Spacer()
@@ -1147,7 +1169,7 @@ struct MobileObjectExplorerView: View {
                                     Image(systemName: "lock.shield")
                                         .foregroundStyle(.orange)
                                         .font(.caption2)
-                                    Text(constNode.name)
+                                    Text(constNode.label)
                                         .font(MidnightMobileDesign.FontToken.caption)
                                         .foregroundStyle(isConstSelected ? MidnightColors.accentCyan : .primary)
                                     Spacer()
@@ -1471,68 +1493,16 @@ struct MobileObjectExplorerView: View {
         return nil
     }
 
+    /// (database, schema, name) for the schema-content kinds, via the
+    /// shared escape-aware `PgNodeID` parser.
     private func parseNodeId(_ node: PgSchemaNode) -> (database: String, schema: String, name: String)? {
         switch node.kind {
-        case .relation: return parseRelationId(node.id)
-        case .sequence: return parseSequenceId(node.id)
-        case .routine: return parseRoutineId(node.id)
-        case .objectType: return parseObjectTypeId(node.id)
-        default: return nil
+        case .relation, .sequence, .routine, .objectType:
+            guard let t = PgNodeID.target(for: node) else { return nil }
+            return (t.database, t.schema, t.name)
+        default:
+            return nil
         }
-    }
-
-    private func parseRelationId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "rel:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    private func parseSequenceId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "seq:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    private func parseRoutineId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "fn:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let parenStart = afterDb.firstIndex(of: "(") else { return nil }
-        let nameAndSchema = String(afterDb[afterDb.startIndex..<parenStart])
-        guard let lastDot = nameAndSchema.lastIndex(of: ".") else { return nil }
-        let schema = String(nameAndSchema[nameAndSchema.startIndex..<lastDot])
-        let name = String(nameAndSchema[nameAndSchema.index(after: lastDot)...])
-        return (database, schema, name)
-    }
-
-    private func parseObjectTypeId(_ id: String) -> (database: String, schema: String, name: String)? {
-        let prefix = "type:"
-        guard id.hasPrefix(prefix) else { return nil }
-        let rest = String(id.dropFirst(prefix.count))
-        guard let firstDot = rest.firstIndex(of: ".") else { return nil }
-        let database = String(rest[rest.startIndex..<firstDot])
-        let afterDb = String(rest[rest.index(after: firstDot)...])
-        guard let lastDot = afterDb.lastIndex(of: ".") else { return nil }
-        let schema = String(afterDb[afterDb.startIndex..<lastDot])
-        let name = String(afterDb[afterDb.index(after: lastDot)...])
-        return (database, schema, name)
     }
 
     private func formatRowCount(_ rows: Float) -> String {

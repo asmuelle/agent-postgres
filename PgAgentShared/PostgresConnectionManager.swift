@@ -5,6 +5,13 @@ import SwiftUI
 import PgAgentMacOS
 #endif
 
+/// One consumer's claim on a profile's connection, returned by
+/// `PostgresConnectionManager.claim`. Release it exactly once.
+struct PostgresConnectionLease: Hashable, Sendable {
+    let profileId: String
+    fileprivate let serial: UInt64
+}
+
 // =============================================================================
 // PostgresConnectionManager — centralized singleton for live connection IDs
 // and PgSchemaStore caches across all PostgresProfiles in the application.
@@ -24,7 +31,12 @@ final class PostgresConnectionManager: ObservableObject {
     /// visible). The pool is closed automatically when the last consumer
     /// releases, so a profile's connection lives exactly as long as some UI
     /// shows it — the fix for connections that were previously never freed.
-    private var refCounts: [String: Int] = [:]
+    ///
+    /// Each claim is a lease (`claim`/`release(_:)`), releasable exactly once,
+    /// so a stray or duplicate release can never drop another consumer's claim.
+    private var outstandingLeases: [UInt64: String] = [:]   // serial -> profile id
+    private var leaseCounts: [String: Int] = [:]
+    private var nextLeaseSerial: UInt64 = 0
 
     /// Generation tokens invalidate in-flight connects when a profile is
     /// disconnected, deleted, or reconfigured.
@@ -34,40 +46,60 @@ final class PostgresConnectionManager: ObservableObject {
 
     // MARK: - Reference-counted ownership
 
-    /// Register a consumer that needs `profile` connected while it is visible,
-    /// connecting if this is the first consumer. Balance every call with
-    /// exactly one `release(profileId:)` when the consumer goes away.
-    func acquire(profile: PostgresProfile) async {
-        guard !Task.isCancelled else { return }
-        refCounts[profile.id, default: 0] += 1
-        await connectIfNeeded(profile: profile)
+    /// Register a claim on `profile` without connecting. Synchronous, so a
+    /// caller can pair it with `release(_:)` before its first suspension point
+    /// (`let lease = claim(...); defer { release(lease) }`).
+    func claim(profile: PostgresProfile) -> PostgresConnectionLease {
+        nextLeaseSerial &+= 1
+        let lease = PostgresConnectionLease(profileId: profile.id, serial: nextLeaseSerial)
+        outstandingLeases[lease.serial] = profile.id
+        leaseCounts[profile.id, default: 0] += 1
+        return lease
     }
 
-    /// Drop a consumer's claim; closes the pool once the last consumer is gone.
-    /// Safe to call for a profile with no outstanding claim (no-op).
-    func release(profileId: String) {
-        guard let count = refCounts[profileId] else { return }
-        if count <= 1 {
-            refCounts.removeValue(forKey: profileId)
-            Task { @MainActor [weak self] in
-                await self?.disconnectIfUnused(profileId: profileId)
-            }
-        } else {
-            refCounts[profileId] = count - 1
+    /// Drop a lease's claim; closes the pool once the last consumer is gone.
+    /// Releasing a lease twice, or one invalidated by `forget`/`disconnectAll`,
+    /// is a no-op.
+    func release(_ lease: PostgresConnectionLease) {
+        guard outstandingLeases.removeValue(forKey: lease.serial) != nil else { return }
+        leaseCounts[lease.profileId] = decremented(leaseCounts[lease.profileId])
+        disconnectIfLastClaimDropped(profileId: lease.profileId)
+    }
+
+    /// Number of outstanding claims (diagnostics / tests).
+    func claimCount(profileId: String) -> Int {
+        leaseCounts[profileId] ?? 0
+    }
+
+    private func decremented(_ count: Int?) -> Int? {
+        guard let count, count > 1 else { return nil }
+        return count - 1
+    }
+
+    private func disconnectIfLastClaimDropped(profileId: String) {
+        guard claimCount(profileId: profileId) == 0 else { return }
+        Task { @MainActor [weak self] in
+            await self?.disconnectIfUnused(profileId: profileId)
         }
+    }
+
+    private func clearClaims(profileId: String) {
+        leaseCounts.removeValue(forKey: profileId)
+        outstandingLeases = outstandingLeases.filter { $0.value != profileId }
     }
 
     /// Forget a profile completely. Unlike a manual disconnect, this clears
     /// outstanding claims so a deleted id cannot reconnect later.
     func forget(profileId: String) async {
-        refCounts.removeValue(forKey: profileId)
+        clearClaims(profileId: profileId)
         await disconnect(profileId: profileId)
     }
 
     /// Close every open connection (e.g. an explicit "disconnect all", app
     /// teardown). Clears consumer claims too.
     func disconnectAll() async {
-        refCounts.removeAll()
+        leaseCounts.removeAll()
+        outstandingLeases.removeAll()
         let profileIds = Set(activeConnections.keys).union(isConnecting.keys)
         for profileId in profileIds {
             await disconnect(profileId: profileId)
@@ -89,7 +121,7 @@ final class PostgresConnectionManager: ObservableObject {
             }
             activeConnections[profile.id] = id
             
-            let store = PgSchemaStore(connectionId: id)
+            let store = PgSchemaStore(connectionId: id, connectedDatabase: profile.database)
             schemaStores[profile.id] = store
             
             // Forward change events from the schema store so views observing the connection manager
@@ -115,7 +147,7 @@ final class PostgresConnectionManager: ObservableObject {
                 return
             }
 
-            await PostgresProfileStore.shared.markConnected(profile)
+            PostgresProfileStore.shared.markConnected(profile)
             PostgresConnectionStatusStore.shared.markConnected(profileId: profile.id)
         } catch let err as PostgresBridgeError {
             guard isCurrent(profileId: profile.id, generation: generation) else { return }
@@ -143,7 +175,7 @@ final class PostgresConnectionManager: ObservableObject {
         // manual "Disconnect" button while the workspace is still on screen
         // leaves its claim intact, so a later Connect → navigate-away still
         // balances to a single release. Claims are owned solely by
-        // acquire/release/disconnectAll.
+        // claim/release/forget/disconnectAll.
         storeSubscriptions.removeValue(forKey: profileId)
         schemaStores.removeValue(forKey: profileId)
 
@@ -165,7 +197,7 @@ final class PostgresConnectionManager: ObservableObject {
     func reconnectIfNeeded(profile: PostgresProfile) async {
         let shouldReconnect = activeConnections[profile.id] != nil
             || isConnecting[profile.id] == true
-            || refCounts[profile.id] != nil
+            || claimCount(profileId: profile.id) > 0
         guard shouldReconnect else { return }
         let expectedGeneration = (connectionGenerations[profile.id] ?? 0) &+ 1
         await disconnect(profileId: profile.id)
@@ -176,7 +208,7 @@ final class PostgresConnectionManager: ObservableObject {
     }
 
     private func disconnectIfUnused(profileId: String) async {
-        guard refCounts[profileId] == nil else { return }
+        guard claimCount(profileId: profileId) == 0 else { return }
         await disconnect(profileId: profileId)
     }
 

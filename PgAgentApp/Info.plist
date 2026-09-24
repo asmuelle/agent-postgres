@@ -44,7 +44,7 @@
     <key>MSSHLicenseP256PublicKey</key>
     <string></string>
     <key>SUFeedURL</key>
-    <string>https://github.com/asmuelle/mc-ssh/releases/latest/download/appcast.xml</string>
+    <string>https://github.com/asmuelle/agent-postgres/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string></string>
     <key>SUEnableAutomaticChecks</key>

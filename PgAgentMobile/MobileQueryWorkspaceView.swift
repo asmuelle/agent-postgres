@@ -497,22 +497,41 @@ struct MobileQueryWorkspaceView: View {
               let cursorId = result.cursorId else { return }
         
         store.setLoadingMore(true, forTab: tab.id)
+        let storeRef = store
         let tabId = tab.id
         let sessionId = tab.id.uuidString
-        
-        Task { @MainActor in
+        let pageSize = store.pageSize
+        // The page belongs to this exact result: a re-run while the fetch is
+        // in flight replaces the result (and cancels this task), and the
+        // store drops a page or error whose cursor/generation moved on.
+        let resultGeneration = tab.resultGeneration
+
+        let task = Task { @MainActor in
             do {
                 let page = try await BridgeManager.shared.pgFetchPage(
                     connectionId: connId,
                     sessionId: sessionId,
                     cursorId: cursorId,
-                    count: store.pageSize
+                    count: pageSize
                 )
-                store.appendPage(page, forTab: tabId)
+                guard !Task.isCancelled else { return }
+                storeRef.appendPage(
+                    page,
+                    cursorId: cursorId,
+                    resultGeneration: resultGeneration,
+                    forTab: tabId
+                )
             } catch {
-                store.setPaginationError(error.localizedDescription, forTab: tabId)
+                guard !Task.isCancelled else { return }
+                storeRef.setPaginationError(
+                    error.localizedDescription,
+                    cursorId: cursorId,
+                    resultGeneration: resultGeneration,
+                    forTab: tabId
+                )
             }
         }
+        store.setLoadMoreTask(task, forTab: tabId)
     }
 }
 

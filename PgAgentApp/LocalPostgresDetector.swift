@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import os
 
 /// First-run helper (roadmap 2.1): detect a locally running PostgreSQL by
 /// probing 127.0.0.1:5432 with a bare TCP connect — no SQL, no handshake,
@@ -23,14 +24,15 @@ enum LocalPostgresDetector {
             )
             // NWConnection fires state changes from its queue and the
             // timeout fires from another — guard the single-shot resume.
-            let resumeLock = NSLock()
-            var resumed = false
-            func finish(_ result: Bool) {
-                resumeLock.lock()
-                let shouldResume = !resumed
-                resumed = true
-                resumeLock.unlock()
-                guard shouldResume else { return }
+            // A Sendable lock-protected flag, not a captured `var`, so the
+            // concurrently-run closures below are data-race free.
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            let finish: @Sendable (Bool) -> Void = { result in
+                let isFirst = resumed.withLock { alreadyResumed -> Bool in
+                    defer { alreadyResumed = true }
+                    return !alreadyResumed
+                }
+                guard isFirst else { return }
                 connection.cancel()
                 continuation.resume(returning: result)
             }

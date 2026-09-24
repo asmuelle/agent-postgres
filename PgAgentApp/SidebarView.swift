@@ -28,6 +28,13 @@ struct SidebarView: View {
     @State private var editingPostgresProfile: PostgresEditTarget?
     @State private var detailsExpanded = true
     @State private var connectionAcquireTasks: [String: Task<Void, Never>] = [:]
+    /// One connection claim per expanded server, released exactly once on
+    /// collapse / disappear.
+    @State private var serverLeases: [String: PostgresConnectionLease] = [:]
+    /// Whether the sidebar column is shown. The split view keeps this view
+    /// mounted while the column is collapsed, so hiding it must release the
+    /// server claims explicitly — `onDisappear` alone no longer fires.
+    var isVisible: Bool = true
 
     // First-run local detection (roadmap 2.1): only probed while the
     // profile list is empty; a hit offers a one-click localhost profile.
@@ -106,7 +113,7 @@ struct SidebarView: View {
         .sheet(isPresented: $showLocalConfigImport) {
             PostgresLocalConfigImportView(store: postgresStore)
         }
-        .onChange(of: selectedNodeId) { newValue in
+        .onChangeCompat(of: selectedNodeId) { newValue in
             if let id = newValue {
                 if let found = findNodeAcrossStores(id: id) {
                     selectedNode = found
@@ -122,7 +129,7 @@ struct SidebarView: View {
                 }
             }
         }
-        .onChange(of: selectedPostgresProfileId) { newProfileId in
+        .onChangeCompat(of: selectedPostgresProfileId) { newProfileId in
             if let profileId = newProfileId {
                 activeConnectionId = PostgresConnectionManager.shared.activeConnections[profileId]
                 activeSchemaStore = PostgresConnectionManager.shared.schemaStores[profileId]
@@ -139,14 +146,20 @@ struct SidebarView: View {
                 }
             }
         }
-        .onDisappear {
-            connectionAcquireTasks.values.forEach { $0.cancel() }
-            connectionAcquireTasks.removeAll()
-            for profileId in expandedServers {
-                connectionManager.release(profileId: profileId)
-            }
-            expandedServers.removeAll()
+        .onChangeCompat(of: isVisible) { visible in
+            if !visible { releaseAllServers() }
         }
+        .onDisappear { releaseAllServers() }
+    }
+
+    /// Cancel pending connects, drop every server claim, and collapse the
+    /// servers so re-showing the sidebar starts from a clean tree.
+    private func releaseAllServers() {
+        connectionAcquireTasks.values.forEach { $0.cancel() }
+        connectionAcquireTasks.removeAll()
+        serverLeases.values.forEach { connectionManager.release($0) }
+        serverLeases.removeAll()
+        expandedServers.removeAll()
     }
 
     // MARK: - Connections Header
@@ -210,11 +223,11 @@ struct SidebarView: View {
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: MidnightMacDesign.Radius.small)
-                    .fill(MidnightMacDesign.ColorToken.controlBackground.opacity(0.8))
+                    .fill(MidnightMacDesign.ColorToken.sidebarFieldFill)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: MidnightMacDesign.Radius.small)
-                    .stroke(MidnightMacDesign.ColorToken.separator.opacity(0.4), lineWidth: 1)
+                    .stroke(MidnightMacDesign.ColorToken.sidebarFieldStroke, lineWidth: 1)
             )
         }
         .padding(.horizontal, 12)
@@ -236,7 +249,7 @@ struct SidebarView: View {
                     let pgMatches = filteredPostgresProfiles()
                     if pgMatches.isEmpty {
                         Text("No matches")
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(Color.secondary)
                             .font(MidnightMacDesign.FontToken.caption)
                     } else {
                         // `id: \.self`, not the String `profile.id`: see
@@ -358,13 +371,18 @@ struct SidebarView: View {
     private func setServerExpanded(_ profile: PostgresProfile, expanded: Bool) {
         if expanded {
             guard expandedServers.insert(profile.id).inserted else { return }
+            // Claim synchronously so the collapse below always has exactly
+            // this claim to release, however far the connect got.
+            serverLeases[profile.id] = connectionManager.claim(profile: profile)
             connectionAcquireTasks[profile.id] = Task { @MainActor in
-                await connectionManager.acquire(profile: profile)
+                await connectionManager.connectIfNeeded(profile: profile)
             }
         } else {
             guard expandedServers.remove(profile.id) != nil else { return }
             connectionAcquireTasks.removeValue(forKey: profile.id)?.cancel()
-            connectionManager.release(profileId: profile.id)
+            if let lease = serverLeases.removeValue(forKey: profile.id) {
+                connectionManager.release(lease)
+            }
         }
     }
 

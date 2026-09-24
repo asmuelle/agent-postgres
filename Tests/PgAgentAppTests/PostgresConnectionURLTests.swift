@@ -177,7 +177,8 @@ final class PostgresConnectionURLTests: XCTestCase {
         XCTAssertEqual(profile.user, "alice")
         XCTAssertEqual(profile.tls, .verifyFull)
         XCTAssertEqual(profile.auth, .keychain, "password is staged for the keychain, not the profile")
-        XCTAssertEqual(profile.keychainAccount, "alice@db.example.com:5432/appdb")
+        XCTAssertEqual(profile.endpointIdentity, "alice@db.example.com:5432/appdb")
+        XCTAssertEqual(profile.keychainAccount, "pgprofile:\(profile.id)")
 
         // Belt and braces: the encoded profile must not contain the secret.
         let encoded = try JSONEncoder().encode(profile)

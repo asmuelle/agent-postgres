@@ -13,14 +13,14 @@ options:
   deploymentTarget:
     macOS: "13.0"
     iOS: "17.0"
-  xcodeVersion: "15.0"
+  xcodeVersion: "26.0"
   postGenCommand: |
     # After project generation, copy the Rust library to a known location
     # that Xcode's linker can find without extra search paths.
 
 settings:
   base:
-    SWIFT_VERSION: "5.9"
+    SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     DEVELOPMENT_TEAM: "9QFT5JP875"
@@ -91,22 +91,31 @@ targets:
         com.apple.security.application-groups:
           - group.com.pgagent.pgagent
         # CloudKit alert relay (roadmap 1.1): the Mac hub writes FleetAlert
-        # records to the user's private database. CloudKit works with
-        # Developer ID signing; unsigned/ad-hoc local builds simply surface
-        # "iCloud unavailable" in the hub UI at runtime (CI builds with
-        # CODE_SIGNING_ALLOWED=NO are unaffected at compile time).
+        # records to the user's private database. iCloud + push are
+        # *restricted* entitlements: a Developer ID build only launches if
+        # it embeds a provisioning profile (Developer ID type, with the
+        # iCloud container + Push capability) that authorizes them —
+        # without one AMFI kills the app at launch. `just mac-build-signed`
+        # therefore requires APPLE_PROVISIONING_PROFILE_SPECIFIER.
+        # `mac-build-dev` gets a development profile via automatic signing;
+        # CI builds (CODE_SIGNING_ALLOWED=NO) don't sign at all.
         com.apple.developer.icloud-services:
           - CloudKit
         com.apple.developer.icloud-container-identifiers:
           - iCloud.com.pgagent.pgagent
-        com.apple.developer.aps-environment: development
+        # Build-setting driven (see PGAGENT_APS_ENVIRONMENT below): Xcode
+        # expands $(…) when it processes the entitlements, so Debug signs
+        # with `development` and Release with `production`.
+        com.apple.developer.aps-environment: $(PGAGENT_APS_ENVIRONMENT)
         # `keychain-access-groups` requires a provisioning profile (Apple
-        # ties access groups to a Team ID), so it can't coexist with
-        # ad-hoc signing. Keychain APIs still work via the implicit
-        # per-bundle access group. Re-add this when switching to
-        # Developer ID for distribution.
-        # keychain-access-groups:
-        #   - $(AppIdentifierPrefix)com.pgagent.macos
+        # ties access groups to a Team ID) — like the iCloud entitlements
+        # above. The app's own group must stay first (device-local items
+        # default to it); `com.pgagent.shared` carries iCloud-synced
+        # passwords between the Mac and iOS apps. Unsigned CI builds fall
+        # back to the implicit per-bundle group at runtime.
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.pgagent.macos
+          - $(AppIdentifierPrefix)com.pgagent.shared
     settings:
       base:
         INFOPLIST_FILE: PgAgentApp/Info.plist
@@ -153,6 +162,15 @@ targets:
           - FoundationModels
           - -lxml2
           - -lz
+      configs:
+        Debug:
+          PGAGENT_APS_ENVIRONMENT: development
+        Release:
+          PGAGENT_APS_ENVIRONMENT: production
+          # Developer ID distribution profile, supplied by
+          # `just mac-build-signed` (APPLE_PROVISIONING_PROFILE_SPECIFIER).
+          # Empty for every other build, which leaves signing untouched.
+          PROVISIONING_PROFILE_SPECIFIER: $(PGAGENT_APP_PROFILE_SPECIFIER)
     preBuildScripts:
       - name: "Build Rust Library"
         script: |
@@ -189,6 +207,7 @@ targets:
       properties:
         keychain-access-groups:
           - $(AppIdentifierPrefix)com.pgagent.mobile
+          - $(AppIdentifierPrefix)com.pgagent.shared
         com.apple.security.application-groups:
           - group.com.pgagent.pgagent
         # CloudKit alert relay (roadmap 1.1): subscription-driven pushes from
@@ -300,6 +319,11 @@ targets:
         CODE_SIGN_ENTITLEMENTS: PgAgentWidgets/PgAgentWidgets.entitlements
         APPLICATION_EXTENSION_API_ONLY: true
         SKIP_INSTALL: YES
+      configs:
+        Release:
+          # Optional widget profile (APPLE_WIDGET_PROVISIONING_PROFILE_SPECIFIER
+          # in `just mac-build-signed`); authorizes the App Group on macOS 15+.
+          PROVISIONING_PROFILE_SPECIFIER: $(PGAGENT_WIDGET_PROFILE_SPECIFIER)
     scheme: {}
 
   PgAgentMacOS:
@@ -330,6 +354,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.tests
+        # Xcode 26+'s XCTest is built for macOS 14; test bundles never ship,
+        # so they deploy at 14 to avoid ld's "built for newer version" warning.
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
         PRODUCT_NAME: PgAgentMacOSTests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: ""
@@ -349,6 +376,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.app-tests
+        # Xcode 26+'s XCTest is built for macOS 14; test bundles never ship,
+        # so they deploy at 14 to avoid ld's "built for newer version" warning.
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
         PRODUCT_NAME: PgAgentAppTests
         GENERATE_INFOPLIST_FILE: YES
         # The app's PRODUCT_NAME is "pgAgent" (with a dash) which doesn't

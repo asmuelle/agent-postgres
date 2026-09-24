@@ -182,6 +182,14 @@ private struct InstanceHealthCard: View {
                         .lineLimit(2)
                 } else {
                     metricsRow
+                    // Reachable but the posture probe failed (commonly missing
+                    // pg_monitor privileges): say why metrics are missing.
+                    if health.metrics == nil, let problem = health.errorMessage {
+                        Text(problem)
+                            .font(MidnightMobileDesign.FontToken.caption)
+                            .foregroundStyle(.orange)
+                            .lineLimit(2)
+                    }
                 }
             }
 
