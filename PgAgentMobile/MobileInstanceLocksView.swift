@@ -71,8 +71,9 @@ struct MobileInstanceLocksView: View {
             }
         }
         .task {
-            await connectionManager.acquire(profile: profile)
-            defer { connectionManager.release(profileId: profile.id) }
+            let lease = connectionManager.claim(profile: profile)
+            defer { connectionManager.release(lease) }
+            await connectionManager.connectIfNeeded(profile: profile)
             while !Task.isCancelled {
                 // Pause the auto-poll while verification owns the refresh
                 // cadence, so the banner verdict reflects its own re-polls.

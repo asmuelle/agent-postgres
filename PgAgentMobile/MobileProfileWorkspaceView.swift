@@ -126,11 +126,15 @@ struct MobileProfileWorkspaceView: View {
         // Hold a connection claim while this workspace is on screen and release
         // it when it goes away, so navigating off / switching profiles frees
         // the pool once nothing else (e.g. the sidebar) still needs it.
-        .task {
-            await connectionManager.acquire(profile: profile)
-        }
-        .onDisappear {
-            connectionManager.release(profileId: profile.id)
+        .task(id: profile.id) {
+            // Claim before the first suspension so the release always pairs
+            // with it, even when the task is cancelled mid-connect.
+            let lease = connectionManager.claim(profile: profile)
+            defer { connectionManager.release(lease) }
+            await connectionManager.connectIfNeeded(profile: profile)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3600))
+            }
         }
     }
 

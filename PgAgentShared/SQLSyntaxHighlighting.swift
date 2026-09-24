@@ -104,3 +104,28 @@ enum SQLSyntaxHighlighting {
         }
     }
 }
+
+extension SQLSyntaxHighlighting {
+    /// UTF-16 range of the identifier-ish run starting at `codePointOffset`
+    /// (0-based, counted in Unicode scalars — code points, as Postgres
+    /// reports positions), guaranteed non-empty. A position one past the
+    /// end (e.g. `SELECT 1 +`) underlines the last code point rather than
+    /// vanishing. Scanning scalars keeps a CRLF (one Character, two code
+    /// points) or an emoji sequence before the error from shifting it.
+    /// Shared by the macOS and iOS editors' error underline.
+    static func errorWordRange(in text: String, codePointOffset: Int) -> NSRange? {
+        let scalars = text.unicodeScalars
+        let count = scalars.count
+        guard count > 0, codePointOffset >= 0, codePointOffset <= count else { return nil }
+        let start = scalars.index(scalars.startIndex, offsetBy: min(codePointOffset, count - 1))
+        var end = start
+        while end < scalars.endIndex {
+            let c = scalars[end]
+            guard c.properties.isAlphabetic || c.properties.numericType != nil || c == "_"
+            else { break }
+            end = scalars.index(after: end)
+        }
+        if end == start { end = scalars.index(after: start) }
+        return NSRange(start..<end, in: text)
+    }
+}

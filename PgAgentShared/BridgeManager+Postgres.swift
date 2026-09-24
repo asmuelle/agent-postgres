@@ -121,47 +121,48 @@ extension BridgeManager {
     func pgConnect(profile: PostgresProfile) async throws -> String {
         var config = profile.toFfiConfig()
 
-        #if os(iOS)
-        // The Rust core's keychain integration is macOS-only (it links the
-        // macOS Security framework); on iOS that path is a no-op stub that
-        // always reports "no keychain entry". The password actually lives in
-        // the native iOS Keychain, saved via `KeychainManager`. Resolve it
-        // here and pass it to the FFI as an explicit password so connecting
-        // never reaches the stub.
+        // Resolve `.keychain` passwords in Swift on both platforms and hand
+        // them to the FFI as an explicit password:
+        // - iOS: the Rust core's keychain is a macOS-only stub that always
+        //   reports "no keychain entry"; the password lives in the native
+        //   iOS Keychain.
+        // - macOS: the Rust keychain reads only the device-local item under
+        //   `keychainAccount`. It never sees iCloud-synced passwords
+        //   (`syncPassword` — a synchronizable data-protection item under a
+        //   different service) nor a legacy endpoint-scoped entry the
+        //   account migration hasn't copied yet.
+        // Wait for the one-time account migration first so a launch-time
+        // connect can't race the copy.
         if case .keychain = profile.auth {
-            let account = profile.keychainAccount
-            let stored = await MainActor.run {
-                KeychainManager.shared.loadPassword(kind: .postgresPassword, account: account)
-            }
-            guard let password = stored, !password.isEmpty else {
+            await PostgresProfileStore.shared.waitForKeychainMigration()
+            let stored = await KeychainManager.shared.loadPostgresPasswordAsync(for: profile)
+            if let password = stored, !password.isEmpty {
+                config.auth = .password(password: password)
+            } else {
+                #if os(iOS)
                 throw PostgresBridgeError.other(
                     "No saved password for \(profile.user)@\(profile.host). Edit the connection and re-enter it."
                 )
+                #endif
+                // macOS: leave `.keychain` so the core reports its usual
+                // missing-entry error.
             }
-            config.auth = .password(password: password)
         }
-        #endif
 
         // The profile stores either a saved SSH profile id (macOS) or an
         // inline SSH endpoint (iOS); the FFI needs the *live connection id*
         // the Rust manager holds. Resolve (auto-opening the SSH connection
         // with stored credentials if needed) and substitute before connecting.
-        #if os(macOS)
         // The tunnel use is counted *before* the Postgres connect is awaited,
         // so a concurrent disconnect of the tunnel's last other user can't
         // close the SSH connection underneath this connect.
         var tunnelLease: SSHTunnelResolver.TunnelLease?
-        #endif
         if let tunnel = profile.tunnel {
             let liveId: String
             do {
-                #if os(macOS)
                 let lease = try await SSHTunnelResolver.acquireTunnel(for: tunnel)
                 tunnelLease = lease
                 liveId = lease.liveConnectionId
-                #else
-                liveId = try await SSHTunnelResolver.liveConnectionId(for: tunnel)
-                #endif
             } catch {
                 throw PostgresBridgeError.tunnel(
                     (error as? LocalizedError)?.errorDescription
@@ -182,11 +183,9 @@ extension BridgeManager {
                 try rshellPgConnect(config: ffiConfig)
             }
         } catch {
-            #if os(macOS)
             if let tunnelLease {
                 await SSHTunnelResolver.cancelTunnelUse(tunnelLease)
             }
-            #endif
             throw Self.pgConnectError(error)
         }
 
@@ -200,17 +199,9 @@ extension BridgeManager {
         // Track this Postgres connection's use of the shared SSH tunnel so
         // the underlying SSH connection is reclaimed once the last Postgres
         // consumer of it disconnects (see pgDisconnect).
-        #if os(macOS)
         if let tunnelLease {
             await SSHTunnelResolver.bindTunnelUse(tunnelLease, pgConnectionId: connectionId)
         }
-        #else
-        if let tunnel = profile.tunnel {
-            await SSHTunnelResolver.registerTunnelUse(
-                pgConnectionId: connectionId, tunnel: tunnel
-            )
-        }
-        #endif
         do {
             try await validateMinimumServerVersion(connectionId: connectionId)
         } catch {

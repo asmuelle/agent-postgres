@@ -81,7 +81,7 @@ extension PgSchemaStore {
             guard case .loaded(let bundle) = state, bundle.database == database else { continue }
             for category in [PgCategoryKind.tables, .views, .materializedViews] {
                 for node in bundle.nodes(for: category) {
-                    let columnsKey = "\(database).\(bundle.schema).\(node.name)"
+                    let columnsKey = PgCompositeKey.table(database: database, schema: bundle.schema, table: node.name)
                     var columns: [String] = []
                     if case .loaded(let columnNodes) = columnsState[columnsKey] {
                         columns = columnNodes.map(\.name)
@@ -105,7 +105,7 @@ extension PgSchemaStore {
     /// statement references a relation whose columns aren't cached yet, so
     /// the *next* completion trigger has them.
     func requestColumnsIfIdle(database: String, schema: String, table: String) {
-        let key = "\(database).\(schema).\(table)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         switch columnsState[key] ?? .idle {
         case .idle:
             Task { await self.loadColumns(database: database, schema: schema, table: table) }

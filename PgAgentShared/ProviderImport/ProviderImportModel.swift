@@ -17,9 +17,10 @@ final class ProviderImportModel: ObservableObject {
     @Published var provider: PostgresProvider {
         didSet {
             guard provider != oldValue else { return }
-            token = ProviderTokenStore.load(provider) ?? ""
+            token = ""
             state = .idle
             selectedIds = []
+            loadStoredToken()
         }
     }
     @Published var token: String
@@ -36,8 +37,23 @@ final class ProviderImportModel: ObservableObject {
         }
     ) {
         self.provider = provider
-        self.token = ProviderTokenStore.load(provider) ?? ""
+        self.token = ""
         self.clientFactory = clientFactory
+        loadStoredToken()
+    }
+
+    private var tokenLoadTask: Task<Void, Never>?
+
+    /// Fill `token` from the keychain off the main thread. Dropped if the
+    /// provider changed meanwhile or the user already typed a token.
+    private func loadStoredToken() {
+        tokenLoadTask?.cancel()
+        let provider = provider
+        tokenLoadTask = Task { [weak self] in
+            let stored = await ProviderTokenStore.load(provider) ?? ""
+            guard let self, !Task.isCancelled, self.provider == provider, self.token.isEmpty else { return }
+            self.token = stored
+        }
     }
 
     var databases: [ProviderDatabase] {
@@ -71,7 +87,8 @@ final class ProviderImportModel: ObservableObject {
             state = .failed(ProviderImportError.emptyToken.localizedDescription)
             return
         }
-        ProviderTokenStore.save(provider, token: trimmed)
+        tokenLoadTask?.cancel()
+        await ProviderTokenStore.save(provider, token: trimmed)
         state = .loading
         selectedIds = []
         do {
@@ -86,8 +103,8 @@ final class ProviderImportModel: ObservableObject {
     }
 
     /// Import the current selection; returns a human-readable summary.
-    func importSelection(into store: PostgresProfileStore) -> String {
-        let result = ProviderProfileImporter.importDatabases(selectedDatabases, into: store)
+    func importSelection(into store: PostgresProfileStore) async -> String {
+        let result = await ProviderProfileImporter.importDatabases(selectedDatabases, into: store)
         var parts = ["Imported \(result.importedCount)."]
         if result.skippedExistingCount > 0 {
             parts.append("\(result.skippedExistingCount) already existed.")

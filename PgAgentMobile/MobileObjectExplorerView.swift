@@ -24,6 +24,9 @@ struct MobileObjectExplorerView: View {
     
     // Tree Expansion States
     @State private var expandedServers: Set<String> = [] // profile.id
+    /// One lease per expanded server, released exactly once on collapse.
+    @State private var serverLeases: [String: PostgresConnectionLease] = [:]
+    @State private var connectionAcquireTasks: [String: Task<Void, Never>] = [:]
     @State private var expandedDatabasesGroup: Set<String> = [] // profile.id.databases
     @State private var expandedDatabases: Set<String> = [] // profile.id.databaseName
     @State private var expandedLanguagesGroup: Set<String> = [] // profile.id.databaseName.languages
@@ -65,9 +68,10 @@ struct MobileObjectExplorerView: View {
         .onDisappear {
             // Release every claim this sidebar holds so a torn-down explorer
             // never strands connections.
-            for id in expandedServers {
-                connectionManager.release(profileId: id)
-            }
+            connectionAcquireTasks.values.forEach { $0.cancel() }
+            connectionAcquireTasks.removeAll()
+            serverLeases.values.forEach { connectionManager.release($0) }
+            serverLeases.removeAll()
             expandedServers.removeAll()
         }
     }
@@ -181,13 +185,19 @@ struct MobileObjectExplorerView: View {
     /// Idempotent per expansion state so it can't double-acquire/double-release.
     private func setServerExpanded(_ profile: PostgresProfile, expanded: Bool) {
         if expanded {
-            guard !expandedServers.contains(profile.id) else { return }
-            expandedServers.insert(profile.id)
-            Task { await connectionManager.acquire(profile: profile) }
+            guard expandedServers.insert(profile.id).inserted else { return }
+            // Claim synchronously so the collapse below always has exactly
+            // this claim to release, however far the connect got.
+            serverLeases[profile.id] = connectionManager.claim(profile: profile)
+            connectionAcquireTasks[profile.id] = Task { @MainActor in
+                await connectionManager.connectIfNeeded(profile: profile)
+            }
         } else {
-            guard expandedServers.contains(profile.id) else { return }
-            expandedServers.remove(profile.id)
-            connectionManager.release(profileId: profile.id)
+            guard expandedServers.remove(profile.id) != nil else { return }
+            connectionAcquireTasks.removeValue(forKey: profile.id)?.cancel()
+            if let lease = serverLeases.removeValue(forKey: profile.id) {
+                connectionManager.release(lease)
+            }
         }
     }
 
@@ -479,7 +489,7 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func databaseNodeRow(profile: PostgresProfile, store: PgSchemaStore, databaseNode: PgSchemaNode) -> some View {
-        let dbKey = "\(profile.id).\(databaseNode.name)"
+        let dbKey = PgCompositeKey.make(profile.id, databaseNode.name)
         let isExpanded = expandedDatabases.contains(dbKey)
         let isSelected = selectedNodeId == databaseNode.id
         
@@ -537,7 +547,7 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func languagesNodeGroup(profile: PostgresProfile, store: PgSchemaStore, database: String) -> some View {
-        let key = "\(profile.id).\(database).languages"
+        let key = PgCompositeKey.make(profile.id, database, "languages")
         let isExpanded = expandedLanguagesGroup.contains(key)
         
         VStack(alignment: .leading, spacing: 2) {
@@ -634,7 +644,7 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func schemasNodeGroup(profile: PostgresProfile, store: PgSchemaStore, database: String) -> some View {
-        let key = "\(profile.id).\(database).schemas"
+        let key = PgCompositeKey.make(profile.id, database, "schemas")
         let isExpanded = expandedSchemasGroup.contains(key)
         
         VStack(alignment: .leading, spacing: 2) {
@@ -701,8 +711,8 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func schemaNodeRow(profile: PostgresProfile, store: PgSchemaStore, database: String, schemaNode: PgSchemaNode) -> some View {
-        let key = "\(database).\(schemaNode.name)"
-        let fullKey = "\(profile.id).\(database).\(schemaNode.name)"
+        let key = PgCompositeKey.schema(database: database, schema: schemaNode.name)
+        let fullKey = PgCompositeKey.make(profile.id, database, schemaNode.name)
         let isExpanded = expandedSchemas.contains(fullKey)
         let isSelected = selectedNodeId == schemaNode.id
         
@@ -767,7 +777,7 @@ struct MobileObjectExplorerView: View {
 
     @ViewBuilder
     private func schemaContentsView(profile: PostgresProfile, store: PgSchemaStore, database: String, schema: String) -> some View {
-        let key = "\(database).\(schema)"
+        let key = PgCompositeKey.schema(database: database, schema: schema)
         switch store.schemaContentsState[key] ?? .idle {
         case .idle, .loading:
             ProgressView().controlSize(.small).padding(.leading, 32)
@@ -797,7 +807,7 @@ struct MobileObjectExplorerView: View {
     ) -> some View {
         let nodes = bundle.nodes(for: category)
         let count = bundle.count(for: category)
-        let key = "\(profile.id).\(bundle.database).\(bundle.schema).\(category.rawValue)"
+        let key = PgCompositeKey.make(profile.id, bundle.database, bundle.schema, category.rawValue)
         let isExpanded = expandedCategories.contains(key)
         
         VStack(alignment: .leading, spacing: 2) {
@@ -963,8 +973,8 @@ struct MobileObjectExplorerView: View {
         isSelected: Bool,
         isConnectedDb: Bool
     ) -> some View {
-        let key = "\(database).\(schema).\(relNode.name)"
-        let fullKey = "\(profile.id).\(database).\(schema).\(relNode.name)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: relNode.name)
+        let fullKey = PgCompositeKey.make(profile.id, database, schema, relNode.name)
         let isExpanded = expandedRelations.contains(fullKey)
         let symbol: String = {
             if case .relation(let kind) = relNode.kind { return kind.sfSymbol }
@@ -1066,8 +1076,7 @@ struct MobileObjectExplorerView: View {
         schema: String,
         table: String
     ) -> some View {
-        let key = "\(database).\(schema).\(table)"
-        
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         VStack(alignment: .leading, spacing: 4) {
             // Columns Subgroup
             mobileMetaSection(tableKey: key, title: "Columns", state: store.columnsState[key] ?? .idle) { nodes in

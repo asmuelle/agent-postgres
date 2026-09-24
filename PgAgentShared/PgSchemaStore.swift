@@ -426,19 +426,19 @@ final class PgSchemaStore: ObservableObject {
     /// Schemas per database name.
     @Published private(set) var schemasState: [String: PgLoadState<[PgSchemaNode]>] = [:]
 
-    /// Schema contents per `"<database>.<schema>"` composite key.
+    /// Schema contents per `PgCompositeKey.schema(database:schema:)` key.
     /// Holds the six category arrays the tree groups by; loaded
     /// in one round-trip via `pgListSchemaContents`.
     @Published private(set) var schemaContentsState: [String: PgLoadState<PgSchemaContentsBundle>] = [:]
 
-    /// Columns per `"<database>.<schema>.<table_name>"` composite key.
+    /// Columns per `PgCompositeKey.table(database:schema:table:)` key.
     @Published private(set) var columnsState: [String: PgLoadState<[PgSchemaNode]>] = [:]
 
-    /// Constraints, keys, and triggers per `"<database>.<schema>.<table_name>"` composite key.
+    /// Constraints, keys, and triggers per `PgCompositeKey.table(database:schema:table:)` key.
     @Published private(set) var metaState: [String: PgLoadState<[PgSchemaNode]>] = [:]
 
     /// Resolved FK constraints (both directions) per
-    /// `"<database>.<schema>.<table_name>"` composite key. Backs the
+    /// `PgCompositeKey.table(database:schema:table:)` key. Backs the
     /// result grid's "Go to referenced row" navigation.
     @Published private(set) var foreignKeysState: [String: PgLoadState<PgTableForeignKeys>] = [:]
 
@@ -552,7 +552,7 @@ final class PgSchemaStore: ObservableObject {
     }
 
     func loadColumns(database: String, schema: String, table: String) async {
-        let key = "\(database).\(schema).\(table)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         if let message = foreignDatabaseError(database) {
             columnsState[key] = .failed(message)
             return
@@ -583,7 +583,7 @@ final class PgSchemaStore: ObservableObject {
     }
 
     func loadMeta(database: String, schema: String, table: String) async {
-        let key = "\(database).\(schema).\(table)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         if let message = foreignDatabaseError(database) {
             metaState[key] = .failed(message)
             return
@@ -696,7 +696,7 @@ final class PgSchemaStore: ObservableObject {
     /// Returns `nil` on failure — navigation simply doesn't light up.
     @discardableResult
     func loadForeignKeys(database: String, schema: String, table: String) async -> PgTableForeignKeys? {
-        let key = "\(database).\(schema).\(table)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         if let message = foreignDatabaseError(database) {
             foreignKeysState[key] = .failed(message)
             return nil
@@ -959,7 +959,7 @@ final class PgSchemaStore: ObservableObject {
     /// item without invalidating the entire database tree.
     func invalidate(database: String, schema: String) {
         schemaContentsState[relationKey(database: database, schema: schema)] = nil
-        let prefix = "\(database).\(schema)."
+        let prefix = PgCompositeKey.prefix(database, schema)
         foreignKeysState = foreignKeysState.filter { !$0.key.hasPrefix(prefix) }
     }
 
@@ -967,7 +967,7 @@ final class PgSchemaStore: ObservableObject {
     /// schemas' contents.
     func invalidate(database: String) {
         schemasState[database] = nil
-        let prefix = "\(database)."
+        let prefix = PgCompositeKey.prefix(database)
         schemaContentsState = schemaContentsState.filter { !$0.key.hasPrefix(prefix) }
         foreignKeysState = foreignKeysState.filter { !$0.key.hasPrefix(prefix) }
     }
@@ -975,6 +975,6 @@ final class PgSchemaStore: ObservableObject {
     // MARK: - Private
 
     private func relationKey(database: String, schema: String) -> String {
-        "\(database).\(schema)"
+        PgCompositeKey.schema(database: database, schema: schema)
     }
 }

@@ -6,7 +6,7 @@ import PgAgentMacOS
 #endif
 
 /// One consumer's claim on a profile's connection, returned by
-/// `PostgresConnectionManager.claim`/`acquire`. Release it exactly once.
+/// `PostgresConnectionManager.claim`. Release it exactly once.
 struct PostgresConnectionLease: Hashable, Sendable {
     let profileId: String
     fileprivate let serial: UInt64
@@ -32,12 +32,10 @@ final class PostgresConnectionManager: ObservableObject {
     /// releases, so a profile's connection lives exactly as long as some UI
     /// shows it — the fix for connections that were previously never freed.
     ///
-    /// Two kinds of claim, counted separately so neither can drop the other's:
-    /// - leases (`claim`/`release(_:)`): each releasable exactly once;
-    /// - legacy claims (`acquire`/`release(profileId:)`): anonymous counts.
+    /// Each claim is a lease (`claim`/`release(_:)`), releasable exactly once,
+    /// so a stray or duplicate release can never drop another consumer's claim.
     private var outstandingLeases: [UInt64: String] = [:]   // serial -> profile id
     private var leaseCounts: [String: Int] = [:]
-    private var legacyClaims: [String: Int] = [:]
     private var nextLeaseSerial: UInt64 = 0
 
     /// Generation tokens invalidate in-flight connects when a profile is
@@ -68,27 +66,9 @@ final class PostgresConnectionManager: ObservableObject {
         disconnectIfLastClaimDropped(profileId: lease.profileId)
     }
 
-    /// Legacy claim: register a consumer and connect if needed. The claim is
-    /// taken unconditionally (even from a cancelled task) so it always
-    /// balances with exactly one `release(profileId:)`. New code should use
-    /// `claim(profile:)` + `release(_:)`.
-    func acquire(profile: PostgresProfile) async {
-        legacyClaims[profile.id, default: 0] += 1
-        guard !Task.isCancelled else { return }
-        await connectIfNeeded(profile: profile)
-    }
-
-    /// Drop one legacy claim (never a lease); closes the pool once the last
-    /// consumer is gone. Safe to call with no outstanding claim (no-op).
-    func release(profileId: String) {
-        guard legacyClaims[profileId] != nil else { return }
-        legacyClaims[profileId] = decremented(legacyClaims[profileId])
-        disconnectIfLastClaimDropped(profileId: profileId)
-    }
-
-    /// Number of outstanding claims of both kinds (diagnostics / tests).
+    /// Number of outstanding claims (diagnostics / tests).
     func claimCount(profileId: String) -> Int {
-        (leaseCounts[profileId] ?? 0) + (legacyClaims[profileId] ?? 0)
+        leaseCounts[profileId] ?? 0
     }
 
     private func decremented(_ count: Int?) -> Int? {
@@ -104,7 +84,6 @@ final class PostgresConnectionManager: ObservableObject {
     }
 
     private func clearClaims(profileId: String) {
-        legacyClaims.removeValue(forKey: profileId)
         leaseCounts.removeValue(forKey: profileId)
         outstandingLeases = outstandingLeases.filter { $0.value != profileId }
     }
@@ -119,7 +98,6 @@ final class PostgresConnectionManager: ObservableObject {
     /// Close every open connection (e.g. an explicit "disconnect all", app
     /// teardown). Clears consumer claims too.
     func disconnectAll() async {
-        legacyClaims.removeAll()
         leaseCounts.removeAll()
         outstandingLeases.removeAll()
         let profileIds = Set(activeConnections.keys).union(isConnecting.keys)
@@ -143,7 +121,7 @@ final class PostgresConnectionManager: ObservableObject {
             }
             activeConnections[profile.id] = id
             
-            let store = PgSchemaStore(connectionId: id)
+            let store = PgSchemaStore(connectionId: id, connectedDatabase: profile.database)
             schemaStores[profile.id] = store
             
             // Forward change events from the schema store so views observing the connection manager
@@ -169,7 +147,7 @@ final class PostgresConnectionManager: ObservableObject {
                 return
             }
 
-            await PostgresProfileStore.shared.markConnected(profile)
+            PostgresProfileStore.shared.markConnected(profile)
             PostgresConnectionStatusStore.shared.markConnected(profileId: profile.id)
         } catch let err as PostgresBridgeError {
             guard isCurrent(profileId: profile.id, generation: generation) else { return }
@@ -197,7 +175,7 @@ final class PostgresConnectionManager: ObservableObject {
         // manual "Disconnect" button while the workspace is still on screen
         // leaves its claim intact, so a later Connect → navigate-away still
         // balances to a single release. Claims are owned solely by
-        // acquire/release/disconnectAll.
+        // claim/release/forget/disconnectAll.
         storeSubscriptions.removeValue(forKey: profileId)
         schemaStores.removeValue(forKey: profileId)
 

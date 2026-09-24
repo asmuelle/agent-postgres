@@ -175,8 +175,8 @@ extension SidebarView {
         schema: String,
         rel: PgSchemaNode
     ) -> some View {
-        let key = "\(database).\(schema).\(rel.name)"
-        let fullKey = "\(profile.id).\(database).\(schema).\(rel.name)"
+        let key = PgCompositeKey.table(database: database, schema: schema, table: rel.name)
+        let fullKey = PgCompositeKey.make(profile.id, database, schema, rel.name)
         let isExpanded = expandedRelations.contains(fullKey)
         let symbol: String = {
             if case .relation(let kind) = rel.kind { return kind.sfSymbol }
@@ -296,8 +296,7 @@ extension SidebarView {
         schema: String,
         table: String
     ) -> some View {
-        let key = "\(database).\(schema).\(table)"
-
+        let key = PgCompositeKey.table(database: database, schema: schema, table: table)
         DisclosureGroup("Columns") {
             switch store.columnsState[key] ?? .idle {
             case .idle, .loading:

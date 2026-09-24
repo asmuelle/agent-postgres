@@ -62,6 +62,9 @@ struct PostgresMobileConnectionEditView: View {
     // paste-permission toast every time the sheet opens.
     @State private var pasteFeedback: String?
     @State private var pasteFeedbackIsError = false
+    /// True while `save()` is writing secrets to the Keychain (off-main);
+    /// blocks a second tap from racing the first save.
+    @State private var isSaving = false
 
     private var isEditing: Bool { profile != nil }
 
@@ -348,10 +351,10 @@ struct PostgresMobileConnectionEditView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        save()
+                        Task { await save() }
                     }
                     .font(MidnightMobileDesign.FontToken.label)
-                    .disabled(name.isEmpty || host.isEmpty || database.isEmpty || user.isEmpty)
+                    .disabled(isSaving || name.isEmpty || host.isEmpty || database.isEmpty || user.isEmpty)
                 }
             }
             .onAppear {
@@ -702,33 +705,50 @@ struct PostgresMobileConnectionEditView: View {
             tunnelRemoteHost = t.remoteHost
             tunnelRemotePort = String(t.remotePort)
 
-            let account = t.sshKeychainAccount
-            originalSshAccount = account
-            if let account {
-                switch sshAuth {
-                case .password:
-                    sshPassword = KeychainManager.shared.loadPassword(kind: .sshPassword, account: account) ?? ""
-                case .privateKey:
-                    hasStoredKey = MobileSSHKeyStore.has(account: account)
-                    sshKeyPassphrase = KeychainManager.shared.loadPassword(kind: .sshKeyPassphrase, account: account) ?? ""
-                case .identity:
-                    // Key material lives under the identity, not this endpoint.
-                    break
-                }
-            }
+            originalSshAccount = t.sshKeychainAccount
         }
 
         switch p.auth {
         case .keychain:
             savePasswordToKeychain = true
-            password = KeychainManager.shared.loadPassword(kind: .postgresPassword, account: p.keychainAccount) ?? ""
         case .ephemeralPassword(let pw):
             savePasswordToKeychain = false
             password = pw
         }
+
+        // Keychain reads can block (first access, locked keychain): load the
+        // stored secrets off the main thread and fill them in when they land.
+        Task { await loadStoredSecrets(for: p) }
     }
 
-    private func save() {
+    /// Fill the secret fields from the Keychain. A field the user already
+    /// typed into while the read was in flight is left alone.
+    private func loadStoredSecrets(for p: PostgresProfile) async {
+        if case .keychain = p.auth {
+            let stored = await KeychainManager.shared.loadPostgresPasswordAsync(for: p) ?? ""
+            if password.isEmpty { password = stored }
+        }
+
+        guard let t = p.tunnel, t.isInline, let account = t.sshKeychainAccount else { return }
+        switch t.sshAuth ?? .password {
+        case .password:
+            let stored = await KeychainManager.shared.loadPasswordAsync(kind: .sshPassword, account: account) ?? ""
+            if sshPassword.isEmpty { sshPassword = stored }
+        case .privateKey:
+            hasStoredKey = await KeychainStorage.offMain { MobileSSHKeyStore.has(account: account) }
+            let stored = await KeychainManager.shared.loadPasswordAsync(kind: .sshKeyPassphrase, account: account) ?? ""
+            if sshKeyPassphrase.isEmpty { sshKeyPassphrase = stored }
+        case .identity:
+            // Key material lives under the identity, not this endpoint.
+            break
+        }
+    }
+
+    private func save() async {
+        guard !isSaving else { return }
+        isSaving = true
+        defer { isSaving = false }
+
         guard let portValue = UInt16(port) else {
             errorText = "Port must be a valid number (0-65535)."
             return
@@ -766,7 +786,7 @@ struct PostgresMobileConnectionEditView: View {
             syncPassword: savePasswordToKeychain && syncPasswordViaICloud
         )
 
-        guard KeychainManager.shared.persistPostgresPassword(
+        guard await KeychainManager.shared.persistPostgresPasswordAsync(
             account: updatedProfile.keychainAccount,
             password: password,
             saveToKeychain: savePasswordToKeychain,
@@ -776,7 +796,7 @@ struct PostgresMobileConnectionEditView: View {
             return
         }
 
-        guard persistTunnelSecrets(tunnel) else {
+        guard await persistTunnelSecrets(tunnel) else {
             errorText = "Couldn't save the SSH tunnel secret to the Keychain. The profile was not saved."
             return
         }
@@ -832,7 +852,8 @@ struct PostgresMobileConnectionEditView: View {
     /// Persist the tunnel's SSH secrets to the Keychain and evict any that the
     /// user orphaned by disabling the tunnel, switching auth, or changing the
     /// SSH endpoint (which moves the Keychain account).
-    private func persistTunnelSecrets(_ tunnel: PostgresTunnel?) -> Bool {
+    private func persistTunnelSecrets(_ tunnel: PostgresTunnel?) async -> Bool {
+        let keychain = KeychainManager.shared
         var success = true
         let newAccount = tunnel?.sshKeychainAccount
 
@@ -842,16 +863,17 @@ struct PostgresMobileConnectionEditView: View {
             // silently drops the key.
             if let newAccount,
                (tunnel?.sshAuth ?? .password) == .privateKey,
-               sshPrivateKey.isEmpty, hasStoredKey,
-               let existingPem = MobileSSHKeyStore.load(account: old)
+               sshPrivateKey.isEmpty, hasStoredKey
             {
-                guard MobileSSHKeyStore.save(pem: existingPem, account: newAccount) else {
-                    return false
+                let migrated = await KeychainStorage.offMain {
+                    guard let existingPem = MobileSSHKeyStore.load(account: old) else { return true }
+                    return MobileSSHKeyStore.save(pem: existingPem, account: newAccount)
                 }
+                guard migrated else { return false }
             }
-            guard KeychainManager.shared.deletePassword(kind: .sshPassword, account: old),
-                  KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: old),
-                  MobileSSHKeyStore.delete(account: old)
+            guard await keychain.deletePasswordAsync(kind: .sshPassword, account: old),
+                  await keychain.deletePasswordAsync(kind: .sshKeyPassphrase, account: old),
+                  await KeychainStorage.offMain({ MobileSSHKeyStore.delete(account: old) })
             else {
                 return false
             }
@@ -862,28 +884,29 @@ struct PostgresMobileConnectionEditView: View {
         switch tunnel.sshAuth ?? .password {
         case .password:
             if !sshPassword.isEmpty {
-                success = KeychainManager.shared.savePassword(kind: .sshPassword, account: account, secret: sshPassword) && success
+                success = await keychain.savePasswordAsync(kind: .sshPassword, account: account, secret: sshPassword) && success
             }
             // Drop any key material left from a prior private-key config.
-            success = KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account) && success
-            success = MobileSSHKeyStore.delete(account: account) && success
+            success = await keychain.deletePasswordAsync(kind: .sshKeyPassphrase, account: account) && success
+            success = await KeychainStorage.offMain { MobileSSHKeyStore.delete(account: account) } && success
         case .privateKey:
             if !sshPrivateKey.isEmpty {
-                success = MobileSSHKeyStore.save(pem: sshPrivateKey, account: account) && success
+                let pem = sshPrivateKey
+                success = await KeychainStorage.offMain { MobileSSHKeyStore.save(pem: pem, account: account) } && success
             }
             if sshKeyPassphrase.isEmpty {
-                success = KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account) && success
+                success = await keychain.deletePasswordAsync(kind: .sshKeyPassphrase, account: account) && success
             } else {
-                success = KeychainManager.shared.savePassword(kind: .sshKeyPassphrase, account: account, secret: sshKeyPassphrase) && success
+                success = await keychain.savePasswordAsync(kind: .sshKeyPassphrase, account: account, secret: sshKeyPassphrase) && success
             }
             // Drop any password left from a prior password config.
-            success = KeychainManager.shared.deletePassword(kind: .sshPassword, account: account) && success
+            success = await keychain.deletePasswordAsync(kind: .sshPassword, account: account) && success
         case .identity:
             // The identity owns its key and passphrase under its own account,
             // so evict everything this endpoint held from a prior config.
-            success = KeychainManager.shared.deletePassword(kind: .sshPassword, account: account) && success
-            success = KeychainManager.shared.deletePassword(kind: .sshKeyPassphrase, account: account) && success
-            success = MobileSSHKeyStore.delete(account: account) && success
+            success = await keychain.deletePasswordAsync(kind: .sshPassword, account: account) && success
+            success = await keychain.deletePasswordAsync(kind: .sshKeyPassphrase, account: account) && success
+            success = await KeychainStorage.offMain { MobileSSHKeyStore.delete(account: account) } && success
         }
         return success
     }

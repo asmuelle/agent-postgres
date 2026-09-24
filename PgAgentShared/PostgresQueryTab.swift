@@ -830,16 +830,6 @@ final class PostgresQueryTabsStore: ObservableObject {
     /// fetch started. A page that lands after a re-run (or a script
     /// statement switch) is dropped rather than grafted onto the newer
     /// result. Returns whether the page was applied.
-    ///
-    /// Legacy unguarded variant (still used by the iOS workspace): prefer
-    /// the `cursorId:resultGeneration:` overload, which drops stale pages.
-    func appendPage(_ page: FfiPgPageResult, forTab id: UUID) {
-        guard let tab = tabs.first(where: { $0.id == id }),
-              let cursorId = tab.lastResult?.cursorId
-        else { return }
-        appendPage(page, cursorId: cursorId, resultGeneration: tab.resultGeneration, forTab: id)
-    }
-
     @discardableResult
     func appendPage(
         _ page: FfiPgPageResult,
@@ -1061,7 +1051,7 @@ final class PostgresQueryTabsStore: ObservableObject {
     /// Surface a pagination failure on the tab. Drops the cursor
     /// handle so subsequent "Load more" clicks don't hit the same
     /// dead cursor.
-    func setPaginationError(_ message: String, forTab id: UUID) {
+    private func applyPaginationError(_ message: String, forTab id: UUID) {
         mutate(id: id) { tab in
             tab.paginationError = message
             tab.isLoadingMore = false
@@ -1083,7 +1073,7 @@ final class PostgresQueryTabsStore: ObservableObject {
     ) {
         guard isCurrentPageFetch(cursorId: cursorId, resultGeneration: resultGeneration, forTab: id)
         else { return }
-        setPaginationError(message, forTab: id)
+        applyPaginationError(message, forTab: id)
     }
 
     // MARK: - Run / fetch task ownership

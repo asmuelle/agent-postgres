@@ -180,37 +180,6 @@ final class D1ConnectionLeaseTests: XCTestCase {
         XCTAssertEqual(manager.claimCount(profileId: profile.id), 0)
     }
 
-    func testLegacyReleaseCannotStealALease() {
-        let profile = makeProfile()
-        let lease = manager.claim(profile: profile)
-
-        // A stray legacy release (no matching acquire) is a no-op.
-        manager.release(profileId: profile.id)
-        XCTAssertEqual(manager.claimCount(profileId: profile.id), 1)
-
-        manager.release(lease)
-        XCTAssertEqual(manager.claimCount(profileId: profile.id), 0)
-    }
-
-    func testCancelledAcquireStillBalancesItsRelease() async {
-        let profile = makeProfile()
-        let other = manager.claim(profile: profile)
-
-        let task = Task { @MainActor in
-            await self.manager.acquire(profile: profile)
-        }
-        task.cancel()
-        await task.value
-        // The cancelled acquire took its claim, so its paired release drops
-        // that claim — not the other consumer's.
-        XCTAssertEqual(manager.claimCount(profileId: profile.id), 2)
-        manager.release(profileId: profile.id)
-        XCTAssertEqual(manager.claimCount(profileId: profile.id), 1)
-
-        manager.release(other)
-        XCTAssertEqual(manager.claimCount(profileId: profile.id), 0)
-    }
-
     func testForgetInvalidatesOutstandingLeases() async {
         let profile = makeProfile()
         let lease = manager.claim(profile: profile)

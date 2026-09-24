@@ -131,7 +131,7 @@ enum ProviderHTTP {
 /// an FFI change. Instead tokens are namespaced under the existing
 /// `.postgresPassword` kind with a reserved account prefix — same keychain,
 /// zero chance of colliding with a real profile account (profile accounts
-/// are always `user@host:port/db`). Tokens never touch UserDefaults or
+/// are always `pgprofile:<id>`). Tokens never touch UserDefaults or
 /// profile JSON.
 @MainActor
 enum ProviderTokenStore {
@@ -141,24 +141,27 @@ enum ProviderTokenStore {
         accountPrefix + provider.rawValue
     }
 
-    static func load(_ provider: PostgresProvider) -> String? {
-        KeychainManager.shared.loadPassword(
+    // Keychain I/O can block (first access, locked keychain), so every
+    // operation runs off the main thread via the async KeychainManager API.
+
+    static func load(_ provider: PostgresProvider) async -> String? {
+        await KeychainManager.shared.loadPasswordAsync(
             kind: .postgresPassword, account: account(for: provider)
         )
     }
 
     @discardableResult
-    static func save(_ provider: PostgresProvider, token: String) -> Bool {
+    static func save(_ provider: PostgresProvider, token: String) async -> Bool {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return delete(provider) }
-        return KeychainManager.shared.savePassword(
+        guard !trimmed.isEmpty else { return await delete(provider) }
+        return await KeychainManager.shared.savePasswordAsync(
             kind: .postgresPassword, account: account(for: provider), secret: trimmed
         )
     }
 
     @discardableResult
-    static func delete(_ provider: PostgresProvider) -> Bool {
-        KeychainManager.shared.deletePassword(
+    static func delete(_ provider: PostgresProvider) async -> Bool {
+        await KeychainManager.shared.deletePasswordAsync(
             kind: .postgresPassword, account: account(for: provider)
         )
     }

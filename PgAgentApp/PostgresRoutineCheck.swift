@@ -115,8 +115,8 @@ enum PostgresRoutineCheck {
 
     // MARK: - Line mapping
 
-    /// Character offset (0-based, in Characters — matching the editor's
-    /// `errorCharOffset`) of the first non-whitespace character on the editor
+    /// Offset (0-based, in Unicode scalars / code points — matching the
+    /// editor's `errorCharOffset`) of the first non-whitespace character on the editor
     /// line that corresponds to plpgsql_check body line `bodyLine`. Returns nil
     /// when out of range.
     static func bodyLineToCharOffset(editorText: String, bodyLine: Int) -> Int? {
@@ -149,22 +149,27 @@ enum PostgresRoutineCheck {
     }
 
     private static func lineNumber(ofIndex index: String.Index, in text: String) -> Int {
-        1 + text[text.startIndex..<index].reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        // Count `\n` code points: a CRLF is one Character that isn't "\n".
+        1 + text[text.startIndex..<index].unicodeScalars.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
     }
 
-    /// 0-based Character offset of the first non-whitespace character on the
-    /// 1-based `line`, or nil when the line is out of range. Assumes LF line
-    /// endings — what `pg_get_functiondef` returns and NSTextView preserves.
+    /// 0-based code-point offset of the first non-whitespace character on the
+    /// 1-based `line`, or nil when the line is out of range. Lines split at
+    /// every `\n` code point (a CRLF's `\r` stays on its line and counts), and
+    /// everything is counted in Unicode scalars so emoji or a CRLF — one
+    /// Character, several code points — before the line can't shift it.
     static func charOffset(ofLine line: Int, in text: String) -> Int? {
         guard line >= 1 else { return nil }
-        let lines = text.components(separatedBy: "\n")
-        guard line <= lines.count else { return nil }
+        var currentLine = 1
         var offset = 0
-        for i in 0..<(line - 1) {
-            offset += lines[i].count + 1 // + newline
+        var scalars = text.unicodeScalars[...]
+        while currentLine < line {
+            guard let newline = scalars.firstIndex(of: "\n") else { return nil }
+            offset += scalars.distance(from: scalars.startIndex, to: newline) + 1
+            scalars = scalars[scalars.index(after: newline)...]
+            currentLine += 1
         }
-        let target = lines[line - 1]
-        let lead = target.prefix(while: { $0 == " " || $0 == "\t" }).count
+        let lead = scalars.prefix(while: { $0 == " " || $0 == "\t" }).count
         return offset + lead
     }
 }

@@ -63,7 +63,7 @@ extension SidebarView {
 
     @ViewBuilder
     private func databaseNodeRow(profile: PostgresProfile, store: PgSchemaStore, databaseNode: PgSchemaNode) -> some View {
-        let dbKey = "\(profile.id).\(databaseNode.name)"
+        let dbKey = PgCompositeKey.make(profile.id, databaseNode.name)
         let isExpanded = expandedDatabases.contains(dbKey)
         DisclosureGroup(
             isExpanded: Binding(
@@ -114,7 +114,7 @@ extension SidebarView {
 
     @ViewBuilder
     private func languagesNodeGroup(profile: PostgresProfile, store: PgSchemaStore, database: String) -> some View {
-        let key = "\(profile.id).\(database).languages"
+        let key = PgCompositeKey.make(profile.id, database, "languages")
         let isExpanded = expandedLanguagesGroup.contains(key)
         DisclosureGroup(
             isExpanded: Binding(
@@ -175,7 +175,7 @@ extension SidebarView {
 
     @ViewBuilder
     private func schemasNodeGroup(profile: PostgresProfile, store: PgSchemaStore, database: String) -> some View {
-        let key = "\(profile.id).\(database).schemas"
+        let key = PgCompositeKey.make(profile.id, database, "schemas")
         let isExpanded = expandedSchemasGroup.contains(key)
         DisclosureGroup(
             isExpanded: Binding(
@@ -218,8 +218,8 @@ extension SidebarView {
 
     @ViewBuilder
     private func schemaNodeRow(profile: PostgresProfile, store: PgSchemaStore, database: String, schemaNode: PgSchemaNode) -> some View {
-        let key = "\(database).\(schemaNode.name)"
-        let fullKey = "\(profile.id).\(database).\(schemaNode.name)"
+        let key = PgCompositeKey.schema(database: database, schema: schemaNode.name)
+        let fullKey = PgCompositeKey.make(profile.id, database, schemaNode.name)
         let isExpanded = expandedSchemas.contains(fullKey)
         DisclosureGroup(
             isExpanded: Binding(
@@ -275,7 +275,7 @@ extension SidebarView {
 
     @ViewBuilder
     private func schemaContentsView(profile: PostgresProfile, store: PgSchemaStore, database: String, schema: String) -> some View {
-        let key = "\(database).\(schema)"
+        let key = PgCompositeKey.schema(database: database, schema: schema)
         switch store.schemaContentsState[key] ?? .idle {
         case .idle, .loading:
             ProgressView().controlSize(.small).padding(.leading, 8)
@@ -300,7 +300,7 @@ extension SidebarView {
     ) -> some View {
         let nodes = bundle.nodes(for: category)
         let count = bundle.count(for: category)
-        let key = "\(profile.id).\(bundle.database).\(bundle.schema).\(category.rawValue)"
+        let key = PgCompositeKey.make(profile.id, bundle.database, bundle.schema, category.rawValue)
         let isExpanded = expandedCategories.contains(key)
         DisclosureGroup(
             isExpanded: Binding(

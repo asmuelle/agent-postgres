@@ -158,7 +158,9 @@ struct PostgresLocalConfigImportView: View {
         loaded = true
 
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let existingAccounts = Set(store.profiles.map(\.keychainAccount))
+        // Duplicate detection by endpoint — the keychain account is
+        // id-scoped and so never matches a candidate.
+        let existingEndpoints = Set(store.profiles.map(\.endpointIdentity))
         var found: [Candidate] = []
 
         if let text = try? String(
@@ -176,7 +178,7 @@ struct PostgresLocalConfigImportView: View {
                     user: entry.user,
                     password: entry.password,
                     tls: nil,
-                    alreadyExists: existingAccounts.contains(account)
+                    alreadyExists: existingEndpoints.contains(account)
                 ))
             }
         }
@@ -196,7 +198,7 @@ struct PostgresLocalConfigImportView: View {
                     user: entry.user,
                     password: entry.password,
                     tls: entry.tls,
-                    alreadyExists: existingAccounts.contains(account)
+                    alreadyExists: existingEndpoints.contains(account)
                 ))
             }
         }
@@ -208,6 +210,10 @@ struct PostgresLocalConfigImportView: View {
     // MARK: - Import
 
     private func importSelected() {
+        Task { await importSelectedAsync() }
+    }
+
+    private func importSelectedAsync() async {
         var imported = 0
         for candidate in candidates
         where selectedIds.contains(candidate.id) && !candidate.alreadyExists {
@@ -224,7 +230,8 @@ struct PostgresLocalConfigImportView: View {
                 tls: candidate.tls ?? .require
             )
             if let password = candidate.password, !password.isEmpty {
-                KeychainManager.shared.savePassword(
+                // Saved before the profile, so a connect can't beat it.
+                await KeychainManager.shared.savePasswordAsync(
                     kind: .postgresPassword,
                     account: profile.keychainAccount,
                     secret: password

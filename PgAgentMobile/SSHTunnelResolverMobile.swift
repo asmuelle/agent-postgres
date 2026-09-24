@@ -60,16 +60,34 @@ enum SSHTunnelResolver {
         }
     }
 
+    /// A resolved tunnel plus the use counted for it. Obtain with
+    /// `acquireTunnel(for:)` before the Postgres connect is awaited, then
+    /// either `bindTunnelUse` (connect succeeded) or `cancelTunnelUse`
+    /// (connect failed) — exactly once. Same shape as the macOS resolver so
+    /// the shared `pgConnect` uses one code path on both platforms.
+    struct TunnelLease: Sendable {
+        let liveConnectionId: String
+        fileprivate let reservation: SSHTunnelUseLedger.Reservation?
+    }
+
     /// Connection ids opened by this resolver, keyed by the tunnel's synthetic
     /// `sshConnectionId`. Revalidated against the Rust manager before every
     /// reuse — a dropped session is reopened, not assumed.
     private static var liveConnections: [String: String] = [:]
 
-    /// Reclaim bookkeeping: how many live Postgres connections use each SSH
-    /// tunnel, and which tunnel each Postgres connection uses — so the SSH
-    /// connection is closed once its last Postgres consumer disconnects.
-    private static var tunnelRefCounts: [String: Int] = [:]   // ssh key -> count
-    private static var pgToSshKey: [String: String] = [:]     // pg conn id -> ssh key
+    /// Reclaim bookkeeping: how many Postgres connections (live or still
+    /// connecting) use each SSH tunnel, so the SSH connection is closed once
+    /// its last Postgres consumer disconnects.
+    private static var ledger = SSHTunnelUseLedger()
+
+    /// Every open for a tunnel uses the same fixed session id, i.e. the same
+    /// Rust connection key; a second concurrent open would replace (and so
+    /// disconnect) the first. Concurrent callers share one open instead.
+    private static let opens = InFlightTaskCoalescer<String, String>()
+
+    /// A resolved-then-closed race can repeat only if the tunnel keeps being
+    /// torn down underneath us; give up after a few rounds instead of looping.
+    private static let maxResolveAttempts = 3
 
     private static let logger = Logger(subsystem: "com.mc-ssh", category: "ssh-tunnel-resolver-mobile")
 
@@ -78,7 +96,20 @@ enum SSHTunnelResolver {
     /// through the same endpoint.
     private static let sessionSuffix = "pg-tunnel"
 
+    /// Resolve `tunnel` to an open SSH connection's id, connecting if needed.
+    /// No use is counted.
     static func liveConnectionId(for tunnel: PostgresTunnel) async throws -> String {
+        try await resolve(tunnel, countUse: false).liveConnectionId
+    }
+
+    /// Resolve `tunnel` to a live SSH connection and count a use of it in the
+    /// same main-actor step, so no concurrent release can close it before the
+    /// caller's Postgres connect finishes.
+    static func acquireTunnel(for tunnel: PostgresTunnel) async throws -> TunnelLease {
+        try await resolve(tunnel, countUse: true)
+    }
+
+    private static func resolve(_ tunnel: PostgresTunnel, countUse: Bool) async throws -> TunnelLease {
         guard tunnel.isInline else { throw ResolveError.notInline }
         guard let sshHost = tunnel.sshHost, !sshHost.isEmpty,
               let sshUser = tunnel.sshUser, !sshUser.isEmpty
@@ -86,42 +117,75 @@ enum SSHTunnelResolver {
             throw ResolveError.incompleteConfig
         }
 
-        let cacheKey = tunnel.sshConnectionId
-        if let cached = liveConnections[cacheKey],
-           rshellIsConnected(connectionId: cached)
-        {
-            return cached
-        }
+        let key = tunnel.sshConnectionId
+        for _ in 0..<maxResolveAttempts {
+            if let cached = liveConnections[key] {
+                let alive = await isConnected(cached)
+                // Re-check after the hop: a release may have closed (or an
+                // open replaced) the cached connection meanwhile.
+                guard liveConnections[key] == cached else { continue }
+                if alive {
+                    return lease(connectionId: cached, key: key, countUse: countUse)
+                }
+                liveConnections.removeValue(forKey: key)
+            }
 
-        let connectionId = try await open(tunnel, sshHost: sshHost, sshUser: sshUser)
-        liveConnections[cacheKey] = connectionId
-        return connectionId
+            let opened = try await opens.run(key: key) {
+                let connectionId = try await open(tunnel, sshHost: sshHost, sshUser: sshUser)
+                liveConnections[key] = connectionId
+                return connectionId
+            }
+            if liveConnections[key] == opened {
+                return lease(connectionId: opened, key: key, countUse: countUse)
+            }
+            // Closed again before this waiter resumed — resolve afresh.
+        }
+        throw ResolveError.connectFailed(
+            host: sshHost,
+            detail: "The SSH connection closed while the tunnel was being set up."
+        )
     }
 
-    /// Record that a Postgres connection now depends on `tunnel`'s SSH
-    /// connection. Ignored for tunnels this resolver didn't open, or a
-    /// duplicate register for the same Postgres connection.
-    static func registerTunnelUse(pgConnectionId: String, tunnel: PostgresTunnel) {
-        let key = tunnel.sshConnectionId
-        guard liveConnections[key] != nil, pgToSshKey[pgConnectionId] == nil else { return }
-        pgToSshKey[pgConnectionId] = key
-        tunnelRefCounts[key, default: 0] += 1
+    private static func lease(connectionId: String, key: String, countUse: Bool) -> TunnelLease {
+        TunnelLease(
+            liveConnectionId: connectionId,
+            reservation: countUse ? ledger.reserve(key: key) : nil
+        )
+    }
+
+    /// Bind a lease's use to the Postgres connection it produced.
+    static func bindTunnelUse(_ lease: TunnelLease, pgConnectionId: String) {
+        guard let reservation = lease.reservation else { return }
+        closeIfUnused(ledger.bind(reservation, pgConnectionId: pgConnectionId))
+    }
+
+    /// Drop a lease whose Postgres connect failed.
+    static func cancelTunnelUse(_ lease: TunnelLease) {
+        guard let reservation = lease.reservation else { return }
+        closeIfUnused(ledger.cancel(reservation))
     }
 
     /// Drop a Postgres connection's dependency; closes the SSH connection once
     /// no Postgres connection uses it anymore.
     static func releaseTunnelUse(pgConnectionId: String) {
-        guard let key = pgToSshKey.removeValue(forKey: pgConnectionId) else { return }
-        let count = tunnelRefCounts[key] ?? 0
-        if count <= 1 {
-            tunnelRefCounts.removeValue(forKey: key)
-            if let sshId = liveConnections.removeValue(forKey: key) {
-                BridgeManager.shared.disconnect(connectionId: sshId)
-                logger.log("Closed idle SSH tunnel host connection: \(sshId, privacy: .public)")
-            }
-        } else {
-            tunnelRefCounts[key] = count - 1
-        }
+        closeIfUnused(ledger.release(pgConnectionId: pgConnectionId))
+    }
+
+    private static func closeIfUnused(_ key: String?) {
+        guard let key, let sshId = liveConnections.removeValue(forKey: key) else { return }
+        // An open in flight for this key reuses the same Rust connection key
+        // and replaces this connection itself; disconnecting now would kill
+        // the replacement instead.
+        guard !opens.isInFlight(key) else { return }
+        BridgeManager.shared.disconnect(connectionId: sshId)
+        logger.log("Closed idle SSH tunnel host connection: \(sshId, privacy: .public)")
+    }
+
+    /// `rshellIsConnected` blocks on the Rust runtime — keep it off the main actor.
+    private static func isConnected(_ connectionId: String) async -> Bool {
+        await Task.detached(priority: .utility) {
+            rshellIsConnected(connectionId: connectionId)
+        }.value
     }
 
     private static func open(
@@ -144,11 +208,11 @@ enum SSHTunnelResolver {
 
         var password: String?
         var passphrase: String?
-        var materializedKey: MaterializedSSHKey?
+        var keyPEM: String?
 
         switch auth {
         case .password:
-            guard let stored = KeychainManager.shared.loadPassword(kind: .sshPassword, account: account),
+            guard let stored = await KeychainManager.shared.loadPasswordAsync(kind: .sshPassword, account: account),
                   !stored.isEmpty
             else {
                 throw ResolveError.passwordUnavailable(host: sshHost)
@@ -156,16 +220,14 @@ enum SSHTunnelResolver {
             password = stored
 
         case .privateKey:
-            guard let pem = MobileSSHKeyStore.load(account: account), !pem.isEmpty else {
+            guard let pem = await KeychainStorage.offMain({ MobileSSHKeyStore.load(account: account) }),
+                  !pem.isEmpty
+            else {
                 throw ResolveError.keyUnavailable(host: sshHost)
             }
-            do {
-                materializedKey = try MaterializedSSHKey(pem: pem)
-            } catch {
-                throw ResolveError.keyMaterializeFailed(error.localizedDescription)
-            }
+            keyPEM = pem
             // An empty stored passphrase means an unencrypted key — pass nil.
-            let storedPassphrase = KeychainManager.shared.loadPassword(kind: .sshKeyPassphrase, account: account)
+            let storedPassphrase = await KeychainManager.shared.loadPasswordAsync(kind: .sshKeyPassphrase, account: account)
             passphrase = (storedPassphrase?.isEmpty == false) ? storedPassphrase : nil
 
         case .identity:
@@ -177,21 +239,33 @@ enum SSHTunnelResolver {
             guard let identity = MobileSSHIdentityStore.shared.identity(id: identityId) else {
                 throw ResolveError.identityMissing
             }
-            guard let pem = MobileSSHIdentityStore.shared.privateKeyPEM(id: identityId), !pem.isEmpty else {
+            // Read the key and passphrase off the main thread (keychain I/O
+            // can block); same items `privateKeyPEM(id:)`/`passphrase(id:)` read.
+            let identityAccount = identity.keychainAccount
+            let (storedPem, storedPassphrase) = await KeychainStorage.offMain {
+                (MobileSSHKeyStore.load(account: identityAccount),
+                 MobileSSHKeyStore.loadPassphrase(account: identityAccount))
+            }
+            guard let pem = storedPem, !pem.isEmpty else {
                 throw ResolveError.identityKeyUnavailable(name: identity.name)
             }
-            do {
-                materializedKey = try MaterializedSSHKey(pem: pem)
-            } catch {
-                throw ResolveError.keyMaterializeFailed(error.localizedDescription)
-            }
-            passphrase = MobileSSHIdentityStore.shared.passphrase(id: identityId)
+            keyPEM = pem
+            passphrase = (storedPassphrase?.isEmpty == false) ? storedPassphrase : nil
             // An encrypted key whose passphrase didn't load would otherwise be
             // handed to russh as if it were unencrypted, surfacing only as an
             // opaque auth rejection. Fail with the real reason instead.
             if identity.isEncrypted, passphrase == nil {
                 throw ResolveError.identityPassphraseUnavailable(name: identity.name)
             }
+        }
+
+        // Written to disk only once every check passed, and removed on every
+        // exit path after that.
+        let materializedKey: MaterializedSSHKey?
+        do {
+            materializedKey = try keyPEM.map { try MaterializedSSHKey(pem: $0) }
+        } catch {
+            throw ResolveError.keyMaterializeFailed(error.localizedDescription)
         }
         defer { materializedKey?.remove() }
 

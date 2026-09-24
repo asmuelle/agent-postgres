@@ -30,8 +30,10 @@ struct MobileProviderImportView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Import \(model.selectedIds.count)") {
-                        _ = model.importSelection(into: profileStore)
-                        dismiss()
+                        Task {
+                            _ = await model.importSelection(into: profileStore)
+                            dismiss()
+                        }
                     }
                     .font(MidnightMobileDesign.FontToken.label)
                     .disabled(model.selectedIds.isEmpty)

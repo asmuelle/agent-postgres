@@ -246,19 +246,7 @@ struct PostgresSQLEditor: NSViewRepresentable {
         /// vanishing. Scanning scalars keeps a CRLF (one Character, two code
         /// points) or an emoji sequence before the error from shifting it.
         static func errorWordRange(in text: String, charOffset: Int) -> NSRange? {
-            let scalars = text.unicodeScalars
-            let count = scalars.count
-            guard count > 0, charOffset >= 0, charOffset <= count else { return nil }
-            let start = scalars.index(scalars.startIndex, offsetBy: min(charOffset, count - 1))
-            var end = start
-            while end < scalars.endIndex {
-                let c = scalars[end]
-                guard c.properties.isAlphabetic || c.properties.numericType != nil || c == "_"
-                else { break }
-                end = scalars.index(after: end)
-            }
-            if end == start { end = scalars.index(after: start) }
-            return NSRange(start..<end, in: text)
+            SQLSyntaxHighlighting.errorWordRange(in: text, codePointOffset: charOffset)
         }
     }
 }

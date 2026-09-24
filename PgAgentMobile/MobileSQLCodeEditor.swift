@@ -76,20 +76,15 @@ struct MobileSQLCodeEditor: UIViewRepresentable {
         }
 
         /// Red squiggle from `offset` to the end of the token (mirrors the mac
-        /// editor's error underline). Highlighting resets attributes on every
-        /// edit, so stale underlines clear themselves.
+        /// editor's error underline). `offset` is a 0-based code-point offset,
+        /// as Postgres reports positions — converted to the text view's UTF-16
+        /// range by the shared helper, so emoji / CRLF before the error don't
+        /// shift it. Highlighting resets attributes on every edit, so stale
+        /// underlines clear themselves.
         func applyErrorUnderline(_ view: UITextView, at offset: Int?) {
-            guard let offset else { return }
-            let nsText = view.text as NSString
-            guard offset >= 0, offset < nsText.length else { return }
-            var end = offset
-            let alphanumerics = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
-            while end < nsText.length,
-                  let scalar = Unicode.Scalar(nsText.character(at: end)),
-                  alphanumerics.contains(scalar) {
-                end += 1
-            }
-            let range = NSRange(location: offset, length: max(1, end - offset))
+            guard let offset,
+                  let range = SQLSyntaxHighlighting.errorWordRange(in: view.text, codePointOffset: offset)
+            else { return }
             view.textStorage.addAttributes(
                 [
                     .underlineStyle: NSUnderlineStyle.thick.rawValue,

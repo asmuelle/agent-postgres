@@ -120,7 +120,7 @@ extension BridgeManager {
     }
 }
 
-private nonisolated(unsafe) let toolsQueue: DispatchQueue = {
+private let toolsQueue: DispatchQueue = {
     DispatchQueue(
         label: "com.mc-ssh.bridge.tools",
         qos: .utility,
