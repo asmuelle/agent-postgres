@@ -146,10 +146,22 @@ extension BridgeManager {
         // inline SSH endpoint (iOS); the FFI needs the *live connection id*
         // the Rust manager holds. Resolve (auto-opening the SSH connection
         // with stored credentials if needed) and substitute before connecting.
+        #if os(macOS)
+        // The tunnel use is counted *before* the Postgres connect is awaited,
+        // so a concurrent disconnect of the tunnel's last other user can't
+        // close the SSH connection underneath this connect.
+        var tunnelLease: SSHTunnelResolver.TunnelLease?
+        #endif
         if let tunnel = profile.tunnel {
             let liveId: String
             do {
+                #if os(macOS)
+                let lease = try await SSHTunnelResolver.acquireTunnel(for: tunnel)
+                tunnelLease = lease
+                liveId = lease.liveConnectionId
+                #else
                 liveId = try await SSHTunnelResolver.liveConnectionId(for: tunnel)
+                #endif
             } catch {
                 throw PostgresBridgeError.tunnel(
                     (error as? LocalizedError)?.errorDescription
@@ -163,38 +175,56 @@ extension BridgeManager {
             )
         }
 
+        let connectionId: String
         do {
-            let connectionId: String = try await runOnUtilityQueuePg {
-                try rshellPgConnect(config: config)
+            let ffiConfig = config
+            connectionId = try await runOnUtilityQueuePg {
+                try rshellPgConnect(config: ffiConfig)
             }
-            // Remember which profile owns this connection so the read-only
-            // guard and the write audit log can resolve it later — every
-            // Postgres connection on both platforms passes through here.
-            PostgresConnectionAuditRegistry.shared.register(
-                connectionId: connectionId,
-                profile: profile
-            )
-            // Track this Postgres connection's use of the shared SSH tunnel so
-            // the underlying SSH connection is reclaimed once the last Postgres
-            // consumer of it disconnects (see pgDisconnect).
-            if let tunnel = profile.tunnel {
-                await SSHTunnelResolver.registerTunnelUse(
-                    pgConnectionId: connectionId, tunnel: tunnel
-                )
-            }
-            do {
-                try await validateMinimumServerVersion(connectionId: connectionId)
-            } catch {
-                await pgDisconnect(connectionId: connectionId)
-                throw error
-            }
-            return connectionId
-        } catch let err as PostgresBridgeError {
-            throw err
-        } catch let err as FfiPgError {
-            throw PostgresBridgeError.from(err)
         } catch {
-            throw PostgresBridgeError.other(error.localizedDescription)
+            #if os(macOS)
+            if let tunnelLease {
+                await SSHTunnelResolver.cancelTunnelUse(tunnelLease)
+            }
+            #endif
+            throw Self.pgConnectError(error)
+        }
+
+        // Remember which profile owns this connection so the read-only
+        // guard and the write audit log can resolve it later — every
+        // Postgres connection on both platforms passes through here.
+        PostgresConnectionAuditRegistry.shared.register(
+            connectionId: connectionId,
+            profile: profile
+        )
+        // Track this Postgres connection's use of the shared SSH tunnel so
+        // the underlying SSH connection is reclaimed once the last Postgres
+        // consumer of it disconnects (see pgDisconnect).
+        #if os(macOS)
+        if let tunnelLease {
+            await SSHTunnelResolver.bindTunnelUse(tunnelLease, pgConnectionId: connectionId)
+        }
+        #else
+        if let tunnel = profile.tunnel {
+            await SSHTunnelResolver.registerTunnelUse(
+                pgConnectionId: connectionId, tunnel: tunnel
+            )
+        }
+        #endif
+        do {
+            try await validateMinimumServerVersion(connectionId: connectionId)
+        } catch {
+            await pgDisconnect(connectionId: connectionId)
+            throw Self.pgConnectError(error)
+        }
+        return connectionId
+    }
+
+    private static func pgConnectError(_ error: Error) -> PostgresBridgeError {
+        switch error {
+        case let err as PostgresBridgeError: return err
+        case let err as FfiPgError: return PostgresBridgeError.from(err)
+        default: return PostgresBridgeError.other(error.localizedDescription)
         }
     }
 
@@ -786,7 +816,7 @@ extension BridgeManager {
 // schema introspection runs while the monitor is sampling stats.
 // =============================================================================
 
-private nonisolated(unsafe) let postgresQueue: DispatchQueue = {
+private let postgresQueue: DispatchQueue = {
     DispatchQueue(
         label: "com.mc-ssh.bridge.postgres",
         qos: .utility,

@@ -89,6 +89,14 @@ struct FleetHubMenuView: View {
     }
 
     private func statusText(_ health: FleetInstanceHealth) -> String {
+        let base = severityText(health)
+        // Reachable instances carry an error only when the posture probe
+        // failed (e.g. missing pg_monitor) — show it rather than hiding it.
+        guard health.reachable, let problem = health.errorMessage else { return base }
+        return "\(base) · \(problem)"
+    }
+
+    private func severityText(_ health: FleetInstanceHealth) -> String {
         switch health.severity {
         case .offline: return health.errorMessage ?? "unreachable"
         case .blocked:

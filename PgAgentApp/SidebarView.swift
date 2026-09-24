@@ -28,6 +28,9 @@ struct SidebarView: View {
     @State private var editingPostgresProfile: PostgresEditTarget?
     @State private var detailsExpanded = true
     @State private var connectionAcquireTasks: [String: Task<Void, Never>] = [:]
+    /// One connection claim per expanded server, released exactly once on
+    /// collapse / disappear.
+    @State private var serverLeases: [String: PostgresConnectionLease] = [:]
 
     // First-run local detection (roadmap 2.1): only probed while the
     // profile list is empty; a hit offers a one-click localhost profile.
@@ -142,9 +145,8 @@ struct SidebarView: View {
         .onDisappear {
             connectionAcquireTasks.values.forEach { $0.cancel() }
             connectionAcquireTasks.removeAll()
-            for profileId in expandedServers {
-                connectionManager.release(profileId: profileId)
-            }
+            serverLeases.values.forEach { connectionManager.release($0) }
+            serverLeases.removeAll()
             expandedServers.removeAll()
         }
     }
@@ -358,13 +360,18 @@ struct SidebarView: View {
     private func setServerExpanded(_ profile: PostgresProfile, expanded: Bool) {
         if expanded {
             guard expandedServers.insert(profile.id).inserted else { return }
+            // Claim synchronously so the collapse below always has exactly
+            // this claim to release, however far the connect got.
+            serverLeases[profile.id] = connectionManager.claim(profile: profile)
             connectionAcquireTasks[profile.id] = Task { @MainActor in
-                await connectionManager.acquire(profile: profile)
+                await connectionManager.connectIfNeeded(profile: profile)
             }
         } else {
             guard expandedServers.remove(profile.id) != nil else { return }
             connectionAcquireTasks.removeValue(forKey: profile.id)?.cancel()
-            connectionManager.release(profileId: profile.id)
+            if let lease = serverLeases.removeValue(forKey: profile.id) {
+                connectionManager.release(lease)
+            }
         }
     }
 

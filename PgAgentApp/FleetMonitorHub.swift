@@ -32,6 +32,10 @@ final class FleetMonitorHub: ObservableObject {
     private let store = FleetHealthStore()
     private let settings = FleetMonitorSettings.shared
     private var pollTask: Task<Void, Never>?
+    /// Held while the hub polls so App Nap doesn't coalesce the poll timer
+    /// into multi-minute gaps when pgAgent is in the background — the hub's
+    /// whole job is watching while the user is elsewhere.
+    private var pollActivity: NSObjectProtocol?
 
     private static let firingKey = "fleet.hub.firingAlerts"
     private static let minPollIntervalSeconds = 10
@@ -53,6 +57,7 @@ final class FleetMonitorHub: ObservableObject {
     private func start() {
         guard pollTask == nil else { return }
         isRunning = true
+        beginPollActivity()
         pollTask = Task { [weak self] in
             await self?.relay.refreshAccountStatus()
             while !Task.isCancelled {
@@ -60,6 +65,7 @@ final class FleetMonitorHub: ObservableObject {
                 // off without going through applyHubMode — honor it here.
                 guard let self, self.settings.hubModeEnabled else { break }
                 await self.pollOnce()
+                guard !Task.isCancelled else { break }
                 let seconds = self.currentPollInterval()
                 try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
             }
@@ -73,6 +79,8 @@ final class FleetMonitorHub: ObservableObject {
         if !settings.hubModeEnabled {
             pollTask = nil
             isRunning = false
+            endPollActivity()
+            Task { await store.shutdown() }
         }
     }
 
@@ -80,7 +88,27 @@ final class FleetMonitorHub: ObservableObject {
         pollTask?.cancel()
         pollTask = nil
         isRunning = false
+        endPollActivity()
+        // The store invalidates the cancelled loop's in-flight refresh and
+        // closes its probes only after it finishes; a later start() queues
+        // its first refresh behind this shutdown.
         Task { await store.shutdown() }
+    }
+
+    private func beginPollActivity() {
+        guard pollActivity == nil else { return }
+        // Least aggressive option that exempts us from App Nap: user-initiated
+        // work that still lets the Mac idle-sleep.
+        pollActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Fleet monitoring hub polls saved Postgres instances"
+        )
+    }
+
+    private func endPollActivity() {
+        guard let pollActivity else { return }
+        ProcessInfo.processInfo.endActivity(pollActivity)
+        self.pollActivity = nil
     }
 
     private func currentPollInterval() -> Int {
@@ -100,6 +128,8 @@ final class FleetMonitorHub: ObservableObject {
         }
 
         await store.refresh(profiles: profiles)
+        // Stopped mid-refresh: don't publish (or relay) a stale poll.
+        guard !Task.isCancelled else { return }
 
         let names = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0.name) })
         let currentHealths = profiles.map { store.health(for: $0.id) }
