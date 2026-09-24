@@ -39,7 +39,7 @@ final class SettingsWindowOpener {
             // action is the only bridge to the Settings scene.
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
         }
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activateFromUserAction()
     }
 }
 

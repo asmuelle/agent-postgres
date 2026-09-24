@@ -19,14 +19,18 @@ import XCTest
 final class EntitlementsProductConfigTests: XCTestCase {
     private var session: SKTestSession!
 
-    override func setUpWithError() throws {
+    // The async setUp/tearDown overloads are main-actor isolated in XCTest,
+    // matching this class; the sync ones are nonisolated.
+    override func setUp() async throws {
+        try await super.setUp()
         session = try SKTestSession(configurationFileNamed: "Products")
         session.disableDialogs = true
         session.clearTransactions()
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         session = nil
+        try await super.tearDown()
     }
 
     func testConfiguredProductIdsAreNotEmpty() {

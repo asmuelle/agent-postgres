@@ -178,7 +178,10 @@ public enum NetworkPolishHostLookup {
                 NI_NUMERICHOST
             )
             if nameStatus == 0 {
-                let address = String(cString: buffer)
+                let address = String(
+                    decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                    as: UTF8.self
+                )
                 if !addresses.contains(address) {
                     addresses.append(address)
                 }

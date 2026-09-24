@@ -63,8 +63,14 @@ struct ContentView: View {
                 commandPaletteOverlay
             }
         }
-        .onReceive(PgAgentEventBus.shared.events) { event in
-            guard case .showCommandPalette = event else { return }
+        // The bus also carries Rust-callback events emitted on background
+        // threads; filter there and hop to main so SwiftUI only ever sees
+        // main-thread deliveries.
+        .onReceive(
+            PgAgentEventBus.shared.events
+                .filter { @Sendable event in event == .showCommandPalette }
+                .receive(on: DispatchQueue.main)
+        ) { _ in
             toggleCommandPalette()
         }
         .registersSettingsOpener()
@@ -78,7 +84,7 @@ struct ContentView: View {
     /// Route a `pgAgent://` URL (widget tap, alert, Live Activity) onto the
     /// existing navigation state. Unknown profiles/URLs only activate the app.
     private func applyDeepLink(_ link: PgAgentDeepLink) {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activateFromUserAction()
         switch link {
         case .monitoring(let profileId), .profile(let profileId):
             guard postgresStore.profile(withId: profileId) != nil else { return }
@@ -273,7 +279,7 @@ struct DatabasePlaceholderView: View {
 // MARK: - Preference keys for split-pane dimensions
 
 private struct SidebarWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
     }

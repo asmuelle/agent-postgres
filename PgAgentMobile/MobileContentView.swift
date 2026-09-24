@@ -264,7 +264,7 @@ struct MobileContentView: View {
 }
 
 // MARK: - Profile ID Navigation extension
-extension String: Identifiable {
+extension String: @retroactive Identifiable {
     public var id: String { self }
 }
 

@@ -56,7 +56,7 @@ struct MobileObjectExplorerView: View {
                 }
             }
         }
-        .onChange(of: selectedNodeId) { newValue in
+        .onChange(of: selectedNodeId) { _, newValue in
             if let id = newValue {
                 if let found = findNodeAcrossStores(id: id) {
                     selectedNode = found
@@ -381,7 +381,7 @@ struct MobileObjectExplorerView: View {
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
                             .background(envColor.opacity(0.12))
-                            .cornerRadius(4)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 4)
                                     .stroke(envColor.opacity(0.25), lineWidth: 0.5)
@@ -754,7 +754,7 @@ struct MobileObjectExplorerView: View {
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
                             .background(Color.white.opacity(0.08))
-                            .cornerRadius(3)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer()
                 }
@@ -898,7 +898,7 @@ struct MobileObjectExplorerView: View {
                     onOpenNodeTab(profile, node, ["kind": "sequence", "schema": parsed.schema, "name": parsed.name])
                 }
             }
-        case .routine(let rkind, let signature, let returnType):
+        case .routine(let rkind, let signature, _):
             Button {
                 selectedNodeId = node.id
                 onOpenNodeTab(profile, node, ["kind": "properties"])

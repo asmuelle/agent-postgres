@@ -103,7 +103,7 @@ extension BridgeManager {
         }
     }
 
-    private func toolsWrapping<T>(_ work: @escaping () throws -> T) async throws -> T {
+    private func toolsWrapping<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             toolsQueue.async {
                 do {

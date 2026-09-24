@@ -109,7 +109,7 @@ struct SidebarView: View {
         .sheet(isPresented: $showLocalConfigImport) {
             PostgresLocalConfigImportView(store: postgresStore)
         }
-        .onChange(of: selectedNodeId) { newValue in
+        .onChangeCompat(of: selectedNodeId) { newValue in
             if let id = newValue {
                 if let found = findNodeAcrossStores(id: id) {
                     selectedNode = found
@@ -125,7 +125,7 @@ struct SidebarView: View {
                 }
             }
         }
-        .onChange(of: selectedPostgresProfileId) { newProfileId in
+        .onChangeCompat(of: selectedPostgresProfileId) { newProfileId in
             if let profileId = newProfileId {
                 activeConnectionId = PostgresConnectionManager.shared.activeConnections[profileId]
                 activeSchemaStore = PostgresConnectionManager.shared.schemaStores[profileId]
@@ -238,7 +238,7 @@ struct SidebarView: View {
                     let pgMatches = filteredPostgresProfiles()
                     if pgMatches.isEmpty {
                         Text("No matches")
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(Color.secondary)
                             .font(MidnightMacDesign.FontToken.caption)
                     } else {
                         // `id: \.self`, not the String `profile.id`: see

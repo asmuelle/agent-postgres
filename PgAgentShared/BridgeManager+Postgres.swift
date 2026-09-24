@@ -666,7 +666,7 @@ extension BridgeManager {
         connectionId: String,
         sessionId: String,
         statement: String,
-        _ work: @escaping () throws -> Void
+        _ work: @escaping @Sendable () throws -> Void
     ) async throws {
         let audit = PostgresConnectionAuditRegistry.shared.context(for: connectionId)
         do {
@@ -761,7 +761,7 @@ extension BridgeManager {
     /// Run a throwing FFI call on the bridge's utility queue and convert
     /// `FfiPgError` to `PostgresBridgeError` at the boundary. Keeps the
     /// pattern out of every method.
-    private func pgWrapping<T>(_ work: @escaping () throws -> T) async throws -> T {
+    private func pgWrapping<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
         do {
             return try await runOnUtilityQueuePg(work)
         } catch let err as FfiPgError {
@@ -775,7 +775,7 @@ extension BridgeManager {
     /// and this extension. Re-implemented inline because the original is
     /// `private`; mirroring the queue semantics keeps Postgres traffic on
     /// the same low-priority lane as monitor and SFTP probes.
-    fileprivate func runOnUtilityQueuePg<T>(_ work: @escaping () throws -> T) async throws -> T {
+    fileprivate func runOnUtilityQueuePg<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             postgresQueue.async {
                 do {
@@ -787,7 +787,7 @@ extension BridgeManager {
         }
     }
 
-    fileprivate func runOnUtilityQueuePgVoid(_ work: @escaping () -> Void) async {
+    fileprivate func runOnUtilityQueuePgVoid(_ work: @escaping @Sendable () -> Void) async {
         await withCheckedContinuation { continuation in
             postgresQueue.async {
                 work()

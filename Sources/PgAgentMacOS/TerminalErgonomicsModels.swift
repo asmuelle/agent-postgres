@@ -183,7 +183,7 @@ public enum TerminalSnippetRenderer {
         values["host"] = context.host
         values["username"] = context.username
         values["cwd"] = context.currentDirectory ?? ""
-        values["date"] = Self.dateFormatter.string(from: context.now)
+        values["date"] = Self.makeDateFormatter().string(from: context.now)
 
         var output = line
         for (key, value) in values {
@@ -252,11 +252,12 @@ public enum TerminalSnippetRenderer {
         "backspace": "\u{08}",
     ]
 
-    private static let dateFormatter: ISO8601DateFormatter = {
+    // Per call: ISO8601DateFormatter isn't Sendable, so it can't be a static.
+    private static func makeDateFormatter() -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withFullDate]
         return formatter
-    }()
+    }
 }
 
 public enum MidnightSSHDeepLinkKind: String, Codable, Equatable, Sendable {

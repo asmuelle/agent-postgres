@@ -301,7 +301,7 @@ struct CommandPaletteView: View {
             installKeyMonitor()
         }
         .onDisappear(perform: removeKeyMonitor)
-        .onChange(of: query) { _ in selectionIndex = 0 }
+        .onChangeCompat(of: query) { _ in selectionIndex = 0 }
     }
 
     // MARK: Subviews
@@ -348,7 +348,7 @@ struct CommandPaletteView: View {
                 .padding(6)
             }
             .frame(maxHeight: CGFloat(Self.visibleRows) * Self.rowHeight)
-            .onChange(of: selectionIndex) { newIndex in
+            .onChangeCompat(of: selectionIndex) { newIndex in
                 guard flatItems.indices.contains(newIndex) else { return }
                 proxy.scrollTo(flatItems[newIndex].id, anchor: nil)
             }

@@ -53,7 +53,7 @@ extension PostgresQueryTabView {
                         .font(.title)
                         .foregroundStyle(.secondary)
                     Text("No records to display")
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(Color.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -129,7 +129,7 @@ struct TransposedRowField: View {
                     .fontWeight(.semibold)
                 Text(columnType)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(Color.secondary)
             }
             .frame(width: 180, alignment: .leading)
             .padding(.vertical, 4)
@@ -150,7 +150,7 @@ struct TransposedRowField: View {
                         .textFieldStyle(.plain)
                         .padding(6)
                         .background(Color(NSColor.controlBackgroundColor))
-                        .cornerRadius(4)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
                         .overlay(
                             RoundedRectangle(cornerRadius: 4)
                                 .stroke(Color.blue, lineWidth: 1)
@@ -174,7 +174,7 @@ struct TransposedRowField: View {
                         if let currentValue {
                             Text(currentValue)
                                 .font(.system(.body, design: .monospaced))
-                                .foregroundColor(isStaged ? .blue : .primary)
+                                .foregroundStyle(isStaged ? Color.blue : Color.primary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
                                 .onTapGesture(count: 2) {
@@ -186,7 +186,7 @@ struct TransposedRowField: View {
                         } else {
                             Text("NULL")
                                 .font(.system(.body, design: .monospaced).italic())
-                                .foregroundColor(.secondary)
+                                .foregroundStyle(Color.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
                                 .onTapGesture(count: 2) {
@@ -199,7 +199,7 @@ struct TransposedRowField: View {
 
                         if editable {
                             Image(systemName: "pencil")
-                                .foregroundColor(.secondary.opacity(0.5))
+                                .foregroundStyle(Color.secondary.opacity(0.5))
                                 .font(.caption)
                                 .padding(.trailing, 4)
                         }
@@ -209,7 +209,7 @@ struct TransposedRowField: View {
                         isStaged ? Color.blue.opacity(0.08) :
                         (currentValue == nil ? Color.orange.opacity(0.05) : Color.clear)
                     )
-                    .cornerRadius(4)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
                             .stroke(

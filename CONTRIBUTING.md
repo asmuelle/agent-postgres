@@ -21,7 +21,7 @@ interact with over a network, you must offer them its source.
 
 Prerequisites (macOS):
 
-- macOS 14+ with Xcode 15+ and command-line tools (`xcode-select --install`)
+- macOS 14+ with Xcode 26+ (Swift 6.2+) and command-line tools (`xcode-select --install`)
 - Rust **1.95+** (edition 2024) — `rustup default stable`
 - [`just`](https://github.com/casey/just) — `brew install just`
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`

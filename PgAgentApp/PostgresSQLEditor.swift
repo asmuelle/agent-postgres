@@ -138,6 +138,11 @@ struct PostgresSQLEditor: NSViewRepresentable {
 
     // MARK: - Coordinator
 
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.stopObservingSnippets()
+    }
+
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: PostgresSQLEditor
         weak var textView: PgSQLTextView?
@@ -163,20 +168,27 @@ struct PostgresSQLEditor: NSViewRepresentable {
                 object: nil,
                 queue: .main
             ) { [weak self] note in
-                guard let self,
-                      let channel = self.parent.snippetChannel,
-                      (note.userInfo?["channel"] as? String) == channel,
-                      let body = note.userInfo?["body"] as? String,
-                      let textView = self.textView,
-                      textView.isEditable
-                else { return }
-                textView.insertSnippet(PostgresSnippetPlaceholders.parse(body))
+                let channel = note.userInfo?["channel"] as? String
+                guard let body = note.userInfo?["body"] as? String else { return }
+                // Delivered on `.main` (queue: .main above).
+                MainActor.assumeIsolated {
+                    guard let self,
+                          let ownChannel = self.parent.snippetChannel,
+                          channel == ownChannel,
+                          let textView = self.textView,
+                          textView.isEditable
+                    else { return }
+                    textView.insertSnippet(PostgresSnippetPlaceholders.parse(body))
+                }
             }
         }
 
-        deinit {
+        /// Called from `dismantleNSView` (main actor) — a nonisolated deinit
+        /// can't touch the main-actor observer token under Swift 6.
+        func stopObservingSnippets() {
             if let snippetObserver {
                 NotificationCenter.default.removeObserver(snippetObserver)
+                self.snippetObserver = nil
             }
         }
 
@@ -282,9 +294,8 @@ final class PgSQLTextView: NSTextView {
 
     private var snippetSession: SnippetSession?
 
-    deinit {
-        pendingCompletion?.cancel()
-    }
+    // No deinit cancel of `pendingCompletion`: the work item holds `self`
+    // weakly, so a completion that fires after deallocation is a no-op.
 
     /// Insert an expanded snippet at the caret (replacing any selection),
     /// then select the first tab stop. Tab / ⇧Tab move between stops while
@@ -481,8 +492,11 @@ final class PgSQLTextView: NSTextView {
 
     private func scheduleCompletion() {
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.window != nil else { return }
-            self.complete(nil)
+            // Scheduled on the main queue below.
+            MainActor.assumeIsolated {
+                guard let self, self.window != nil else { return }
+                self.complete(nil)
+            }
         }
         pendingCompletion = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.completionDebounce, execute: work)

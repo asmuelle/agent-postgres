@@ -51,10 +51,10 @@ private struct SSHKeyVaultRecord: Codable {
     let encryptedKey: Data
 }
 
-final class SSHKeyVault {
+final class SSHKeyVault: Sendable {
     static let shared = SSHKeyVault()
 
-    private let fileManager = FileManager.default
+    private var fileManager: FileManager { .default }
     private let maxKeyBytes = 256 * 1024
     private let keychainService = "com.mc-ssh.ssh.key-vault"
     private let keychainAccount = "master-key"

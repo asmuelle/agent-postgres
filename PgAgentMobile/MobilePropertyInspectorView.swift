@@ -260,7 +260,7 @@ struct MobilePropertyInspectorView: View {
             .onAppear {
                 resetFields()
             }
-            .onChange(of: node) { _ in
+            .onChange(of: node) { _, _ in
                 resetFields()
                 if activeTab == .ddl {
                     Task {
@@ -268,7 +268,7 @@ struct MobilePropertyInspectorView: View {
                     }
                 }
             }
-            .onChange(of: activeTab) { newValue in
+            .onChange(of: activeTab) { _, newValue in
                 if newValue == .ddl {
                     Task {
                         await loadReconstructedDDL()

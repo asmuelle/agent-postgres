@@ -13,14 +13,14 @@ options:
   deploymentTarget:
     macOS: "13.0"
     iOS: "17.0"
-  xcodeVersion: "15.0"
+  xcodeVersion: "26.0"
   postGenCommand: |
     # After project generation, copy the Rust library to a known location
     # that Xcode's linker can find without extra search paths.
 
 settings:
   base:
-    SWIFT_VERSION: "5.9"
+    SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     DEVELOPMENT_TEAM: "9QFT5JP875"
@@ -354,6 +354,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.tests
+        # Xcode 26+'s XCTest is built for macOS 14; test bundles never ship,
+        # so they deploy at 14 to avoid ld's "built for newer version" warning.
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
         PRODUCT_NAME: PgAgentMacOSTests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: ""
@@ -373,6 +376,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.app-tests
+        # Xcode 26+'s XCTest is built for macOS 14; test bundles never ship,
+        # so they deploy at 14 to avoid ld's "built for newer version" warning.
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
         PRODUCT_NAME: PgAgentAppTests
         GENERATE_INFOPLIST_FILE: YES
         # The app's PRODUCT_NAME is "pgAgent" (with a dash) which doesn't

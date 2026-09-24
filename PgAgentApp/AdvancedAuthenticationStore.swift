@@ -101,7 +101,7 @@ final class AdvancedAuthenticationStore: ObservableObject {
     }
 }
 
-final class SecureEnclaveSSHIdentityStore {
+final class SecureEnclaveSSHIdentityStore: Sendable {
     static let shared = SecureEnclaveSSHIdentityStore()
 
     private let keychainService = "com.mc-ssh.advanced-auth.secure-enclave"

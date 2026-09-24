@@ -528,7 +528,7 @@ extension PostgresQueryTabView {
                 store.setBatchMode(!tab.batchMode, forTab: tab.id)
             } label: {
                 Label(tab.batchMode ? "Batch Mode: ON" : "Batch Mode: OFF", systemImage: "square.stack.3d.up")
-                    .foregroundColor(tab.batchMode ? .cyan : .secondary)
+                    .foregroundStyle(tab.batchMode ? Color.cyan : Color.secondary)
             }
             .buttonStyle(.plain)
             .help("Toggle Batch Edit Mode. When enabled, edits are staged in-memory before committing.")
@@ -543,7 +543,7 @@ extension PostgresQueryTabView {
                     Image(systemName: "checkmark.circle")
                     Text("Apply \(tab.pendingEdits.isEmpty ? "" : "(\(tab.pendingEdits.count))")")
                 }
-                .foregroundColor(tab.pendingEdits.isEmpty || tab.isApplyingEdits ? .secondary : .green)
+                .foregroundStyle(tab.pendingEdits.isEmpty || tab.isApplyingEdits ? Color.secondary : Color.green)
             }
             .buttonStyle(.plain)
             // In flight → disabled, so a second click can't submit the same
@@ -559,7 +559,7 @@ extension PostgresQueryTabView {
                     Image(systemName: "arrow.counterclockwise")
                     Text("Discard")
                 }
-                .foregroundColor(tab.pendingEdits.isEmpty || tab.isApplyingEdits ? .secondary : .red)
+                .foregroundStyle(tab.pendingEdits.isEmpty || tab.isApplyingEdits ? Color.secondary : Color.red)
             }
             .buttonStyle(.plain)
             .disabled(tab.pendingEdits.isEmpty || tab.isApplyingEdits)
@@ -574,7 +574,7 @@ extension PostgresQueryTabView {
                 }
             } label: {
                 Label("Transposed", systemImage: "rectangle.split.2x1")
-                    .foregroundColor(isTransposed ? .blue : .secondary)
+                    .foregroundStyle(isTransposed ? Color.blue : Color.secondary)
             }
             .buttonStyle(.plain)
             .help("Toggle Transposed View (flips wide rows into a vertical column-value details panel)")
@@ -591,7 +591,7 @@ extension PostgresQueryTabView {
                     )
                 } label: {
                     Label("Explain", systemImage: "sparkles")
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(Color.secondary)
                 }
                 .buttonStyle(.plain)
                 .disabled(connectionId == nil
@@ -633,7 +633,7 @@ extension PostgresQueryTabView {
                 }
             } label: {
                 Label("Export", systemImage: "square.and.arrow.up")
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(Color.secondary)
             }
             .menuStyle(.borderlessButton)
             .frame(width: 90)

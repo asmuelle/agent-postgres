@@ -13,7 +13,10 @@ enum PgAgentEvent: Equatable {
     case showDashboard
 }
 
-final class PgAgentEventBus {
+// @unchecked: the only state is an immutable PassthroughSubject, and Combine
+// subjects serialize `send` internally, so publishing from the Rust callback
+// thread and subscribing from the main actor is safe.
+final class PgAgentEventBus: @unchecked Sendable {
     static let shared = PgAgentEventBus()
     let events = PassthroughSubject<PgAgentEvent, Never>()
     private init() {}

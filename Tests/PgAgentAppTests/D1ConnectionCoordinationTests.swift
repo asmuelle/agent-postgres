@@ -89,10 +89,12 @@ final class D1SerialAsyncQueueTests: XCTestCase {
             }
         }
 
-        async let refresh1: Void = queue.run(op("refresh1"))
-        async let shutdown: Void = queue.run(op("shutdown"))
-        async let refresh2: Void = queue.run(op("refresh2"))
-        _ = await (refresh1, shutdown, refresh2)
+        // Main-actor tasks (not `async let`, whose child tasks are
+        // nonisolated) so the ops' captured counters stay on one actor.
+        let refresh1 = Task { await queue.run(op("refresh1")) }
+        let shutdown = Task { await queue.run(op("shutdown")) }
+        let refresh2 = Task { await queue.run(op("refresh2")) }
+        _ = await (refresh1.value, shutdown.value, refresh2.value)
 
         XCTAssertEqual(maxRunning, 1)
         XCTAssertEqual(log.count, 6)

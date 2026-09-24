@@ -11,7 +11,7 @@ import PgAgentMacOS
 /// Import sources (in priority order):
 /// 1. Direct JSON file drag-and-drop or file picker
 /// 2. Automatic scan of the Tauri app's Application Support directory
-class ImportManager {
+final class ImportManager: Sendable {
     static let shared = ImportManager()
     private let logger = Logger(subsystem: "com.mc-ssh", category: "import")
 

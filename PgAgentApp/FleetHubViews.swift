@@ -65,7 +65,7 @@ struct FleetHubMenuView: View {
 
             Button("Open pgAgent") {
                 openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
+                NSApp.activateFromUserAction()
             }
         }
     }
@@ -138,7 +138,7 @@ struct FleetHubSettingsView: View {
                     "Act as monitoring hub for your other devices",
                     isOn: $settings.hubModeEnabled
                 )
-                .onChange(of: settings.hubModeEnabled) { enabled in
+                .onChangeCompat(of: settings.hubModeEnabled) { enabled in
                     FleetMonitorHub.shared.applyHubMode(enabled: enabled)
                 }
 

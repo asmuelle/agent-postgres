@@ -63,7 +63,7 @@ final class LiveActivityManager {
         state.progress = progress.map { min(1, max(0, $0)) } ?? state.progress
         state.detail = detail ?? state.detail
         let content = ActivityContent(state: state, staleDate: nil)
-        Task { await activity.update(content) }
+        Task.detached { await Self.resolve(id)?.update(content) }
     }
 
     /// Finish the activity with a success/failure state; it lingers briefly on
@@ -77,6 +77,17 @@ final class LiveActivityManager {
         state.detail = detail ?? state.detail
         let content = ActivityContent(state: state, staleDate: nil)
         let dismissal = Date().addingTimeInterval(Self.terminalDismissalDelay)
-        Task { await activity.end(content, dismissalPolicy: .after(dismissal)) }
+        Task.detached {
+            await Self.resolve(id)?.end(content, dismissalPolicy: .after(dismissal))
+        }
+    }
+
+    /// `Activity` isn't `Sendable`, so the main-actor-owned instance can't be
+    /// handed to ActivityKit's nonisolated async `update`/`end`. Re-resolve
+    /// the same system activity by id inside the detached task instead.
+    nonisolated private static func resolve(
+        _ id: String
+    ) -> Activity<PgOperationActivityAttributes>? {
+        Activity<PgOperationActivityAttributes>.activities.first { $0.id == id }
     }
 }

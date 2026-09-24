@@ -96,7 +96,7 @@ final class PostgresSnippetsStore: ObservableObject {
 
     /// Seeded on first run only. Bodies use `${n:default}` tab stops with
     /// `$0` as the final caret.
-    static let starterSnippets: [PostgresSnippet] = [
+    nonisolated static let starterSnippets: [PostgresSnippet] = [
         PostgresSnippet(
             title: "SELECT … WHERE",
             body: """

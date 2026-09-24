@@ -105,7 +105,7 @@ struct PostgresQueryTabView: View {
             switch tab.kind {
             case .query:
                 content(for: tab)
-                    .onChange(of: tabId) { _ in
+                    .onChangeCompat(of: tabId) { _ in
                         // The host reuses one view across tabs (swaps tabId), so
                         // reset per-tab grid affordances on switch.
                         resultFilter = ""

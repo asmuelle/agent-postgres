@@ -18,6 +18,7 @@ Welcome to the pgAgent codebase. This is a hybrid SwiftUI (AppKit/iOS) and Rust 
 3. **Check GitHub before building features**: Run `gh pr list` and `gh run list --limit 5` at session start. Open PRs from prior sessions may already implement the feature you're about to write, and CI health tells you whether main's gate is trustworthy.
 4. **Rust Threading**: All FFI functions in `src/ffi.rs` hitting the network must use `RUNTIME.block_on(async { ... })` to resolve on the Tokio runtime thread pool.
 5. **Swift Styling & UI**: SwiftUI views and dedicated `*Store` / `*Manager` classes handle state. Apply `@MainActor` to any class or function modifying the UI.
+6. **Swift 6 language mode (all targets)**: a closure written in main-actor code (SwiftUI `body`, `@MainActor` class) and handed to Combine/ObjC APIs that call it off-main *crashes at runtime* (`dispatch_assert_queue`) — the compiler can't catch it. `PgAgentEventBus` emits on the Rust callback thread: `.receive(on: DispatchQueue.main)` before any main-actor operator, or mark pre-hop closures `@Sendable`. CI builds with Xcode 26.x while local is Xcode 27 — guard 27-SDK APIs with `#if compiler(>=6.4)` + `#available`.
 
 ## 🔁 Verification Loop (run after edits)
 
