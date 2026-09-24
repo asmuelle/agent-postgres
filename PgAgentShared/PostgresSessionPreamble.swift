@@ -12,13 +12,18 @@ import Foundation
 // the user's trailing `;` / whitespace / comment tail is dropped here, and
 // server error positions are mapped back onto the user's original text.
 //
+// All offsets and lengths here are Unicode scalar (code point) counts:
+// Postgres reports positions in characters of the server encoding, which for
+// UTF-8 are code points — not Swift `Character`s (CRLF, emoji sequences and
+// combining marks are one Character but several code points).
+//
 // Platform-neutral: compiled into both the macOS and iOS apps.
 // =============================================================================
 
 struct PostgresSessionPreamble: Sendable, Equatable {
     /// The SQL to submit.
     let sql: String
-    /// Characters the preamble adds in front of the user's text.
+    /// Code points the preamble adds in front of the user's text.
     private let prefixLength: Int
     /// User-text offset (0-based) and length of the statement that runs on
     /// the cursor path; server positions inside it are relative to it.
@@ -33,19 +38,20 @@ struct PostgresSessionPreamble: Sendable, Equatable {
             // Nothing executable — send as-is so the server reports on it.
             return PostgresSessionPreamble(
                 sql: userSQL, prefixLength: 0, mainStart: 0,
-                mainLength: userSQL.count, submittedStart: 0
+                mainLength: userSQL.unicodeScalars.count, submittedStart: 0
             )
         }
         let prefix = "SET default_transaction_read_only = \(readOnly ? "on" : "off");\n"
-        let chars = Array(userSQL)
-        let end = last.startCharOffset + last.text.count
-        let body = String(chars[first.startCharOffset..<end])
+        let scalars = Array(userSQL.unicodeScalars)
+        let end = last.startScalarOffset + last.scalarCount
+        var body = String.UnicodeScalarView()
+        body.append(contentsOf: scalars[first.startScalarOffset..<end])
         return PostgresSessionPreamble(
-            sql: prefix + body,
-            prefixLength: prefix.count,
-            mainStart: last.startCharOffset,
-            mainLength: last.text.count,
-            submittedStart: first.startCharOffset
+            sql: prefix + String(body),
+            prefixLength: prefix.unicodeScalars.count,
+            mainStart: last.startScalarOffset,
+            mainLength: last.scalarCount,
+            submittedStart: first.startScalarOffset
         )
     }
 

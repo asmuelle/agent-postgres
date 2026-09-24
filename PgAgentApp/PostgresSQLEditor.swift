@@ -40,8 +40,9 @@ struct PostgresSQLEditor: NSViewRepresentable {
     /// string). `nil` — the default for other hosts of this editor — opts
     /// out of snippet notifications entirely.
     var snippetChannel: String? = nil
-    /// 0-based character offset (into `text`) to underline as the last query
-    /// error location, or `nil` for none. Mapped from the server's position.
+    /// 0-based offset (into `text`) to underline as the last query error
+    /// location, or `nil` for none. Counted in Unicode scalars (code points) —
+    /// the unit of the server's error position — not Swift Characters.
     var errorCharOffset: Int?
     /// Snapshot of the loaded schema metadata for completion. Evaluated
     /// lazily (and cached briefly) when the user triggers completion, so it
@@ -239,23 +240,24 @@ struct PostgresSQLEditor: NSViewRepresentable {
         }
 
         /// UTF-16 range of the identifier-ish run starting at `charOffset`
-        /// (0-based, counted in Characters), guaranteed at least one character.
-        /// A position one past the end (e.g. `SELECT 1 +`) underlines the last
-        /// character rather than vanishing.
+        /// (0-based, counted in Unicode scalars — code points, as Postgres
+        /// reports positions), guaranteed non-empty. A position one past the
+        /// end (e.g. `SELECT 1 +`) underlines the last code point rather than
+        /// vanishing. Scanning scalars keeps a CRLF (one Character, two code
+        /// points) or an emoji sequence before the error from shifting it.
         static func errorWordRange(in text: String, charOffset: Int) -> NSRange? {
-            guard !text.isEmpty, charOffset >= 0, charOffset <= text.count else { return nil }
-            let clampedOffset = min(charOffset, text.count - 1)
-            let start = text.index(text.startIndex, offsetBy: clampedOffset)
+            let scalars = text.unicodeScalars
+            let count = scalars.count
+            guard count > 0, charOffset >= 0, charOffset <= count else { return nil }
+            let start = scalars.index(scalars.startIndex, offsetBy: min(charOffset, count - 1))
             var end = start
-            while end < text.endIndex {
-                let c = text[end]
-                if c.isLetter || c.isNumber || c == "_" {
-                    end = text.index(after: end)
-                } else {
-                    break
-                }
+            while end < scalars.endIndex {
+                let c = scalars[end]
+                guard c.properties.isAlphabetic || c.properties.numericType != nil || c == "_"
+                else { break }
+                end = scalars.index(after: end)
             }
-            if end == start { end = text.index(after: start) }
+            if end == start { end = scalars.index(after: start) }
             return NSRange(start..<end, in: text)
         }
     }

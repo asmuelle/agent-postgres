@@ -34,21 +34,24 @@ extension PostgresQueryTabView {
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        // Build the ctid list from the in-memory rows. Keep the row
-        // index alongside so we can remove them after success.
+        // Build the ctid list from the in-memory rows; the write-back
+        // removes rows by these ctids after success.
         var ctids: [String] = []
-        var validIndices: [Int] = []
-        for idx in rowIndices where idx < result.rows.count {
+        for idx in rowIndices where idx >= 0 && idx < result.rows.count {
             let cells = result.rows[idx].cells
             guard rowIdColIdx < cells.count, let ctid = cells[rowIdColIdx] else { continue }
             ctids.append(ctid)
-            validIndices.append(idx)
         }
         guard !ctids.isEmpty else { return }
 
         let sessionId = tab.id.uuidString
         let storeRef = store
         let tabId = tab.id
+        // Identity of the result the ctids were read from. The write-back
+        // removes rows by ctid (not position) and only from this result, so
+        // a re-run, page switch, or concurrent delete can't make it drop the
+        // wrong rows.
+        let resultGeneration = tab.resultGeneration
         Task { @MainActor in
             do {
                 let outcome = try await BridgeManager.shared.pgDeleteRows(
@@ -58,13 +61,14 @@ extension PostgresQueryTabView {
                     table: target.table,
                     rowIds: ctids
                 )
-                // Drop the indices we asked to delete from the
-                // in-memory result regardless of the actual count —
-                // any "missing" rows are gone server-side too. The
-                // partial-success message tells the user when ctids
-                // had moved.
+                // Drop the rows we asked to delete from the in-memory
+                // result regardless of the actual count — any "missing"
+                // rows are gone server-side too. The partial-success
+                // message tells the user when ctids had moved.
                 storeRef.removeRows(
-                    rowIndexes: IndexSet(validIndices),
+                    withRowIds: Set(ctids),
+                    rowIdColumn: rowIdColIdx,
+                    expectedResultGeneration: resultGeneration,
                     forTab: tabId
                 )
                 if outcome.rowsAffected != UInt64(ctids.count) {
@@ -102,13 +106,22 @@ extension PostgresQueryTabView {
             complete(.failed(message: "Not connected, or this tab isn't tied to a table."))
             return
         }
+        // The row layout `edit.rowIndex` was resolved against. If the rows
+        // were replaced/shifted before we even start, the index is
+        // meaningless — refuse rather than stage/paint the wrong row.
+        let currentLayout = liveTab(tab.id)?.rowLayoutGeneration ?? tab.rowLayoutGeneration
+        let expectedLayout = edit.rowLayout ?? currentLayout
+        guard expectedLayout == currentLayout else {
+            complete(.failed(message: "The results changed before the edit was applied. Re-run the query and try again."))
+            return
+        }
 
         // Batch mode: stage the edit instead of writing through.
         // The visual update still flows (`.applied` → coordinator
         // mutates its in-memory copy + reloads). Discard later
         // restores from `originalValue`.
-        if tab.batchMode {
-            let original: String? = tab.lastResult.flatMap { result -> String? in
+        if liveTab(tab.id)?.batchMode ?? tab.batchMode {
+            let original: String? = (liveTab(tab.id)?.lastResult ?? tab.lastResult).flatMap { result -> String? in
                 guard edit.rowIndex < result.rows.count,
                       edit.columnIndex < result.rows[edit.rowIndex].cells.count
                 else { return nil }
@@ -141,7 +154,7 @@ extension PostgresQueryTabView {
         let sessionId = tab.id.uuidString
         let storeRef = store
         let tabId = tab.id
-        Task {
+        Task { @MainActor in
             do {
                 let res = try await BridgeManager.shared.pgUpdateCell(
                     connectionId: connectionId,
@@ -158,11 +171,15 @@ extension PostgresQueryTabView {
                     complete(.conflict)
                     return
                 }
+                // The UPDATE hit the right row server-side (by ctid); only
+                // the in-memory write-back is index-addressed, so it is
+                // dropped when a re-run/delete moved the rows meanwhile.
                 storeRef.setCellValue(
                     edit.newValue,
                     rowIndex: edit.rowIndex,
                     columnIndex: edit.columnIndex,
-                    forTab: tabId
+                    forTab: tabId,
+                    expectedRowLayout: expectedLayout
                 )
                 complete(.applied)
             } catch let err as PostgresBridgeError {
@@ -182,19 +199,26 @@ extension PostgresQueryTabView {
     /// cell and continue; the staged edits survive a rollback so the user can
     /// fix the offending value and retry.
     func commitPendingEdits(tab: PostgresQueryTab) {
-        guard let connectionId, let target = tab.editTarget else { return }
-        let pending = tab.pendingEdits
+        guard let connectionId, let target = tab.editTarget,
+              let live = liveTab(tab.id), !live.isApplyingEdits
+        else { return }
+        // Snapshot from the store, not the render-time `tab`: exactly these
+        // edits are applied, and exactly these are cleared afterwards.
+        let pending = live.pendingEdits
         guard !pending.isEmpty else { return }
         let sessionId = tab.id.uuidString
         let storeRef = store
         let tabId = tab.id
+        let rowLayout = live.rowLayoutGeneration
+        storeRef.setApplyingEdits(true, forTab: tabId)
         // Deterministic order — the server applies edits top-to-bottom.
         let edits = pending.sorted {
             ($0.key.rowIndex, $0.key.columnIndex) < ($1.key.rowIndex, $1.key.columnIndex)
         }
-        let ownTransaction = (tab.transactionState == .none)
+        let ownTransaction = (live.transactionState == .none)
 
         Task { @MainActor in
+            defer { storeRef.setApplyingEdits(false, forTab: tabId) }
             if ownTransaction {
                 do {
                     try await BridgeManager.shared.pgBegin(connectionId: connectionId, sessionId: sessionId)
@@ -254,18 +278,23 @@ extension PostgresQueryTabView {
                 }
             }
             // Committed. Revert the cells whose rows had moved/been deleted
-            // (their edits didn't apply), then clear the staged edits.
+            // (their edits didn't apply) — unless the user re-staged that
+            // cell while the Apply ran, or the rows moved under us — then
+            // clear exactly the edits this Apply submitted.
+            let restaged = liveTab(tabId)?.pendingEdits ?? [:]
             for key in conflictKeys {
-                if let edit = pending[key] {
-                    storeRef.setCellValue(
-                        edit.originalValue,
-                        rowIndex: key.rowIndex,
-                        columnIndex: key.columnIndex,
-                        forTab: tabId
-                    )
-                }
+                guard let edit = pending[key],
+                      restaged[key]?.newValue == edit.newValue
+                else { continue }
+                storeRef.setCellValue(
+                    edit.originalValue,
+                    rowIndex: key.rowIndex,
+                    columnIndex: key.columnIndex,
+                    forTab: tabId,
+                    expectedRowLayout: rowLayout
+                )
             }
-            storeRef.clearPendingEdits(forTab: tabId)
+            storeRef.removeAppliedPendingEdits(pending, forTab: tabId)
             if !conflictKeys.isEmpty {
                 presentBatchAlert(
                     title: "Applied \(succeeded), skipped \(conflictKeys.count)",
@@ -273,6 +302,12 @@ extension PostgresQueryTabView {
                 )
             }
         }
+    }
+
+    /// The tab's current state in the store. Closures built at render time
+    /// capture a `PostgresQueryTab` snapshot; async paths need the live one.
+    func liveTab(_ id: UUID) -> PostgresQueryTab? {
+        store.tabs.first { $0.id == id }
     }
 
     private func presentBatchAlert(title: String, message: String) {
@@ -289,7 +324,10 @@ extension PostgresQueryTabView {
 
     /// Throw away all staged edits, restoring original values.
     func discardPendingEdits(tab: PostgresQueryTab) {
-        let pending = tab.pendingEdits
+        // Discarding mid-Apply would revert values the batch may be about
+        // to commit; the toolbar disables Discard meanwhile too.
+        guard let live = liveTab(tab.id), !live.isApplyingEdits else { return }
+        let pending = live.pendingEdits
         guard !pending.isEmpty else { return }
         for (key, edit) in pending {
             store.setCellValue(
@@ -385,6 +423,9 @@ extension PostgresQueryTabView {
         let sessionId = tab.id.uuidString
         let storeRef = store
         let tabId = tab.id
+        // The new row is appended only to the result the sheet was opened
+        // for — its cells follow that result's column order.
+        let resultGeneration = tab.resultGeneration
         Task { @MainActor in
             do {
                 let inserted = try await BridgeManager.shared.pgInsertRow(
@@ -402,7 +443,9 @@ extension PostgresQueryTabView {
                 // `result.columns.map(\.name)` — so the ordering
                 // already matches. Just append.
                 let newRow = FfiPgRow(cells: inserted.cells)
-                storeRef.appendRow(newRow, forTab: tabId)
+                storeRef.appendRow(
+                    newRow, forTab: tabId, expectedResultGeneration: resultGeneration
+                )
                 complete(.success(()))
             } catch let err as PostgresBridgeError {
                 logger.error("insert_row failed: \(err.localizedDescription, privacy: .public)")

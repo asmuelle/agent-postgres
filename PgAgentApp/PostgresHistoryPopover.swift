@@ -221,10 +221,16 @@ struct PostgresHistoryPopover: View {
     private func relativeTime(_ date: Date) -> String {
         let interval = Date().timeIntervalSince(date)
         if interval < 60 { return "just now" }
+        return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    /// Built once rather than per row per render — formatter creation is
+    /// expensive and the list re-renders as the popover updates.
+    @MainActor private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .abbreviated
-        return f.localizedString(for: date, relativeTo: Date())
-    }
+        return f
+    }()
 
     private func formatDuration(_ ms: UInt32) -> String {
         if ms < 1_000 { return "\(ms)ms" }

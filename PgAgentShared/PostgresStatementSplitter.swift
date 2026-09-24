@@ -12,6 +12,11 @@ import Foundation
 // statement through the existing `pgExecute` bridge — which is what keeps
 // the read-only classifier and the write audit log applying per statement.
 //
+// Lexes Unicode scalars (code points), not Swift `Character`s: Postgres
+// positions count code points, and grapheme clustering would glue a CRLF
+// into one Character that never equals "\n" (so a `--` comment would run
+// to the end of a CRLF script).
+//
 // Platform-neutral: compiled into both the macOS and iOS apps.
 // =============================================================================
 
@@ -21,11 +26,14 @@ struct PostgresScriptStatement: Equatable, Sendable {
     /// embedded comments (a leading `-- note` line stays part of its
     /// statement) and does not include the terminating `;`.
     let text: String
-    /// Character offset (Swift `Character` count, matching how the editor's
-    /// `errorCharOffset` is measured) of `text`'s first character in the
-    /// original script. Lets a server error position inside statement N be
-    /// mapped back onto the editor's full text.
-    let startCharOffset: Int
+    /// Offset of `text`'s first code point in the original script, counted in
+    /// Unicode scalars — the unit of Postgres error positions and of the
+    /// editor's `errorCharOffset`. Lets a server error position inside
+    /// statement N be mapped back onto the editor's full text.
+    let startScalarOffset: Int
+
+    /// Length of `text` in Unicode scalars (the unit of `startScalarOffset`).
+    var scalarCount: Int { text.unicodeScalars.count }
 }
 
 enum PostgresStatementSplitter {
@@ -33,7 +41,7 @@ enum PostgresStatementSplitter {
     /// whitespace and/or comments (e.g. the tail after a trailing `;`)
     /// are dropped. A single-statement script returns one element.
     static func split(_ sql: String) -> [PostgresScriptStatement] {
-        let chars = Array(sql)
+        let chars = Array(sql.unicodeScalars)
         var statements: [PostgresScriptStatement] = []
         var segmentStart = 0
         for boundary in topLevelSemicolons(chars) + [chars.count] {
@@ -50,19 +58,21 @@ enum PostgresStatementSplitter {
     /// Build a statement from `chars[from..<to]`, or `nil` when the segment
     /// is effectively empty (whitespace and comments only).
     private static func makeStatement(
-        _ chars: [Character],
+        _ chars: [Unicode.Scalar],
         from: Int,
         to: Int
     ) -> PostgresScriptStatement? {
         guard from < to, hasRealToken(chars, from: from, to: to) else { return nil }
         var start = from
-        while start < to, chars[start].isWhitespace { start += 1 }
+        while start < to, isWhitespace(chars[start]) { start += 1 }
         var end = to
-        while end > start, chars[end - 1].isWhitespace { end -= 1 }
+        while end > start, isWhitespace(chars[end - 1]) { end -= 1 }
         guard start < end else { return nil }
+        var text = String.UnicodeScalarView()
+        text.append(contentsOf: chars[start..<end])
         return PostgresScriptStatement(
-            text: String(chars[start..<end]),
-            startCharOffset: start
+            text: String(text),
+            startScalarOffset: start
         )
     }
 
@@ -70,11 +80,11 @@ enum PostgresStatementSplitter {
     /// comments — mirrors `is_effectively_empty` in the core crate
     /// (inverted). A comment-only tail after the final `;` is not a
     /// statement.
-    private static func hasRealToken(_ chars: [Character], from: Int, to: Int) -> Bool {
+    private static func hasRealToken(_ chars: [Unicode.Scalar], from: Int, to: Int) -> Bool {
         var i = from
         while i < to {
             let c = chars[i]
-            if c.isWhitespace {
+            if isWhitespace(c) {
                 i += 1
             } else if c == "-", i + 1 < to, chars[i + 1] == "-" {
                 while i < to, chars[i] != "\n" { i += 1 }
@@ -102,12 +112,12 @@ enum PostgresStatementSplitter {
         case doubleQuote
         case lineComment
         case blockComment
-        case dollarQuote([Character])
+        case dollarQuote([Unicode.Scalar])
     }
 
-    /// Character indices of every `;` that sits outside strings, quoted
+    /// Scalar indices of every `;` that sits outside strings, quoted
     /// identifiers, comments, and dollar-quoted bodies.
-    private static func topLevelSemicolons(_ chars: [Character]) -> [Int] {
+    private static func topLevelSemicolons(_ chars: [Unicode.Scalar]) -> [Int] {
         var positions: [Int] = []
         var state = LexState.normal
         var i = 0
@@ -170,21 +180,33 @@ enum PostgresStatementSplitter {
     /// If a dollar-quote opener starts at `idx`, return its full delimiter
     /// (`$$`, `$body$`, …). The first tag character must be a letter or
     /// underscore — `$1` is a positional parameter, not a quote.
-    private static func dollarQuoteDelimiter(_ chars: [Character], at idx: Int) -> [Character]? {
+    private static func dollarQuoteDelimiter(_ chars: [Unicode.Scalar], at idx: Int) -> [Unicode.Scalar]? {
         guard idx < chars.count, chars[idx] == "$" else { return nil }
         var end = idx + 1
         guard end < chars.count else { return nil }
         if chars[end] == "$" { return Array(chars[idx...end]) }
-        guard chars[end].isLetter || chars[end] == "_" else { return nil }
+        guard isIdentifierStart(chars[end]) else { return nil }
         end += 1
-        while end < chars.count, chars[end].isLetter || chars[end].isNumber || chars[end] == "_" {
+        while end < chars.count, isIdentifierStart(chars[end]) || isDigit(chars[end]) {
             end += 1
         }
         guard end < chars.count, chars[end] == "$" else { return nil }
         return Array(chars[idx...end])
     }
 
-    private static func matches(_ chars: [Character], at idx: Int, delimiter: [Character]) -> Bool {
+    private static func isWhitespace(_ c: Unicode.Scalar) -> Bool {
+        c.properties.isWhitespace
+    }
+
+    private static func isIdentifierStart(_ c: Unicode.Scalar) -> Bool {
+        c.properties.isAlphabetic || c == "_"
+    }
+
+    private static func isDigit(_ c: Unicode.Scalar) -> Bool {
+        c.properties.numericType != nil
+    }
+
+    private static func matches(_ chars: [Unicode.Scalar], at idx: Int, delimiter: [Unicode.Scalar]) -> Bool {
         guard idx + delimiter.count <= chars.count else { return false }
         for k in 0..<delimiter.count where chars[idx + k] != delimiter[k] { return false }
         return true

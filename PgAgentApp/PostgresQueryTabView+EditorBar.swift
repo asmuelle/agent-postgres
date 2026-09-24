@@ -39,6 +39,8 @@ extension PostgresQueryTabView {
             // focus and before the text view sees the keystroke (no double-run).
             .overlay(alignment: .top) {
                 HStack(spacing: 0) {
+                    // `run` ignores the press while this tab is already
+                    // running, so the duplicate registration can't race.
                     Button("Run", action: { run(tab: tab) })
                         .keyboardShortcut(.return, modifiers: .command)
                         .opacity(0)
@@ -324,9 +326,15 @@ extension PostgresQueryTabView {
     }
 
     private func formatTime(_ d: Date) -> String {
+        Self.startedAtFormatter.string(from: d)
+    }
+
+    /// Built once: `DateFormatter` is expensive to create, and the status
+    /// bar re-renders on every store mutation while a query runs.
+    @MainActor private static let startedAtFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .none
         f.timeStyle = .medium
-        return f.string(from: d)
-    }
+        return f
+    }()
 }

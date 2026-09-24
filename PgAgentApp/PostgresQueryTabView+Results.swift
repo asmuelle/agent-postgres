@@ -239,7 +239,11 @@ extension PostgresQueryTabView {
             // Cheap change detection: the store bumps the tab's
             // revision whenever the rows change, so the table can
             // skip the 50k-row deep compare on unrelated updates.
-            revision: PostgresResultsRevision(tabId: tab.id, value: tab.resultsRevision),
+            revision: PostgresResultsRevision(
+                tabId: tab.id,
+                value: tab.resultsRevision,
+                rowLayout: tab.rowLayoutGeneration
+            ),
             filterText: resultFilter,
             // Continuous row numbering across browse pages; generic
             // SQL tabs number from 1.
@@ -254,7 +258,13 @@ extension PostgresQueryTabView {
             onHeaderSort: tab.browse != nil
                 ? { column in cycleBrowseSort(column: column, tab: tab) }
                 : nil,
-            onInspectCell: { inspectedCell = $0 },
+            onInspectCell: { cell in
+                // Pin the inspection to the current row layout so a save
+                // after a re-run can't write back into a different row.
+                var pinned = cell
+                pinned.rowLayout = store.tabs.first { $0.id == tab.id }?.rowLayoutGeneration
+                inspectedCell = pinned
+            },
             editable: canEdit,
             pendingEdits: tab.pendingEdits,
             onCellEdit: canEdit ? { edit, complete in
@@ -464,7 +474,12 @@ extension PostgresQueryTabView {
         let tabId = tab.id
         let sessionId = tab.id.uuidString
         let pageSize = store.pageSize
-        Task { @MainActor in
+        let logger = logger
+        // The page belongs to this exact result: a re-run while the fetch
+        // is in flight replaces the result (and cancels this task), and the
+        // store drops a page or error whose cursor/generation moved on.
+        let resultGeneration = tab.resultGeneration
+        let task = Task { @MainActor in
             do {
                 let page = try await BridgeManager.shared.pgFetchPage(
                     connectionId: connectionId,
@@ -473,22 +488,34 @@ extension PostgresQueryTabView {
                     count: pageSize
                 )
                 guard !Task.isCancelled else { return }
-                storeRef.appendPage(page, forTab: tabId)
-            } catch let err as PostgresBridgeError where err.isCursorExpired {
-                storeRef.setPaginationError(
-                    "Result was superseded. Re-run to fetch fresh data.",
+                storeRef.appendPage(
+                    page,
+                    cursorId: cursorId,
+                    resultGeneration: resultGeneration,
                     forTab: tabId
                 )
-            } catch let err as PostgresBridgeError {
-                storeRef.setPaginationError(
-                    err.errorDescription ?? "Failed to load more rows.",
-                    forTab: tabId
-                )
-                logger.error("loadMore failed: \(err.localizedDescription, privacy: .public)")
             } catch {
-                storeRef.setPaginationError(error.localizedDescription, forTab: tabId)
+                guard !Task.isCancelled else { return }
+                let message: String
+                if let err = error as? PostgresBridgeError {
+                    message = err.isCursorExpired
+                        ? "Result was superseded. Re-run to fetch fresh data."
+                        : (err.errorDescription ?? "Failed to load more rows.")
+                    if !err.isCursorExpired {
+                        logger.error("loadMore failed: \(err.localizedDescription, privacy: .public)")
+                    }
+                } else {
+                    message = error.localizedDescription
+                }
+                storeRef.setPaginationError(
+                    message,
+                    cursorId: cursorId,
+                    resultGeneration: resultGeneration,
+                    forTab: tabId
+                )
             }
         }
+        store.setLoadMoreTask(task, forTab: tabId)
     }
 
     // MARK: - JetBrains Mimic Results Grid Toolbar
@@ -516,10 +543,12 @@ extension PostgresQueryTabView {
                     Image(systemName: "checkmark.circle")
                     Text("Apply \(tab.pendingEdits.isEmpty ? "" : "(\(tab.pendingEdits.count))")")
                 }
-                .foregroundColor(tab.pendingEdits.isEmpty ? .secondary : .green)
+                .foregroundColor(tab.pendingEdits.isEmpty || tab.isApplyingEdits ? .secondary : .green)
             }
             .buttonStyle(.plain)
-            .disabled(tab.pendingEdits.isEmpty)
+            // In flight → disabled, so a second click can't submit the same
+            // batch concurrently on the same session.
+            .disabled(tab.pendingEdits.isEmpty || tab.isApplyingEdits)
             .help("Apply all staged edits atomically — they commit together or not at all.")
 
             // Discard staged edits (in-memory; nothing was sent to the server).
@@ -530,10 +559,10 @@ extension PostgresQueryTabView {
                     Image(systemName: "arrow.counterclockwise")
                     Text("Discard")
                 }
-                .foregroundColor(tab.pendingEdits.isEmpty ? .secondary : .red)
+                .foregroundColor(tab.pendingEdits.isEmpty || tab.isApplyingEdits ? .secondary : .red)
             }
             .buttonStyle(.plain)
-            .disabled(tab.pendingEdits.isEmpty)
+            .disabled(tab.pendingEdits.isEmpty || tab.isApplyingEdits)
             .help("Discard all staged edits.")
 
             Divider().frame(height: 14)

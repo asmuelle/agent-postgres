@@ -160,10 +160,11 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     /// AI output without interfering with SQL the user typed or edited. Set by
     /// `setAIGeneratedSQL`; cleared the moment the editor text changes.
     var aiGeneratedSQL: String?
-    /// 0-based character offset into `sql` to underline as the location of the
-    /// last query error, mapped from the server's 1-based error position.
-    /// `nil` when the last run succeeded or carried no position. Cleared on any
-    /// edit (the offset is meaningless against changed text).
+    /// 0-based offset into `sql`, counted in Unicode scalars (code points —
+    /// the unit Postgres reports positions in), to underline as the location
+    /// of the last query error. `nil` when the last run succeeded or carried
+    /// no position. Cleared on any edit (the offset is meaningless against
+    /// changed text).
     var errorCharOffset: Int?
     /// Server-side sort + pagination state for relation-browse tabs.
     /// `nil` for generic SQL tabs (and for browse tabs the user took
@@ -189,6 +190,24 @@ struct PostgresQueryTab: Identifiable, @unchecked Sendable {
     /// another routine instead of adding a tab. Editing or double-clicking
     /// pins it (`pinTab`) so unsaved work is never replaced.
     var isPreview: Bool = false
+    /// Bumped by `beginRun` each time a run (statement, script, browse
+    /// page) starts. A run's completion may only write tab state while its
+    /// generation is still current — a superseded run finishing late must
+    /// never overwrite the newer run's result, status, or error underline.
+    var runGeneration: UInt64 = 0
+    /// Identity of `lastResult`: bumped whenever the result is *replaced*
+    /// (new run, browse page, script statement selection), not when it is
+    /// edited in place. Async follow-ups (Load more, INSERT/DELETE
+    /// write-back) capture it and drop their write when it has moved.
+    var resultGeneration: UInt64 = 0
+    /// Bumped whenever row *positions* may have changed: result replacement
+    /// or row removal. Index-addressed write-backs (cell updates, paste
+    /// loops) capture it and skip the write when it has moved, so a value
+    /// can never be painted into whichever row now sits at that index.
+    var rowLayoutGeneration: UInt64 = 0
+    /// `true` while an Apply of staged edits is in flight. Gates the Apply
+    /// button so the same batch can't be submitted twice concurrently.
+    var isApplyingEdits: Bool = false
 
     init(
         id: UUID = UUID(),
@@ -555,6 +574,8 @@ final class PostgresQueryTabsStore: ObservableObject {
     }
 
     func closeTab(id: UUID) {
+        runTasks.removeValue(forKey: id)?.cancel()
+        loadMoreTasks.removeValue(forKey: id)?.cancel()
         tabs.removeAll { $0.id == id }
         if activeTabId == id {
             activeTabId = tabs.last?.id
@@ -623,34 +644,50 @@ final class PostgresQueryTabsStore: ObservableObject {
     }
 
     /// Map a 1-based Postgres error position (into the trimmed SQL that was
-    /// executed) onto a 0-based character offset in the tab's current editor
+    /// executed) onto a 0-based scalar offset in the tab's current editor
     /// text, for the editor to underline. `nil` clears the underline.
     func setErrorPosition(_ position: UInt32?, forTab id: UUID) {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
-        guard let position, position >= 1 else {
+        guard let position else {
             if tabs[idx].errorCharOffset != nil {
                 mutate(id: id) { $0.errorCharOffset = nil }
             }
             return
         }
-        // Postgres reports `position` in characters (not bytes), 1-based — which
-        // aligns with Swift Character offsets for ASCII/typical SQL. `trimmed`
-        // (what the server saw) drops leading whitespace from `sql`, so shift by
-        // the leading-whitespace length to land on the right editor character.
-        let sql = tabs[idx].sql
-        let leadingWhitespace = sql.prefix(while: { $0.isWhitespace }).count
-        let offset = leadingWhitespace + Int(position) - 1
-        let clamped = (offset >= 0 && offset <= sql.count) ? offset : nil
-        mutate(id: id) { $0.errorCharOffset = clamped }
+        let offset = Self.editorScalarOffset(
+            forServerPosition: position,
+            inTrimmedSQLOf: tabs[idx].sql
+        )
+        mutate(id: id) { $0.errorCharOffset = offset }
     }
 
-    /// Set the error underline at an absolute 0-based character offset into
+    /// Pure mapping behind `setErrorPosition`. Postgres reports `position`
+    /// 1-based in *characters of the server encoding* — code points for
+    /// UTF-8, i.e. Unicode scalars, not Swift `Character`s (a CRLF is one
+    /// Character but two code points; an emoji ZWJ sequence is one Character
+    /// but many). The executed text was `sql` trimmed of leading
+    /// whitespace/newlines, so shift by that many scalars. Returns `nil` for
+    /// positions outside the text.
+    nonisolated static func editorScalarOffset(
+        forServerPosition position: UInt32,
+        inTrimmedSQLOf sql: String
+    ) -> Int? {
+        guard position >= 1 else { return nil }
+        let scalars = sql.unicodeScalars
+        let leading = scalars.prefix(while: {
+            CharacterSet.whitespacesAndNewlines.contains($0)
+        }).count
+        let offset = leading + Int(position) - 1
+        return (offset >= 0 && offset <= scalars.count) ? offset : nil
+    }
+
+    /// Set the error underline at an absolute 0-based scalar offset into
     /// the tab's current editor text. Used by the script path, which knows
     /// each statement's offset in the full script and can therefore map a
     /// per-statement server error position itself. `nil` clears.
     func setAbsoluteErrorOffset(_ offset: Int?, forTab id: UUID) {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
-        let count = tabs[idx].sql.count
+        let count = tabs[idx].sql.unicodeScalars.count
         let clamped = offset.flatMap { ($0 >= 0 && $0 <= count) ? $0 : nil }
         mutate(id: id) { $0.errorCharOffset = clamped }
     }
@@ -676,7 +713,11 @@ final class PostgresQueryTabsStore: ObservableObject {
             tab.paginationError = nil
             tab.isLoadingMore = false
             tab.resultsRevision &+= 1
+            tab.resultGeneration &+= 1
+            tab.rowLayoutGeneration &+= 1
         }
+        // A pending "Load more" belongs to the result just swapped out.
+        cancelLoadMore(forTab: id)
     }
 
     /// Place AI-generated SQL into the editor and remember it verbatim, so
@@ -730,7 +771,10 @@ final class PostgresQueryTabsStore: ObservableObject {
             $0.paginationError = nil
             $0.isLoadingMore = false
             $0.resultsRevision &+= 1
+            $0.resultGeneration &+= 1
+            $0.rowLayoutGeneration &+= 1
         }
+        cancelLoadMore(forTab: id)
     }
 
     /// Replace or clear a tab's browse state (server-side sort /
@@ -757,7 +801,10 @@ final class PostgresQueryTabsStore: ObservableObject {
             tab.paginationError = nil
             tab.isLoadingMore = false
             tab.resultsRevision &+= 1
+            tab.resultGeneration &+= 1
+            tab.rowLayoutGeneration &+= 1
         }
+        cancelLoadMore(forTab: id)
     }
 
     /// Read-and-clear the auto-run flag. Returns `true` exactly once
@@ -777,10 +824,31 @@ final class PostgresQueryTabsStore: ObservableObject {
 
     /// Append a fetched page to the tab's accumulated result, and
     /// clear the cursor handle when the cursor has exhausted.
+    ///
+    /// The page is only appended when it still belongs to the displayed
+    /// result: same result generation *and* same cursor handle as when the
+    /// fetch started. A page that lands after a re-run (or a script
+    /// statement switch) is dropped rather than grafted onto the newer
+    /// result. Returns whether the page was applied.
+    ///
+    /// Legacy unguarded variant (still used by the iOS workspace): prefer
+    /// the `cursorId:resultGeneration:` overload, which drops stale pages.
+    func appendPage(_ page: FfiPgPageResult, forTab id: UUID) {
+        guard let tab = tabs.first(where: { $0.id == id }),
+              let cursorId = tab.lastResult?.cursorId
+        else { return }
+        appendPage(page, cursorId: cursorId, resultGeneration: tab.resultGeneration, forTab: id)
+    }
+
+    @discardableResult
     func appendPage(
         _ page: FfiPgPageResult,
+        cursorId: String,
+        resultGeneration: UInt64,
         forTab id: UUID
-    ) {
+    ) -> Bool {
+        guard isCurrentPageFetch(cursorId: cursorId, resultGeneration: resultGeneration, forTab: id)
+        else { return false }
         mutate(id: id) { tab in
             guard var result = tab.lastResult else { return }
             result.rows.append(contentsOf: page.rows)
@@ -794,19 +862,35 @@ final class PostgresQueryTabsStore: ObservableObject {
             tab.paginationError = nil
             tab.resultsRevision &+= 1
         }
+        return true
+    }
+
+    /// Whether a "Load more" started against (`cursorId`,
+    /// `resultGeneration`) still targets the tab's displayed result.
+    func isCurrentPageFetch(cursorId: String, resultGeneration: UInt64, forTab id: UUID) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return false }
+        return tab.resultGeneration == resultGeneration && tab.lastResult?.cursorId == cursorId
     }
 
     /// Mutate a cell value in the tab's accumulated result. Called
     /// after a successful UPDATE so the grid reflects the new value
     /// without re-querying.
+    ///
+    /// Pass `expectedRowLayout` (the tab's `rowLayoutGeneration` captured
+    /// when the edit was issued) from async paths: when the rows have been
+    /// replaced or shifted since, the write is dropped instead of landing
+    /// in whatever row now occupies `rowIndex`.
     func setCellValue(
         _ value: String?,
         rowIndex: Int,
         columnIndex: Int,
-        forTab id: UUID
+        forTab id: UUID,
+        expectedRowLayout: UInt64? = nil
     ) {
         mutate(id: id) { tab in
+            if let expectedRowLayout, tab.rowLayoutGeneration != expectedRowLayout { return }
             guard var result = tab.lastResult,
+                  rowIndex >= 0,
                   rowIndex < result.rows.count,
                   columnIndex < result.rows[rowIndex].cells.count
             else { return }
@@ -853,11 +937,59 @@ final class PostgresQueryTabsStore: ObservableObject {
         mutate(id: id) { $0.pendingEdits = [:] }
     }
 
+    /// Mark an Apply of staged edits as in flight (or finished).
+    func setApplyingEdits(_ applying: Bool, forTab id: UUID) {
+        mutate(id: id) { $0.isApplyingEdits = applying }
+    }
+
+    /// Remove exactly the staged edits a finished Apply committed. Edits
+    /// staged while the Apply was in flight survive: a new cell stays as is,
+    /// and a cell re-staged with a different value keeps its new value but
+    /// takes the committed value as its original (that is now the server
+    /// truth a Discard should restore).
+    func removeAppliedPendingEdits(
+        _ applied: [PostgresPendingEditKey: PostgresPendingEdit],
+        forTab id: UUID
+    ) {
+        mutate(id: id) { tab in
+            tab.pendingEdits = Self.pendingEdits(tab.pendingEdits, removingApplied: applied)
+        }
+    }
+
+    /// Pure core of `removeAppliedPendingEdits`, exposed for tests.
+    nonisolated static func pendingEdits(
+        _ current: [PostgresPendingEditKey: PostgresPendingEdit],
+        removingApplied applied: [PostgresPendingEditKey: PostgresPendingEdit]
+    ) -> [PostgresPendingEditKey: PostgresPendingEdit] {
+        var remaining = current
+        for (key, done) in applied {
+            guard let now = remaining[key] else { continue }
+            if now.newValue == done.newValue && now.rowId == done.rowId {
+                remaining[key] = nil
+            } else {
+                remaining[key] = PostgresPendingEdit(
+                    columnName: now.columnName,
+                    columnType: now.columnType,
+                    originalValue: done.newValue,
+                    newValue: now.newValue,
+                    rowId: now.rowId
+                )
+            }
+        }
+        return remaining
+    }
+
     /// Append a freshly-INSERTed row to the tab's accumulated
     /// result. Used by the INSERT row flow so the new row appears
-    /// in the grid without re-running the query.
-    func appendRow(_ row: FfiPgRow, forTab id: UUID) {
+    /// in the grid without re-running the query. With
+    /// `expectedResultGeneration`, the row is dropped when the result was
+    /// replaced while the INSERT was in flight (it would not match the
+    /// newer result's shape or query).
+    func appendRow(_ row: FfiPgRow, forTab id: UUID, expectedResultGeneration: UInt64? = nil) {
         mutate(id: id) { tab in
+            if let expectedResultGeneration, tab.resultGeneration != expectedResultGeneration {
+                return
+            }
             guard var result = tab.lastResult else { return }
             result.rows.append(row)
             tab.lastResult = result
@@ -881,6 +1013,35 @@ final class PostgresQueryTabsStore: ObservableObject {
             }
             tab.lastResult = result
             tab.resultsRevision &+= 1
+            tab.rowLayoutGeneration &+= 1
+        }
+    }
+
+    /// Remove the rows whose row identifier (the hidden ctid column at
+    /// `rowIdColumn`) is in `rowIds` — the post-DELETE write-back. Matching
+    /// by identity rather than position keeps a concurrent delete, insert,
+    /// or page append from shifting the wrong rows out. Skipped entirely
+    /// when the result was replaced since the DELETE was issued.
+    func removeRows(
+        withRowIds rowIds: Set<String>,
+        rowIdColumn: Int,
+        expectedResultGeneration: UInt64,
+        forTab id: UUID
+    ) {
+        guard !rowIds.isEmpty else { return }
+        mutate(id: id) { tab in
+            guard tab.resultGeneration == expectedResultGeneration,
+                  var result = tab.lastResult
+            else { return }
+            let before = result.rows.count
+            result.rows.removeAll { row in
+                rowIdColumn < row.cells.count
+                    && row.cells[rowIdColumn].map { rowIds.contains($0) } == true
+            }
+            guard result.rows.count != before else { return }
+            tab.lastResult = result
+            tab.resultsRevision &+= 1
+            tab.rowLayoutGeneration &+= 1
         }
     }
 
@@ -909,5 +1070,78 @@ final class PostgresQueryTabsStore: ObservableObject {
                 tab.lastResult = result
             }
         }
+    }
+
+    /// `setPaginationError` for a fetch started against (`cursorId`,
+    /// `resultGeneration`): a failure of a stale fetch must not flag — or
+    /// drop the cursor of — the newer result now on screen.
+    func setPaginationError(
+        _ message: String,
+        cursorId: String,
+        resultGeneration: UInt64,
+        forTab id: UUID
+    ) {
+        guard isCurrentPageFetch(cursorId: cursorId, resultGeneration: resultGeneration, forTab: id)
+        else { return }
+        setPaginationError(message, forTab: id)
+    }
+
+    // MARK: - Run / fetch task ownership
+    //
+    // Tasks live here, keyed by tab, rather than in the view's @State: the
+    // host reuses one query view across tabs (it swaps `tabId`), so a
+    // view-owned handle would let a run in tab B cancel tab A's run.
+
+    private var runTasks: [UUID: Task<Void, Never>] = [:]
+    private var loadMoreTasks: [UUID: Task<Void, Never>] = [:]
+
+    /// Start a new run generation for the tab, cancelling the previous
+    /// run's Swift task and any in-flight "Load more". Returns the new
+    /// generation (`nil` when the tab is gone); only a completion holding
+    /// the current generation may write run state.
+    @discardableResult
+    func beginRun(forTab id: UUID) -> UInt64? {
+        guard tabs.contains(where: { $0.id == id }) else { return nil }
+        runTasks.removeValue(forKey: id)?.cancel()
+        cancelLoadMore(forTab: id)
+        var generation: UInt64 = 0
+        mutate(id: id) { tab in
+            tab.runGeneration &+= 1
+            generation = tab.runGeneration
+        }
+        return generation
+    }
+
+    /// Whether `generation` is still the tab's latest run.
+    func isCurrentRun(_ generation: UInt64, forTab id: UUID) -> Bool {
+        tabs.first(where: { $0.id == id })?.runGeneration == generation
+    }
+
+    /// Whether the tab's latest run is still executing.
+    func isRunning(tabId id: UUID) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return false }
+        if case .running = tab.execState { return true }
+        return false
+    }
+
+    func setRunTask(_ task: Task<Void, Never>, forTab id: UUID) {
+        runTasks[id] = task
+    }
+
+    /// Cancel the tab's run task (the user pressed Cancel). The run
+    /// generation is left alone: the run is still the latest, so its
+    /// completion reports the cancellation (or the result, if the server
+    /// finished first).
+    func cancelRunTask(forTab id: UUID) {
+        runTasks[id]?.cancel()
+    }
+
+    func setLoadMoreTask(_ task: Task<Void, Never>, forTab id: UUID) {
+        loadMoreTasks.removeValue(forKey: id)?.cancel()
+        loadMoreTasks[id] = task
+    }
+
+    func cancelLoadMore(forTab id: UUID) {
+        loadMoreTasks.removeValue(forKey: id)?.cancel()
     }
 }

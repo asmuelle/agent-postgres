@@ -124,27 +124,50 @@ final class PostgresStatementSplitterTests: XCTestCase {
 
     // MARK: - Offsets (error-position mapping)
 
-    func testStartOffsetsAreCharacterOffsetsIntoTheOriginalScript() {
+    func testStartOffsetsAreScalarOffsetsIntoTheOriginalScript() {
         let sql = "SELECT 1;\n  SELECT 2"
         let statements = PostgresStatementSplitter.split(sql)
         XCTAssertEqual(statements.count, 2)
-        XCTAssertEqual(statements[0].startCharOffset, 0)
-        // "SELECT 1;\n  " → the second statement starts at character 12.
-        XCTAssertEqual(statements[1].startCharOffset, 12)
+        XCTAssertEqual(statements[0].startScalarOffset, 0)
+        // "SELECT 1;\n  " → the second statement starts at code point 12.
+        XCTAssertEqual(statements[1].startScalarOffset, 12)
         // Round-trip: slicing the original at the offset yields the text.
         for statement in statements {
-            let start = sql.index(sql.startIndex, offsetBy: statement.startCharOffset)
-            XCTAssertTrue(sql[start...].hasPrefix(statement.text))
+            XCTAssertTrue(Self.suffix(of: sql, fromScalar: statement.startScalarOffset)
+                .hasPrefix(statement.text))
         }
     }
 
-    func testOffsetsCountCharactersNotUTF16() {
-        // 🐘 is one Character (what errorCharOffset counts) but 2 UTF-16
-        // units — the splitter must count Characters.
+    func testOffsetsCountCodePointsNotUTF16() {
+        // 🐘 is one code point but 2 UTF-16 units.
         let sql = "SELECT '🐘'; SELECT 2"
         let statements = PostgresStatementSplitter.split(sql)
         XCTAssertEqual(statements.count, 2)
-        let start = sql.index(sql.startIndex, offsetBy: statements[1].startCharOffset)
-        XCTAssertTrue(sql[start...].hasPrefix("SELECT 2"))
+        XCTAssertEqual(statements[1].startScalarOffset, 12)
+        XCTAssertTrue(Self.suffix(of: sql, fromScalar: statements[1].startScalarOffset)
+            .hasPrefix("SELECT 2"))
+    }
+
+    func testOffsetsCountCodePointsNotCharacters() {
+        // A ZWJ family emoji is one Character but 5 code points; CRLF is one
+        // Character but 2 code points. Postgres counts code points.
+        let sql = "SELECT '👨‍👩‍👧';\r\nSELECT 2"
+        let statements = PostgresStatementSplitter.split(sql)
+        XCTAssertEqual(statements.count, 2)
+        XCTAssertEqual(statements[1].startScalarOffset, 8 + 5 + 2 + 2)
+        XCTAssertTrue(Self.suffix(of: sql, fromScalar: statements[1].startScalarOffset)
+            .hasPrefix("SELECT 2"))
+    }
+
+    func testLineCommentEndsAtCRLF() {
+        // Grapheme clustering glues "\r\n" into one Character that never
+        // equals "\n"; lexing code points must still end the comment there.
+        let sql = "SELECT 1 -- note\r\n;\r\nSELECT 2"
+        let statements = PostgresStatementSplitter.split(sql)
+        XCTAssertEqual(statements.map(\.text), ["SELECT 1 -- note", "SELECT 2"])
+    }
+
+    private static func suffix(of sql: String, fromScalar offset: Int) -> String {
+        String(sql.unicodeScalars.dropFirst(offset))
     }
 }

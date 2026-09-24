@@ -42,7 +42,6 @@ struct PostgresQueryTabView: View {
     /// reconnecting / disconnected state when the tab is foregrounded.
     let connectionId: String?
 
-    @State private var runTask: Task<Void, Never>? = nil
     @State var historyOpen: Bool = false
     @State var savedOpen: Bool = false
     @State var snippetsOpen: Bool = false
@@ -146,7 +145,9 @@ struct PostgresQueryTabView: View {
                         guard tab.pendingAutoRun,
                               store.consumeAutoRun(forTab: tab.id)
                         else { return }
-                        run(tab: tab)
+                        // A sidebar double-click is an explicit request for
+                        // fresh data: it supersedes a run still in flight.
+                        run(tab: tab, supersedingInFlight: true)
                     }
             case .routine(let schema, let name, let signature):
                 PostgresRoutineEditorView(
@@ -277,7 +278,9 @@ struct PostgresQueryTabView: View {
                 // The user takes ownership: drop AI provenance so the same
                 // statement isn't re-challenged, then execute it directly.
                 store.mutate(id: pending.tabId) { $0.aiGeneratedSQL = nil }
-                execute(tabId: pending.tabId, connectionId: pending.connectionId, sql: pending.sql)
+                if !store.isRunning(tabId: pending.tabId) {
+                    execute(tabId: pending.tabId, connectionId: pending.connectionId, sql: pending.sql)
+                }
                 pendingAIWrite = nil
             }
             Button("Cancel", role: .cancel) { pendingAIWrite = nil }
@@ -322,7 +325,8 @@ struct PostgresQueryTabView: View {
     /// The regenerated SQL replaces the editor text — same
     /// see-what-runs convention as the original generated tab; the
     /// re-run is immediate because the user asked for it through the
-    /// grid controls.
+    /// grid controls. A page/sort request supersedes any run still in
+    /// flight (the stale one is cancelled server-side first).
     private func applyBrowse(_ newBrowse: PostgresBrowseState, tab: PostgresQueryTab) {
         guard let connectionId else { return }
         let sql = newBrowse.sql()
@@ -358,7 +362,12 @@ struct PostgresQueryTabView: View {
 
     // MARK: - Actions
 
-    func run(tab: PostgresQueryTab) {
+    /// Run the tab's SQL. Ignored while the tab already has a run in flight
+    /// (⌘↵ is registered twice — toolbar and hidden editor overlay — and a
+    /// second press must not start a racing run); `supersedingInFlight`
+    /// lets auto-run replace the in-flight run instead.
+    func run(tab: PostgresQueryTab, supersedingInFlight: Bool = false) {
+        if !supersedingInFlight, store.isRunning(tabId: tab.id) { return }
         guard let connectionId else {
             store.setExecState(
                 .failed(message: "Not connected.", elapsed: 0),
@@ -411,8 +420,15 @@ struct PostgresQueryTabView: View {
 
     /// Submit `sql` to the engine. Split out from `run` so the AI-write
     /// confirmation can call straight through once the user accepts.
+    ///
+    /// Each call starts a new run generation for the tab; only the latest
+    /// generation may write result / status / error-underline state, so a
+    /// superseded run finishing late can never overwrite a newer one. A run
+    /// still in flight is cancelled server-side before the new statement is
+    /// submitted on the same session.
     private func execute(tabId: UUID, connectionId: String, sql trimmed: String) {
-        runTask?.cancel()
+        let supersedes = store.isRunning(tabId: tabId)
+        guard let generation = store.beginRun(forTab: tabId) else { return }
         let started = Date()
         store.setExecState(.running(startedAt: started), forTab: tabId)
         store.setErrorPosition(nil, forTab: tabId)
@@ -421,7 +437,14 @@ struct PostgresQueryTabView: View {
         let storeRef = store
         let sessionId = tabId.uuidString
         let pageSize = store.pageSize
-        runTask = Task { @MainActor in
+        let profileId = profileId
+        let logger = logger
+        let task = Task { @MainActor in
+            if supersedes {
+                _ = await BridgeManager.shared.pgCancel(
+                    connectionId: connectionId, sessionId: sessionId
+                )
+            }
             do {
                 let result = try await BridgeManager.shared.pgExecute(
                     connectionId: connectionId,
@@ -430,21 +453,9 @@ struct PostgresQueryTabView: View {
                     pageSize: pageSize
                 )
                 let elapsed = Date().timeIntervalSince(started)
-                guard !Task.isCancelled else {
-                    storeRef.setExecState(.cancelled(elapsed: elapsed), forTab: tabId)
-                    return
-                }
-                // Browse tabs derive `hasNextPage` from the page fill
-                // and never expose the cursor-based "Load more" path.
-                if storeRef.tabs.first(where: { $0.id == tabId })?.browse != nil {
-                    storeRef.setBrowseResult(result, forTab: tabId)
-                } else {
-                    storeRef.setResult(result, forTab: tabId)
-                }
-                storeRef.setExecState(
-                    .completed(elapsed: elapsed, atTime: Date()),
-                    forTab: tabId
-                )
+                // The statement completed server-side whatever happens to
+                // the UI: keep the session's transaction tracking and the
+                // history truthful even for a superseded run.
                 storeRef.applyTransactionEffect(sql: trimmed, error: nil, tabId: tabId)
                 // Record successful executions only — failures and
                 // cancellations don't represent something the user
@@ -456,38 +467,52 @@ struct PostgresQueryTabView: View {
                     durationMs: UInt32(min(elapsed * 1000, Double(UInt32.max))),
                     rowsReturned: rowsReturned
                 )
-            } catch let err as PostgresBridgeError {
-                let elapsed = Date().timeIntervalSince(started)
+                guard storeRef.isCurrentRun(generation, forTab: tabId) else { return }
+                // A result that arrived is shown even if the user pressed
+                // Cancel meanwhile — the statement did run (a write really
+                // happened), so "Cancelled" would misreport it.
+                // Browse tabs derive `hasNextPage` from the page fill
+                // and never expose the cursor-based "Load more" path.
+                if storeRef.tabs.first(where: { $0.id == tabId })?.browse != nil {
+                    storeRef.setBrowseResult(result, forTab: tabId)
+                } else {
+                    storeRef.setResult(result, forTab: tabId)
+                }
                 storeRef.setExecState(
-                    .failed(message: err.errorDescription ?? "Query failed", elapsed: elapsed),
+                    .completed(elapsed: elapsed, atTime: Date()),
                     forTab: tabId
                 )
-                storeRef.applyTransactionEffect(sql: trimmed, error: err, tabId: tabId)
-                // Underline the offending token in the editor when the server
-                // reported an error position (syntax errors, type mismatches…).
-                storeRef.setErrorPosition(err.serverError?.position, forTab: tabId)
-                logger.error("query failed: \(err.localizedDescription, privacy: .public)")
             } catch {
                 let elapsed = Date().timeIntervalSince(started)
+                let bridgeError = error as? PostgresBridgeError
+                    ?? .other(error.localizedDescription)
+                // Postgres aborts an open transaction on any statement
+                // error, including a cancelled one — session truth, so it
+                // applies even to a superseded run.
+                storeRef.applyTransactionEffect(sql: trimmed, error: bridgeError, tabId: tabId)
+                guard storeRef.isCurrentRun(generation, forTab: tabId) else { return }
+                if Task.isCancelled {
+                    // User pressed Cancel and the server aborted the
+                    // statement: report it as such, without an error
+                    // underline for the cancellation "error".
+                    storeRef.setExecState(.cancelled(elapsed: elapsed), forTab: tabId)
+                    return
+                }
                 storeRef.setExecState(
-                    .failed(message: error.localizedDescription, elapsed: elapsed),
+                    .failed(message: bridgeError.errorDescription ?? "Query failed", elapsed: elapsed),
                     forTab: tabId
                 )
-                // Unreachable from pgExecute today (pgWrapping maps everything to
-                // PostgresBridgeError), but if a non-bridge error ever escapes,
-                // don't leave a tracked-open transaction silently stale —
-                // Postgres aborts the transaction on any statement error.
-                storeRef.applyTransactionEffect(
-                    sql: trimmed,
-                    error: .other(error.localizedDescription),
-                    tabId: tabId
-                )
+                // Underline the offending token in the editor when the server
+                // reported an error position (syntax errors, type mismatches…).
+                storeRef.setErrorPosition(bridgeError.serverError?.position, forTab: tabId)
+                logger.error("query failed: \(bridgeError.localizedDescription, privacy: .public)")
             }
         }
+        store.setRunTask(task, forTab: tabId)
     }
 
     func cancel(tab: PostgresQueryTab) {
-        guard let connectionId else { return }
+        guard let connectionId, store.isRunning(tabId: tab.id) else { return }
         let sessionId = tab.id.uuidString
         // Server-side cancel scoped to this session — other tabs'
         // queries on the same profile keep running.
@@ -497,7 +522,7 @@ struct PostgresQueryTabView: View {
                 sessionId: sessionId
             )
         }
-        runTask?.cancel()
+        store.cancelRunTask(forTab: tab.id)
     }
 
     // MARK: - Script execution (multi-statement)
@@ -514,7 +539,8 @@ struct PostgresQueryTabView: View {
         connectionId: String,
         statements: [PostgresScriptStatement]
     ) {
-        runTask?.cancel()
+        let supersedes = store.isRunning(tabId: tabId)
+        guard let generation = store.beginRun(forTab: tabId) else { return }
         let startedAll = Date()
         store.setExecState(.running(startedAt: startedAll), forTab: tabId)
         store.setErrorPosition(nil, forTab: tabId)
@@ -526,7 +552,9 @@ struct PostgresQueryTabView: View {
         let pageSize = store.pageSize
         let total = statements.count
         let scriptText = statements.map(\.text).joined(separator: ";\n")
-        runTask = Task { @MainActor in
+        let profileId = profileId
+        let logger = logger
+        let task = Task { @MainActor in
             var outcomes: [PostgresScriptStatementOutcome] = []
             var retained: [Int] = [] // outcome indices still holding a result
 
@@ -544,7 +572,27 @@ struct PostgresQueryTabView: View {
                 storeRef.selectScriptStatement(index, forTab: tabId)
             }
 
+            @MainActor func finishCancelled() {
+                storeRef.setExecState(
+                    .cancelled(elapsed: Date().timeIntervalSince(startedAll)),
+                    forTab: tabId
+                )
+            }
+
+            if supersedes {
+                _ = await BridgeManager.shared.pgCancel(
+                    connectionId: connectionId, sessionId: sessionId
+                )
+            }
+
             for (i, statement) in statements.enumerated() {
+                // A newer run owns the tab (stop issuing statements, write
+                // nothing); a user Cancel stops before the next statement.
+                guard storeRef.isCurrentRun(generation, forTab: tabId) else { return }
+                if Task.isCancelled {
+                    finishCancelled()
+                    return
+                }
                 let started = Date()
                 do {
                     var result = try await BridgeManager.shared.pgExecute(
@@ -554,13 +602,10 @@ struct PostgresQueryTabView: View {
                         pageSize: pageSize
                     )
                     let elapsed = Date().timeIntervalSince(started)
-                    guard !Task.isCancelled else {
-                        storeRef.setExecState(
-                            .cancelled(elapsed: Date().timeIntervalSince(startedAll)),
-                            forTab: tabId
-                        )
-                        return
-                    }
+                    storeRef.applyTransactionEffect(
+                        sql: statement.text, error: nil, tabId: tabId
+                    )
+                    guard storeRef.isCurrentRun(generation, forTab: tabId) else { return }
                     // Each subsequent execute on this session supersedes the
                     // previous statement's cursor server-side, so only the
                     // final statement may keep a live "Load more" handle.
@@ -584,17 +629,20 @@ struct PostgresQueryTabView: View {
                         outcomes[dropIndex].result = nil
                         outcomes[dropIndex].resultDropped = true
                     }
-                    storeRef.applyTransactionEffect(
-                        sql: statement.text, error: nil, tabId: tabId
-                    )
                     // Progressive display: the strip and grid advance as
                     // statements complete, so long scripts show progress.
+                    // A statement that completed is shown even when Cancel
+                    // arrived meanwhile — it did run.
                     publish(selecting: i)
                 } catch {
                     let bridgeError = error as? PostgresBridgeError
                         ?? .other(error.localizedDescription)
                     let elapsed = Date().timeIntervalSince(started)
                     let message = bridgeError.errorDescription ?? "Statement failed"
+                    storeRef.applyTransactionEffect(
+                        sql: statement.text, error: bridgeError, tabId: tabId
+                    )
+                    guard storeRef.isCurrentRun(generation, forTab: tabId) else { return }
                     outcomes.append(PostgresScriptStatementOutcome(
                         index: i,
                         preview: Self.statementPreview(statement.text),
@@ -605,18 +653,20 @@ struct PostgresQueryTabView: View {
                         errorMessage: message,
                         result: nil
                     ))
-                    storeRef.applyTransactionEffect(
-                        sql: statement.text, error: bridgeError, tabId: tabId
-                    )
+                    publish(selecting: i)
+                    if Task.isCancelled {
+                        finishCancelled()
+                        return
+                    }
                     // Map the server's 1-based position inside *this*
-                    // statement onto the full editor text for the underline.
+                    // statement onto the full editor text for the underline
+                    // (both offsets count code points).
                     if let position = bridgeError.serverError?.position, position >= 1 {
                         storeRef.setAbsoluteErrorOffset(
-                            statement.startCharOffset + Int(position) - 1,
+                            statement.startScalarOffset + Int(position) - 1,
                             forTab: tabId
                         )
                     }
-                    publish(selecting: i)
                     storeRef.setExecState(
                         .failed(
                             message: "Statement \(i + 1) of \(total): \(message)",
@@ -631,6 +681,7 @@ struct PostgresQueryTabView: View {
                 }
             }
 
+            guard storeRef.isCurrentRun(generation, forTab: tabId) else { return }
             storeRef.setExecState(
                 .completed(elapsed: Date().timeIntervalSince(startedAll), atTime: Date()),
                 forTab: tabId
@@ -646,6 +697,7 @@ struct PostgresQueryTabView: View {
                 rowsReturned: rowsReturned
             )
         }
+        store.setRunTask(task, forTab: tabId)
     }
 
     /// Uppercase leading-keyword preview for a script chip ("SELECT",
@@ -693,7 +745,8 @@ struct PostgresQueryTabView: View {
                     columnName: cell.columnName,
                     columnType: cell.typeName,
                     newValue: newValue,
-                    rowId: rowId
+                    rowId: rowId,
+                    rowLayout: cell.rowLayout
                 ),
                 tab: tab,
                 complete: complete

@@ -90,7 +90,8 @@ extension PostgresQueryTabView {
                                         columnName: column.name,
                                         columnType: column.typeName,
                                         newValue: newValue,
-                                        rowId: rowId
+                                        rowId: rowId,
+                                        rowLayout: tab.rowLayoutGeneration
                                     )
                                     runCellUpdate(edit: edit, tab: tab) { outcome in
                                         // Cell updates will automatically be reflected in the tab's pending edits & cell value!
