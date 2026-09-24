@@ -15,12 +15,16 @@ import PgAgentMacOS
 ///   │                │                   │
 ///   └────────────────┴───────────────────┘
 ///
-/// Layout is an explicit outer `HSplitView` (sidebar | detail). The
-/// detail column embeds the unified workspace when a database profile
-/// is active, or a premium glassmorphic placeholder when idle.
+/// Layout is a two-column `NavigationSplitView` (sidebar | detail), so
+/// the sidebar gets the system sidebar material — the floating Liquid
+/// Glass sidebar on macOS 26+ with the toolbar extending over it — plus
+/// the standard toolbar toggle and View ▸ Sidebar commands. The detail
+/// column embeds the unified workspace when a database profile is
+/// active, or a placeholder when idle.
 ///
-/// `LayoutManager` is the source of truth for which panels are visible
-/// and at what size.
+/// `LayoutManager` is the source of truth for sidebar visibility and
+/// width; the split view's column visibility is bound to it so the
+/// toolbar toggle, ⌃⌘S and ⌘B all persist the same state.
 struct ContentView: View {
     @EnvironmentObject var layoutManager: LayoutManager
     @StateObject private var connectionStore = ConnectionStoreManager.shared
@@ -36,19 +40,17 @@ struct ContentView: View {
     @State private var commandPaletteItems: [CommandPaletteItem] = []
 
     var body: some View {
-        HSplitView {
-            if layoutManager.layout.sidebarVisible {
-                SidebarColumn(
-                    layoutManager: layoutManager,
-                    storeManager: connectionStore,
-                    postgresStore: postgresStore,
-                    selectedPostgresProfileId: $selectedPostgresProfileId,
-                    selectedNode: $selectedNode,
-                    activeConnectionId: $activeConnectionId,
-                    activeSchemaStore: $activeSchemaStore
-                )
-            }
-
+        NavigationSplitView(columnVisibility: columnVisibility) {
+            SidebarColumn(
+                layoutManager: layoutManager,
+                storeManager: connectionStore,
+                postgresStore: postgresStore,
+                selectedPostgresProfileId: $selectedPostgresProfileId,
+                selectedNode: $selectedNode,
+                activeConnectionId: $activeConnectionId,
+                activeSchemaStore: $activeSchemaStore
+            )
+        } detail: {
             DetailColumn(
                 layoutManager: layoutManager,
                 selectedPostgresProfileId: $selectedPostgresProfileId,
@@ -57,6 +59,7 @@ struct ContentView: View {
                 activeSchemaStore: $activeSchemaStore
             )
         }
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 900, minHeight: 600)
         .overlay {
             if isCommandPaletteVisible {
@@ -77,6 +80,20 @@ struct ContentView: View {
         .onOpenURL { url in
             applyDeepLink(PgAgentDeepLink(url: url))
         }
+    }
+
+    /// Maps the persisted `sidebarVisible` flag onto the split view.
+    /// Writes are equality-guarded so the split view echoing the current
+    /// value back doesn't re-publish (and re-save) the layout.
+    private var columnVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { layoutManager.layout.sidebarVisible ? .all : .detailOnly },
+            set: { visibility in
+                let visible = visibility != .detailOnly
+                guard layoutManager.layout.sidebarVisible != visible else { return }
+                layoutManager.layout.sidebarVisible = visible
+            }
+        )
     }
 
     // MARK: - Deep links (pgAgent://)
@@ -157,19 +174,27 @@ private struct SidebarColumn: View {
             activeConnectionId: $activeConnectionId,
             activeSchemaStore: $activeSchemaStore
         )
-        .finderSidebarBackground()
-        .frame(
-            minWidth: LayoutConstants.minSidebarWidth,
-            idealWidth: layoutManager.layout.sidebarWidth,
-            maxWidth: LayoutConstants.maxSidebarWidth
+        // No custom background: the split view's sidebar column supplies
+        // the system material (Liquid Glass on macOS 26+), which adapts to
+        // light/dark and the desktop behind the window.
+        .navigationSplitViewColumnWidth(
+            min: LayoutConstants.minSidebarWidth,
+            // The zen preset stores width 0; never hand the split view
+            // an ideal below the column minimum.
+            ideal: min(
+                max(layoutManager.layout.sidebarWidth, LayoutConstants.minSidebarWidth),
+                LayoutConstants.maxSidebarWidth
+            ),
+            max: LayoutConstants.maxSidebarWidth
         )
-        .background(
-            GeometryReader { proxy in
-                Color.clear
-                    .preference(key: SidebarWidthKey.self, value: proxy.size.width)
-            }
-        )
-        .onPreferenceChange(SidebarWidthKey.self, perform: persistSidebarWidth)
+        // Measured directly rather than via a PreferenceKey: the split view
+        // hosts each column separately, so a preference raised inside the
+        // sidebar never updates past its initial default value.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            persistSidebarWidth(width)
+        }
     }
 
     private func persistSidebarWidth(_ measured: CGFloat) {
@@ -177,6 +202,11 @@ private struct SidebarColumn: View {
         sidebarWidthDebounce = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
+            // The column stays mounted while collapsed (unlike the old
+            // `if`-gated HSplitView pane), so ignore widths measured while
+            // hidden or mid-collapse — they'd clobber the saved width.
+            guard layoutManager.layout.sidebarVisible,
+                  measured >= LayoutConstants.minSidebarWidth - 1 else { return }
 
             let clamped = min(
                 max(measured, LayoutConstants.minSidebarWidth),
@@ -272,15 +302,5 @@ struct DatabasePlaceholderView: View {
                 )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .materialBackground(.contentBackground, blendingMode: .withinWindow)
-    }
-}
-
-// MARK: - Preference keys for split-pane dimensions
-
-private struct SidebarWidthKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }

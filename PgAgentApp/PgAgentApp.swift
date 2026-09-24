@@ -27,9 +27,17 @@ struct PgAgentApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .sidebar) {
+            // System View ▸ Show/Hide Sidebar (⌃⌘S). It drives the
+            // NavigationSplitView's column visibility, which ContentView
+            // binds to LayoutManager, so the state persists either way.
+            SidebarCommands()
+
+            CommandGroup(after: .sidebar) {
+                // Legacy ⌘B shortcut kept alongside the system item.
                 Button("Toggle Sidebar") {
-                    layoutManager.toggleSidebar()
+                    withAnimation {
+                        layoutManager.toggleSidebar()
+                    }
                 }
                 .keyboardShortcut("b", modifiers: .command)
 

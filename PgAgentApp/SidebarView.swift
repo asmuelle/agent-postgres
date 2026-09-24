@@ -212,11 +212,11 @@ struct SidebarView: View {
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: MidnightMacDesign.Radius.small)
-                    .fill(MidnightMacDesign.ColorToken.controlBackground.opacity(0.8))
+                    .fill(MidnightMacDesign.ColorToken.sidebarFieldFill)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: MidnightMacDesign.Radius.small)
-                    .stroke(MidnightMacDesign.ColorToken.separator.opacity(0.4), lineWidth: 1)
+                    .stroke(MidnightMacDesign.ColorToken.sidebarFieldStroke, lineWidth: 1)
             )
         }
         .padding(.horizontal, 12)
