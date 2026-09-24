@@ -330,14 +330,15 @@ extension BridgeManager {
         // leased session. This protects against side-effecting SELECT
         // functions and user-defined functions that a lexical classifier
         // cannot prove safe. The core's smart multi-statement path executes
-        // this preamble before the user's statement on the same wire.
-        let effectiveSQL: String
+        // this preamble before the user's statement on the same wire;
+        // `PostgresSessionPreamble` keeps the user's statement on the
+        // cursor path and maps error positions back onto the user's text.
+        var preamble: PostgresSessionPreamble?
         if let audit {
             let readOnly = await Self.liveReadOnlyState(for: audit)
-            effectiveSQL = "SET default_transaction_read_only = \(readOnly ? "on" : "off");\n\(sql)"
-        } else {
-            effectiveSQL = sql
+            preamble = PostgresSessionPreamble.wrap(sql, readOnly: readOnly)
         }
+        let effectiveSQL = preamble?.sql ?? sql
         do {
             let result = try await pgWrapping {
                 try rshellPgExecute(
@@ -353,8 +354,24 @@ extension BridgeManager {
         } catch {
             Self.audit(audit, action: .execute, statement: sql,
                        error: Self.message(for: error), rowsAffected: nil)
-            throw error
+            throw Self.remapPosition(of: error, through: preamble)
         }
+    }
+
+    /// Rewrite a server error's position from the submitted (preamble-
+    /// prefixed) text onto the user's original SQL.
+    private static func remapPosition(
+        of error: Error,
+        through preamble: PostgresSessionPreamble?
+    ) -> Error {
+        guard let preamble,
+              case .database(let e) = error as? PostgresBridgeError,
+              let position = e.position else { return error }
+        return PostgresBridgeError.database(PostgresServerError(
+            sqlstate: e.sqlstate, message: e.message, detail: e.detail, hint: e.hint,
+            position: preamble.userPosition(fromServer: position),
+            constraint: e.constraint, column: e.column, table: e.table, schema: e.schema
+        ))
     }
 
     /// Fetch the next page from a cursor opened by `pgExecute` in the
