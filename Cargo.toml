@@ -48,3 +48,12 @@ uniffi = { version = "0.32", features = ["build"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# Don't strip host artifacts (proc-macros, build scripts) in release.
+# Xcode's build phase exports MACOSX_DEPLOYMENT_TARGET=13.0; Xcode 27's
+# `strip -S` can then leave the LINKEDIT string pool 4-byte aligned, and
+# macOS 27's dyld refuses to dlopen it — rustc reports that as
+# "can't find crate for `thiserror_impl`" / `serde_derive`. Host artifacts
+# never ship, so skipping the strip costs nothing.
+[profile.release.build-override]
+strip = false
