@@ -102,6 +102,12 @@ jobs:
         with:
           xcode-version: ${{ env.XCODE_VERSION }}
 
+      # Xcode 27 no longer bundles the Metal toolchain, and SwiftTerm compiles
+      # Metal shaders — without it the build fails with "cannot execute tool
+      # 'metal' due to missing Metal Toolchain".
+      - name: Install Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
