@@ -11,18 +11,22 @@ name: "pgAgent"
 options:
   bundleIdPrefix: com.pgagent
   deploymentTarget:
-    macOS: "13.0"
-    iOS: "17.0"
-  xcodeVersion: "26.0"
+    macOS: "27.0"
+    iOS: "27.0"
+  xcodeVersion: "27.0"
   postGenCommand: |
     # After project generation, copy the Rust library to a known location
     # that Xcode's linker can find without extra search paths.
 
 settings:
   base:
+    # Swift 6 language mode; the toolchain floor is Swift 6.4 (Xcode 27).
     SWIFT_VERSION: "6.0"
-    MACOSX_DEPLOYMENT_TARGET: "13.0"
-    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    MACOSX_DEPLOYMENT_TARGET: "27.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "27.0"
+    # macOS 27 runs only on Apple silicon — no x86_64 slice (the Rust lib is
+    # built arm64-only by build_cargo.sh to match).
+    "ARCHS[sdk=macosx*]": arm64
     DEVELOPMENT_TEAM: "9QFT5JP875"
 
 packages:
@@ -154,12 +158,6 @@ targets:
           # the macOS system trust store.
           - -framework
           - SystemConfiguration
-          # On-device AI (FoundationModels) ships in the macOS 26 SDK but the
-          # deployment target is macOS 13 — weak-link so the app still loads on
-          # older OSes. Every call site is gated by `@available(macOS 26, *)`
-          # plus `PgAIAvailabilityProbe`.
-          - -weak_framework
-          - FoundationModels
           - -lxml2
           - -lz
       configs:
@@ -185,7 +183,7 @@ targets:
   PgAgentMobile:
     type: application
     platform: iOS
-    deploymentTarget: "17.0"
+    deploymentTarget: "27.0"
     sources:
       - path: PgAgentMobile
         type: group
@@ -243,12 +241,6 @@ targets:
           - LocalAuthentication
           - -framework
           - SystemConfiguration
-          # On-device AI (FoundationModels) ships in the iOS 26 SDK but the
-          # deployment target is iOS 17 — weak-link so the app still loads on
-          # older OSes. Every call site is gated by `@available(iOS 26, *)`
-          # plus `PgAIAvailabilityProbe`. Mirrors the macOS target above.
-          - -weak_framework
-          - FoundationModels
           - -lxml2
           - -lz
     scheme:
@@ -258,7 +250,7 @@ targets:
   PgAgentMobileWidgets:
     type: app-extension
     platform: iOS
-    deploymentTarget: "17.0"
+    deploymentTarget: "27.0"
     sources:
       - path: PgAgentMobileWidgets
         type: group
@@ -354,9 +346,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.tests
-        # Xcode 26+'s XCTest is built for macOS 14; test bundles never ship,
-        # so they deploy at 14 to avoid ld's "built for newer version" warning.
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
         PRODUCT_NAME: PgAgentMacOSTests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: ""
@@ -376,9 +365,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.macos.app-tests
-        # Xcode 26+'s XCTest is built for macOS 14; test bundles never ship,
-        # so they deploy at 14 to avoid ld's "built for newer version" warning.
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
         PRODUCT_NAME: PgAgentAppTests
         GENERATE_INFOPLIST_FILE: YES
         # The app's PRODUCT_NAME is "pgAgent" (with a dash) which doesn't
@@ -398,7 +384,7 @@ targets:
   PgAgentMobileTests:
     type: bundle.unit-test
     platform: iOS
-    deploymentTarget: "17.0"
+    deploymentTarget: "27.0"
     sources:
       - path: Tests/PgAgentMobileTests
         type: group

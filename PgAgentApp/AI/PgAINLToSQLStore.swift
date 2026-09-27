@@ -5,10 +5,9 @@ import SwiftUI
 // =============================================================================
 // PgAINLToSQLStore — drives the "Generate SQL from a description" sheet.
 //
-// SDK-free like the error-explain store: the view binds to this without any
-// `@available` annotation. Availability is gated internally before crossing
-// into `PgAIAssistant`. The natural-language prompt is held here so it survives
-// a regenerate.
+// SDK-free like the error-explain store: the view binds to this without
+// importing FoundationModels. The natural-language prompt is held here so it
+// survives a regenerate.
 // =============================================================================
 
 @MainActor
@@ -54,23 +53,19 @@ final class PgAINLToSQLStore: ObservableObject {
 
         let t = Task { [weak self] in
             guard let self else { return }
-            switch PgAIAssistantResolver.resolve(
+            let assistant = PgAIAssistantResolver.resolve(
                 connectionId: connectionId,
                 defaultSchema: defaultSchema,
                 factory: self.makeAssistant
-            ) {
-            case .failure(let reason):
-                self.phase = .failed(reason.message)
-            case .success(let assistant):
-                do {
-                    let result = try await assistant.generateSQL(request: request)
-                    if Task.isCancelled { return }
-                    self.phase = .result(result)
-                } catch {
-                    if Task.isCancelled { return }
-                    self.logger.error("AI generate SQL failed: \(error.localizedDescription, privacy: .public)")
-                    self.phase = .failed("Couldn't generate SQL: \(error.localizedDescription)")
-                }
+            )
+            do {
+                let result = try await assistant.generateSQL(request: request)
+                if Task.isCancelled { return }
+                self.phase = .result(result)
+            } catch {
+                if Task.isCancelled { return }
+                self.logger.error("AI generate SQL failed: \(error.localizedDescription, privacy: .public)")
+                self.phase = .failed("Couldn't generate SQL: \(error.localizedDescription)")
             }
         }
         task = t

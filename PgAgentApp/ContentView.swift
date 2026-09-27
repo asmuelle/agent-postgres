@@ -176,7 +176,7 @@ private struct SidebarColumn: View {
             isVisible: layoutManager.layout.sidebarVisible
         )
         // No custom background: the split view's sidebar column supplies
-        // the system material (Liquid Glass on macOS 26+), which adapts to
+        // the system material (Liquid Glass), which adapts to
         // light/dark and the desktop behind the window.
         .navigationSplitViewColumnWidth(
             min: LayoutConstants.minSidebarWidth,

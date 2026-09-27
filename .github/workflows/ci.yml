@@ -7,10 +7,9 @@ name: CI
 #     exercises the real connect → execute → cursor paging → export path.
 #   * A compiler-only build of the macOS app (no signing).
 #
-# Everything runs on macOS: the Swift app needs the macOS 26 SDK
-# (FoundationModels is weak-linked behind @available), and the Rust crate is
-# the same toolchain developers use, so the build matches what's verified
-# locally. `just mac-test` (the signed XCTest target) is intentionally omitted
+# Everything runs on macOS: the Swift apps deploy at macOS 27 / iOS 27 and need
+# Xcode 27 (Swift 6.4), and the Rust crate is the same toolchain developers
+# use, so the build matches what's verified locally. `just mac-test` (the signed XCTest target) is intentionally omitted
 # — it needs an Apple Developer Team ID + signing secrets; wire it as a
 # separate, secrets-gated job when those are available.
 
@@ -24,11 +23,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Xcode for the Swift jobs. `macos-26` (arm64) ships Xcode 26.1–26.6.
-  # Xcode 27 exists only as an unlabelled preview image — when a public
-  # `macos-27` label lands, set `runs-on: macos-27` on the swift/ios jobs and
-  # bump this to the matching 27.x version.
-  XCODE_VERSION: "26.6"
+  # Xcode for the Swift jobs. GitHub serves Xcode 27 under the `xcode-27`
+  # label (macOS 27 base image, still marked preview — expect occasional
+  # queueing), not a `macos-27` one. See actions/runner-images#14404.
+  XCODE_VERSION: "27.0"
 
 jobs:
   rust:
@@ -92,31 +90,29 @@ jobs:
 
   swift:
     name: Swift — compile macOS app (no signing)
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v7
 
-      # The app builds in the Swift 6 language mode and uses Swift 6.2
-      # features (`@concurrent`), and imports FoundationModels (weak-linked,
-      # gated on macOS 26) — so it needs Xcode 26+ / the macOS 26 SDK.
-      # Pinned (not latest-stable) so CI doesn't drift. The code must keep
-      # compiling on both Xcode 26.x (Swift 6.2/6.3) and Xcode 27 (Swift 6.4,
-      # what developers use locally): 27-SDK-only APIs go behind
-      # `#if compiler(>=6.4)` + `#available`.
-      # To move to Xcode 27 once GitHub publishes a public label for its
-      # image, change `runs-on` above and XCODE_VERSION in `env` (top of file).
+      # The apps deploy at macOS 27 / iOS 27 in the Swift 6 language mode, so
+      # they need Xcode 27 (Swift 6.4, the 27 SDKs) — the same toolchain
+      # developers use locally. Pinned (not latest-stable) so CI doesn't drift.
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: ${{ env.XCODE_VERSION }}
 
+      # Xcode 27 no longer bundles the Metal toolchain, and SwiftTerm compiles
+      # Metal shaders — without it the build fails with "cannot execute tool
+      # 'metal' due to missing Metal Toolchain".
+      - name: Install Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # build_cargo.sh lipos a universal library, so both desktop
-          # targets must be installed — missing x86_64 fails the whole
-          # app build with E0463 (can't find crate for `core`).
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          # build_cargo.sh builds arm64 only (macOS 27 is Apple-silicon-only).
+          targets: aarch64-apple-darwin
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -133,7 +129,7 @@ jobs:
   # this job. Compiler-only (no simulator tests) to keep CI time bounded.
   ios:
     name: iOS — compile simulator app (no signing)
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v7
 

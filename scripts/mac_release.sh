@@ -11,6 +11,13 @@ app_path="${macos_dir}/build/Build/Products/Release/${app_name}.app"
 
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
 build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+# The appcast advertises the deployment target so Sparkle never offers this
+# build to Macs that can't launch it. Single source of truth: project.yml.
+min_macos="$(awk '/^    MACOSX_DEPLOYMENT_TARGET:/ { gsub(/"/, "", $2); print $2; exit }' "${macos_dir}/project.yml")"
+if [[ -z "$min_macos" ]]; then
+    echo "Cannot read MACOSX_DEPLOYMENT_TARGET from project.yml." >&2
+    exit 1
+fi
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 release_name="${app_name}-${version}-${build}-${stamp}"
 release_dir="${macos_dir}/build/release/${release_name}"
@@ -102,6 +109,7 @@ if [[ -n "${MAC_RELEASE_BASE_URL:-}" ]]; then
       <title>Version ${version}</title>
       <sparkle:version>${build}</sparkle:version>
       <sparkle:shortVersionString>${version}</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>${min_macos}</sparkle:minimumSystemVersion>
       <enclosure url="${download_url}"
                  ${enclosure_attrs}
                  type="application/octet-stream" />

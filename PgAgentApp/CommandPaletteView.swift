@@ -41,8 +41,8 @@ enum CommandPaletteItems {
     /// Assemble the palette's entries from live app state. Rebuilt each time
     /// the palette opens — cheap (reads already-loaded stores only).
     /// `openSettings` opens the Settings scene on the given tab (nil keeps
-    /// the current one). Injected because the only supported opener on
-    /// macOS 14+ is the view-environment `openSettings` action.
+    /// the current one). Injected because the only supported opener is the
+    /// view-environment `openSettings` action.
     static func build(
         selectedProfileId: String?,
         selectProfile: @escaping @MainActor (PostgresProfile) -> Void,
@@ -301,7 +301,7 @@ struct CommandPaletteView: View {
             installKeyMonitor()
         }
         .onDisappear(perform: removeKeyMonitor)
-        .onChangeCompat(of: query) { _ in selectionIndex = 0 }
+        .onChange(of: query) { selectionIndex = 0 }
     }
 
     // MARK: Subviews
@@ -348,7 +348,7 @@ struct CommandPaletteView: View {
                 .padding(6)
             }
             .frame(maxHeight: CGFloat(Self.visibleRows) * Self.rowHeight)
-            .onChangeCompat(of: selectionIndex) { newIndex in
+            .onChange(of: selectionIndex) { _, newIndex in
                 guard flatItems.indices.contains(newIndex) else { return }
                 proxy.scrollTo(flatItems[newIndex].id, anchor: nil)
             }

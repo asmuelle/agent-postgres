@@ -3,9 +3,9 @@ import Foundation
 // =============================================================================
 // PgAIAssisting — SDK-free seam over the on-device assistant.
 //
-// The concrete `PgAIAssistant` is gated on the FoundationModels SDK, which
-// makes the stores that drive the UI hard to unit-test (the model isn't
-// available in CI). This protocol exposes the same operations in terms of
+// The concrete `PgAIAssistant` calls the on-device model, which makes the
+// stores that drive the UI hard to unit-test (the model isn't available in
+// CI). This protocol exposes the same operations in terms of
 // SDK-free result types, so:
 //   • production resolves the real `PgAIAssistant` via `PgAIAssistantResolver`,
 //   • tests inject a fake conforming type through a store's factory.
@@ -30,26 +30,16 @@ protocol PgAIAssisting: Sendable {
 typealias PgAIAssistantFactory = @Sendable (_ connectionId: String, _ defaultSchema: String) -> any PgAIAssisting
 
 enum PgAIAssistantResolver {
-    /// Resolve a ready assistant, or a user-facing reason it's unavailable.
-    /// When `factory` is non-nil (tests), it wins and the SDK path is skipped
-    /// entirely. Otherwise the real assistant is created only when the
-    /// FoundationModels SDK is present and the OS is new enough.
+    /// Resolve the assistant. When `factory` is non-nil (tests), it wins and
+    /// the SDK path is skipped entirely.
     static func resolve(
         connectionId: String,
         defaultSchema: String,
         factory: PgAIAssistantFactory?
-    ) -> Result<any PgAIAssisting, PgAIUnavailable> {
+    ) -> any PgAIAssisting {
         if let factory {
-            return .success(factory(connectionId, defaultSchema))
+            return factory(connectionId, defaultSchema)
         }
-        #if canImport(FoundationModels)
-        if #available(macOS 26.0, iOS 26.0, *) {
-            return .success(PgAIAssistant(connectionId: connectionId, defaultSchema: defaultSchema))
-        } else {
-            return .failure(PgAIUnavailable(message: PgAIAvailability.osTooOld.userMessage ?? "On-device AI is unavailable."))
-        }
-        #else
-        return .failure(PgAIUnavailable(message: PgAIAvailability.frameworkMissing.userMessage ?? "On-device AI is unavailable."))
-        #endif
+        return PgAIAssistant(connectionId: connectionId, defaultSchema: defaultSchema)
     }
 }

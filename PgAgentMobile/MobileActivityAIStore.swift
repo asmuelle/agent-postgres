@@ -178,20 +178,16 @@ final class MobileActivityAIStore: ObservableObject {
         isPresented = true
         task = Task { [weak self] in
             guard let self else { return }
-            switch PgActivityAIAssistantResolver.resolve(factory: self.makeAssistant) {
-            case .failure(let reason):
-                self.phase = .failed(reason.message)
-            case .success(let assistant):
-                do {
-                    let insight = try await operation(assistant)
-                    if Task.isCancelled { return }
-                    if case .digest(let digest) = insight { self.lastDigest = digest }
-                    self.phase = .done(insight)
-                } catch {
-                    if Task.isCancelled { return }
-                    self.logger.error("Activity AI failed: \(error.localizedDescription, privacy: .public)")
-                    self.phase = .failed("Couldn't complete the analysis: \(error.localizedDescription)")
-                }
+            let assistant = PgActivityAIAssistantResolver.resolve(factory: self.makeAssistant)
+            do {
+                let insight = try await operation(assistant)
+                if Task.isCancelled { return }
+                if case .digest(let digest) = insight { self.lastDigest = digest }
+                self.phase = .done(insight)
+            } catch {
+                if Task.isCancelled { return }
+                self.logger.error("Activity AI failed: \(error.localizedDescription, privacy: .public)")
+                self.phase = .failed("Couldn't complete the analysis: \(error.localizedDescription)")
             }
         }
     }
