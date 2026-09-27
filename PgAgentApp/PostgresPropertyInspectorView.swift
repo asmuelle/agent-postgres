@@ -222,7 +222,7 @@ struct PostgresPropertyInspectorView: View {
         .onAppear {
             resetFields()
         }
-        .onChangeCompat(of: node) { _ in
+        .onChange(of: node) {
             resetFields()
             if activeTab == .ddl {
                 Task {
@@ -230,7 +230,7 @@ struct PostgresPropertyInspectorView: View {
                 }
             }
         }
-        .onChangeCompat(of: activeTab) { newValue in
+        .onChange(of: activeTab) { _, newValue in
             if newValue == .ddl {
                 Task {
                     await loadReconstructedDDL()

@@ -85,23 +85,19 @@ clean: mac-clean ios-clean
 # One-time prerequisites for the native macOS build.
 mac-bootstrap:
     @command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
-    rustup target add aarch64-apple-darwin x86_64-apple-darwin
+    rustup target add aarch64-apple-darwin
     @echo "✅ macOS prereqs installed"
 
 # Regenerate pgAgent.xcodeproj from project.yml. Run after editing project.yml.
 mac-gen:
     xcodegen generate
 
-# Build the universal Rust static lib (lipo'd, no Xcode link step).
+# Build the arm64 Rust static lib into the path Xcode links (no Xcode link step).
 mac-rust:
     cargo build --release --target aarch64-apple-darwin
-    cargo build --release --target x86_64-apple-darwin
     mkdir -p target/universal/release
-    lipo -create \
-        target/aarch64-apple-darwin/release/libpg_agent.a \
-        target/x86_64-apple-darwin/release/libpg_agent.a \
-        -output {{universal}}
-    @echo "✅ Universal static lib: {{universal}}"
+    cp target/aarch64-apple-darwin/release/libpg_agent.a {{universal}}
+    @echo "✅ Static lib: {{universal}}"
 
 # Local signed .app build. The widget/App Group entitlement requires a
 # provisioning profile, so use development signing when a Team ID is set.
@@ -283,7 +279,7 @@ mac-open:
 mac-clean:
     rm -rf {{mac_build}}
     rm -rf target/universal
-    rm -rf target/aarch64-apple-darwin target/x86_64-apple-darwin
+    rm -rf target/aarch64-apple-darwin
     @echo "✅ macOS build artifacts cleaned"
 
 

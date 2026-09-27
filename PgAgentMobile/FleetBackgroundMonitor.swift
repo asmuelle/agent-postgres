@@ -1,5 +1,6 @@
 import BackgroundTasks
 import Foundation
+import OSLog
 import UserNotifications
 #if canImport(PgAgentMacOS)
 import PgAgentMacOS
@@ -23,6 +24,7 @@ final class FleetBackgroundMonitor {
     /// earliest we ask for.
     private static let earliestInterval: TimeInterval = 15 * 60
     private static let firingKey = "fleet.firingAlerts"
+    nonisolated private static let logger = Logger(subsystem: "com.mc-ssh", category: "fleet-background-monitor")
 
     private let store = FleetHealthStore.withWidgetPublishing()
     private let settings = FleetMonitorSettings.shared
@@ -44,7 +46,13 @@ final class FleetBackgroundMonitor {
         guard settings.backgroundAlertsEnabled else { return }
         let request = BGAppRefreshTaskRequest(identifier: Self.taskId)
         request.earliestBeginDate = Date(timeIntervalSinceNow: Self.earliestInterval)
-        try? BGTaskScheduler.shared.submit(request)
+        // The completion runs off-main — `@Sendable` keeps it from inheriting
+        // this class's main-actor isolation (a runtime queue assertion).
+        BGTaskScheduler.shared.submitTaskRequest(request) { @Sendable error in
+            if let error {
+                Self.logger.error("BGAppRefresh submit failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     /// Cancel any pending refresh — called when the user turns alerts off.

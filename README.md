@@ -18,7 +18,7 @@ Native macOS / iPadOS SSH workspace. AppKit + SwiftUI shell, SwiftTerm for the P
 
 ## Prerequisites
 
-- macOS 14+ with Xcode 26+ (Swift 6.2+) and command-line tools (`xcode-select --install`)
+- Apple silicon Mac on macOS 27+ with Xcode 27+ (Swift 6.4+) and command-line tools (`xcode-select --install`) — the apps deploy at macOS 27 / iOS 27
 - PostgreSQL **14+** for database connections and fleet monitoring
 - Rust **1.95+** (edition 2024) — `rustup default stable`
 - [`just`](https://github.com/casey/just) — `brew install just`

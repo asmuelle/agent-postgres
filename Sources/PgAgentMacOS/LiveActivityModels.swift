@@ -326,7 +326,6 @@ public extension Notification.Name {
 }
 
 #if os(iOS) && canImport(ActivityKit)
-@available(iOS 16.1, *)
 public struct MidnightSSHOperationActivityAttributes: ActivityAttributes {
     public struct ContentState: Codable, Hashable {
         public var subtitle: String?
@@ -363,7 +362,6 @@ public struct MidnightSSHOperationActivityAttributes: ActivityAttributes {
     }
 }
 
-@available(iOS 16.1, *)
 public extension MidnightSSHOperationActivityAttributes.ContentState {
     init(snapshot: LiveActivitySnapshot) {
         self.init(
@@ -376,7 +374,6 @@ public extension MidnightSSHOperationActivityAttributes.ContentState {
     }
 }
 
-@available(iOS 16.1, *)
 public extension MidnightSSHOperationActivityAttributes {
     init(snapshot: LiveActivitySnapshot) {
         self.init(

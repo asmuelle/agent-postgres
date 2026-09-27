@@ -138,7 +138,7 @@ struct FleetHubSettingsView: View {
                     "Act as monitoring hub for your other devices",
                     isOn: $settings.hubModeEnabled
                 )
-                .onChangeCompat(of: settings.hubModeEnabled) { enabled in
+                .onChange(of: settings.hubModeEnabled) { _, enabled in
                     FleetMonitorHub.shared.applyHubMode(enabled: enabled)
                 }
 

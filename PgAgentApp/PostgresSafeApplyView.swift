@@ -220,7 +220,7 @@ struct PostgresSafeApplyView: View {
                     .font(.caption)
             }
             .toggleStyle(.checkbox)
-            .onChangeCompat(of: useDropCreate) { _ in
+            .onChange(of: useDropCreate) {
                 Task { await runActiveDryRun() }
             }
         }

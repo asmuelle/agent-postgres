@@ -1,8 +1,6 @@
 import Foundation
 import OSLog
-#if canImport(FoundationModels)
 import FoundationModels
-#endif
 
 // =============================================================================
 // PgActivityAIAssistant — on-device model operations for the activity monitor:
@@ -36,28 +34,18 @@ protocol PgActivityAIAssisting: Sendable {
 typealias PgActivityAIAssistantFactory = @Sendable () -> any PgActivityAIAssisting
 
 enum PgActivityAIAssistantResolver {
-    /// Resolve a ready assistant, or a user-facing reason it's unavailable.
+    /// Resolve the assistant. When `factory` is non-nil (tests), it wins and
+    /// the SDK path is skipped entirely.
     static func resolve(
         factory: PgActivityAIAssistantFactory?
-    ) -> Result<any PgActivityAIAssisting, PgAIUnavailable> {
+    ) -> any PgActivityAIAssisting {
         if let factory {
-            return .success(factory())
+            return factory()
         }
-        #if canImport(FoundationModels)
-        if #available(macOS 26.0, iOS 26.0, *) {
-            return .success(PgActivityAIAssistant())
-        } else {
-            return .failure(PgAIUnavailable(message: PgAIAvailability.osTooOld.userMessage ?? "On-device AI is unavailable."))
-        }
-        #else
-        return .failure(PgAIUnavailable(message: PgAIAvailability.frameworkMissing.userMessage ?? "On-device AI is unavailable."))
-        #endif
+        return PgActivityAIAssistant()
     }
 }
 
-#if canImport(FoundationModels)
-
-@available(macOS 26.0, iOS 26.0, *)
 struct PgActivityAIAssistant: PgActivityAIAssisting {
     private static let logger = Logger(subsystem: "com.mc-ssh", category: "pg-activity-ai")
 
@@ -133,5 +121,3 @@ struct PgActivityAIAssistant: PgActivityAIAssisting {
         return response.content.toResult()
     }
 }
-
-#endif

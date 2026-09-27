@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.4
 // pgAgent SPM package — pure-Swift models shared by the native macOS app.
 //
 // ## Prerequisites
@@ -37,8 +37,8 @@ import PackageDescription
 let package = Package(
     name: "pgAgent",
     platforms: [
-        .macOS(.v11),
-        .iOS(.v17),
+        .macOS(.v27),
+        .iOS(.v27),
     ],
     products: [
         .library(

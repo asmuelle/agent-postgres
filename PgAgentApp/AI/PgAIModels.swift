@@ -1,14 +1,11 @@
 import Foundation
-#if canImport(FoundationModels)
 import FoundationModels
-#endif
 
 // =============================================================================
 // Guided-generation output types for the on-device assistant.
 //
-// `@Generable` requires the FoundationModels SDK (macOS 26 / iOS 26), so each
-// type is gated. The plain `PgErrorDiagnosisResult` struct below is the
-// SDK-free value the rest of the app passes around — the assistant maps the
+// Each `@Generable` type has a plain counterpart: `PgErrorDiagnosisResult`
+// below is the SDK-free value the rest of the app passes around — the assistant maps the
 // generated type into it, keeping FoundationModels out of the UI layer.
 // =============================================================================
 
@@ -40,8 +37,6 @@ struct PgExplanationResult: Equatable, Sendable {
     static let empty = PgExplanationResult(summary: "", points: [])
 }
 
-#if canImport(FoundationModels)
-@available(macOS 26.0, iOS 26.0, *)
 @Generable(description: "A diagnosis of a failed PostgreSQL statement with a concrete fix")
 struct PgErrorDiagnosis {
     @Guide(description: "One sentence, plain English: what went wrong")
@@ -68,7 +63,6 @@ struct PgErrorDiagnosis {
     }
 }
 
-@available(macOS 26.0, iOS 26.0, *)
 @Generable(description: "A PostgreSQL query generated from a natural-language request")
 struct PgGeneratedSQL {
     @Guide(description: "A single, valid PostgreSQL statement that fulfils the request. No markdown fences.")
@@ -91,7 +85,6 @@ struct PgGeneratedSQL {
     }
 }
 
-@available(macOS 26.0, iOS 26.0, *)
 @Generable(description: "A plain-English explanation of a SQL query and/or its results")
 struct PgQueryExplanation {
     @Guide(description: "A one or two sentence summary of what the query does and what its results show")
@@ -100,4 +93,3 @@ struct PgQueryExplanation {
     @Guide(description: "Three to six short bullet points covering the key steps, filters, joins, or notable patterns in the data")
     var bulletPoints: [String]
 }
-#endif

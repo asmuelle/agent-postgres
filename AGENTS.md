@@ -55,7 +55,7 @@ Native **macOS + iPadOS** SSH workspace. Swift on top, Rust at the bottom, [unif
 | FFI runtime | `src/bridge.rs` | Owns the Tokio runtime + connection-manager singleton |
 | Swift bindings | `bindings/pg_agent.swift` | **Generated, do not hand-edit** — see "FFI checksum gotcha" below |
 | XcodeGen manifest | `project.yml` | Single source of truth for Xcode targets, deps, build phases |
-| Rust → static lib | `PgAgentApp/build_cargo.sh` | Xcode build phase: `cargo build` for arm64 + x86_64, `lipo` into `target/universal/release/libpg_agent.a` |
+| Rust → static lib | `PgAgentApp/build_cargo.sh` | Xcode build phase: `cargo build` for arm64 (macOS 27 is Apple-silicon-only), copied to `target/universal/release/libpg_agent.a` |
 | iOS variant | `PgAgentMobile/Mobile*.swift` | Separate views/stores for iPadOS — keychain, SFTP bridge, etc. |
 | Sparkle integration | `PgAgentApp/UpdateManager.swift`, `scripts/find_sparkle_tool.sh` | Auto-updates via Sparkle 2.x |
 | Postgres UI | `PgAgentApp/Postgres*.swift` | Browser, query tabs, results table, history, saved queries |
@@ -92,7 +92,7 @@ Native **macOS + iPadOS** SSH workspace. Swift on top, Rust at the bottom, [unif
 4. **TOFU host-key store.** SSH known-hosts live at `$XDG_CONFIG_HOME/pgAgent/known_hosts` via `ssh-commander-core`. Unreadable / unwritable trust state fails closed — do not loosen.
 5. **iPad simulator selection.** `just run-on-ipad-sim` defaults to any booted iPad sim, falls back to the first available. Pass a name fragment to pin: `just run-on-ipad-sim "iPad Pro"`. The unsuffixed `run-on-ipad` / `run-on-iphone` recipes target *physical* hardware (via `run-on-device`); the `*-sim` recipes target the simulator.
 6. **`build_cargo.sh` runs every build.** The Xcode build phase is intentionally not gated by dependency analysis (cargo's incremental layer handles that). The "will be run during every build" note in xcodebuild output is expected, not a misconfiguration.
-7. **Universal lib lipo step.** `mac-rust` builds `aarch64-apple-darwin` + `x86_64-apple-darwin` separately and `lipo`s them — the resulting fat archive is what Xcode actually links. CI runners that build only one slice (`mac-ci-build`) skip the lipo and link single-arch.
+7. **arm64-only macOS lib.** The macOS app deploys at macOS 27, which doesn't run on Intel, so `build_cargo.sh` / `mac-rust` build only `aarch64-apple-darwin` and copy it to `target/universal/release/` (the directory name predates the arm64-only build). `ARCHS[sdk=macosx*]` is `arm64` in `project.yml` to match.
 
 ## Tests
 

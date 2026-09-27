@@ -50,29 +50,25 @@ final class PgAIExplainStore: ObservableObject {
 
         let t = Task { [weak self] in
             guard let self else { return }
-            switch PgAIAssistantResolver.resolve(
+            let assistant = PgAIAssistantResolver.resolve(
                 connectionId: connectionId,
                 defaultSchema: defaultSchema,
                 factory: self.makeAssistant
-            ) {
-            case .failure(let reason):
-                self.phase = .failed(reason.message)
-            case .success(let assistant):
-                do {
-                    let final = try await assistant.streamExplanation(
-                        sql: sql,
-                        resultSample: resultSample
-                    ) { partial in
-                        // Invoked on the main actor for each snapshot.
-                        self.phase = .streaming(partial)
-                    }
-                    if Task.isCancelled { return }
-                    self.phase = .done(final)
-                } catch {
-                    if Task.isCancelled { return }
-                    self.logger.error("AI explain stream failed: \(error.localizedDescription, privacy: .public)")
-                    self.phase = .failed("Couldn't generate an explanation: \(error.localizedDescription)")
+            )
+            do {
+                let final = try await assistant.streamExplanation(
+                    sql: sql,
+                    resultSample: resultSample
+                ) { partial in
+                    // Invoked on the main actor for each snapshot.
+                    self.phase = .streaming(partial)
                 }
+                if Task.isCancelled { return }
+                self.phase = .done(final)
+            } catch {
+                if Task.isCancelled { return }
+                self.logger.error("AI explain stream failed: \(error.localizedDescription, privacy: .public)")
+                self.phase = .failed("Couldn't generate an explanation: \(error.localizedDescription)")
             }
         }
         task = t

@@ -5,9 +5,9 @@ import SwiftUI
 // =============================================================================
 // PgAIErrorExplainStore — drives the "Explain this error" sheet.
 //
-// SDK-free on purpose: the view binds to this without any `@available`
-// annotation. The store gates on FoundationModels availability internally and
-// only crosses into `PgAIAssistant` when the model is usable.
+// SDK-free on purpose: the view binds to this without importing
+// FoundationModels, and crosses into `PgAIAssistant` only through the
+// `PgAIAssisting` seam.
 // =============================================================================
 
 @MainActor
@@ -51,23 +51,19 @@ final class PgAIErrorExplainStore: ObservableObject {
 
         let t = Task { [weak self] in
             guard let self else { return }
-            switch PgAIAssistantResolver.resolve(
+            let assistant = PgAIAssistantResolver.resolve(
                 connectionId: connectionId,
                 defaultSchema: defaultSchema,
                 factory: self.makeAssistant
-            ) {
-            case .failure(let reason):
-                self.phase = .failed(reason.message)
-            case .success(let assistant):
-                do {
-                    let result = try await assistant.explainError(sql: sql, errorMessage: errorMessage)
-                    if Task.isCancelled { return }
-                    self.phase = .result(result)
-                } catch {
-                    if Task.isCancelled { return }
-                    self.logger.error("AI explain failed: \(error.localizedDescription, privacy: .public)")
-                    self.phase = .failed("Couldn't generate an explanation: \(error.localizedDescription)")
-                }
+            )
+            do {
+                let result = try await assistant.explainError(sql: sql, errorMessage: errorMessage)
+                if Task.isCancelled { return }
+                self.phase = .result(result)
+            } catch {
+                if Task.isCancelled { return }
+                self.logger.error("AI explain failed: \(error.localizedDescription, privacy: .public)")
+                self.phase = .failed("Couldn't generate an explanation: \(error.localizedDescription)")
             }
         }
         task = t

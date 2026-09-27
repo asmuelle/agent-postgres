@@ -94,48 +94,28 @@ struct MonitoringWidgetView: View {
 
     @ViewBuilder
     var body: some View {
-        if #available(macOS 14.0, *) {
-            switch family {
-            case .systemLarge:
-                LargeMonitoringWidgetView(model: entry.model)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .widgetURL(URL(string: entry.model.openURL))
-                    .containerBackground(for: .widget) {
-                        Color(nsColor: .windowBackgroundColor)
-                    }
-            case .systemMedium:
-                MediumMonitoringWidgetView(model: entry.model)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .widgetURL(URL(string: entry.model.openURL))
-                    .containerBackground(for: .widget) {
-                        Color(nsColor: .windowBackgroundColor)
-                    }
-            default:
-                SmallMonitoringWidgetView(model: entry.model)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .widgetURL(URL(string: entry.model.openURL))
-                    .containerBackground(for: .widget) {
-                        Color(nsColor: .windowBackgroundColor)
-                    }
-            }
-        } else {
-            switch family {
-            case .systemLarge:
-                LargeMonitoringWidgetView(model: entry.model)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .widgetURL(URL(string: entry.model.openURL))
-                    .background(Color(nsColor: .windowBackgroundColor))
-            case .systemMedium:
-                MediumMonitoringWidgetView(model: entry.model)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .widgetURL(URL(string: entry.model.openURL))
-                    .background(Color(nsColor: .windowBackgroundColor))
-            default:
-                SmallMonitoringWidgetView(model: entry.model)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .widgetURL(URL(string: entry.model.openURL))
-                    .background(Color(nsColor: .windowBackgroundColor))
-            }
+        switch family {
+        case .systemLarge:
+            LargeMonitoringWidgetView(model: entry.model)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .widgetURL(URL(string: entry.model.openURL))
+                .containerBackground(for: .widget) {
+                    Color(nsColor: .windowBackgroundColor)
+                }
+        case .systemMedium:
+            MediumMonitoringWidgetView(model: entry.model)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .widgetURL(URL(string: entry.model.openURL))
+                .containerBackground(for: .widget) {
+                    Color(nsColor: .windowBackgroundColor)
+                }
+        default:
+            SmallMonitoringWidgetView(model: entry.model)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .widgetURL(URL(string: entry.model.openURL))
+                .containerBackground(for: .widget) {
+                    Color(nsColor: .windowBackgroundColor)
+                }
         }
     }
 }

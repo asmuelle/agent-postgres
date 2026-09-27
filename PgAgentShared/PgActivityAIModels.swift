@@ -1,13 +1,11 @@
 import Foundation
-#if canImport(FoundationModels)
 import FoundationModels
-#endif
 
 // =============================================================================
 // Guided-generation output types for the activity-monitor AI analyses.
 //
-// Same layering as PgAIModels: each `@Generable` type is gated on the
-// FoundationModels SDK, and maps into a plain SDK-free result struct that
+// Same layering as PgAIModels: each `@Generable` type maps into a plain
+// SDK-free result struct that
 // views, stores, and tests use without ever importing the framework.
 // =============================================================================
 
@@ -44,8 +42,6 @@ struct PgActivityDigestResult: Equatable, Sendable {
     let points: [String]
 }
 
-#if canImport(FoundationModels)
-@available(macOS 26.0, iOS 26.0, *)
 @Generable(description: "An analysis of one PostgreSQL backend session")
 struct PgSessionInsight {
     @Guide(description: "One or two sentences: what this backend is doing and whether it is healthy")
@@ -72,7 +68,6 @@ struct PgSessionInsight {
     }
 }
 
-@available(macOS 26.0, iOS 26.0, *)
 @Generable(description: "A root-cause analysis of a PostgreSQL lock-blocking chain")
 struct PgBlockingInsight {
     @Guide(description: "The pid of the backend at the root of the blocking chain, or 0 if it cannot be determined")
@@ -93,7 +88,6 @@ struct PgBlockingInsight {
     }
 }
 
-@available(macOS 26.0, iOS 26.0, *)
 @Generable(description: "A one-glance digest of PostgreSQL instance activity")
 struct PgActivityDigest {
     @Guide(description: "One sentence a DBA would want first: the most important thing happening right now")
@@ -109,4 +103,3 @@ struct PgActivityDigest {
         )
     }
 }
-#endif

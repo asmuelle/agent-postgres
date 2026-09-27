@@ -113,7 +113,7 @@ struct SidebarView: View {
         .sheet(isPresented: $showLocalConfigImport) {
             PostgresLocalConfigImportView(store: postgresStore)
         }
-        .onChangeCompat(of: selectedNodeId) { newValue in
+        .onChange(of: selectedNodeId) { _, newValue in
             if let id = newValue {
                 if let found = findNodeAcrossStores(id: id) {
                     selectedNode = found
@@ -129,7 +129,7 @@ struct SidebarView: View {
                 }
             }
         }
-        .onChangeCompat(of: selectedPostgresProfileId) { newProfileId in
+        .onChange(of: selectedPostgresProfileId) { _, newProfileId in
             if let profileId = newProfileId {
                 activeConnectionId = PostgresConnectionManager.shared.activeConnections[profileId]
                 activeSchemaStore = PostgresConnectionManager.shared.schemaStores[profileId]
@@ -146,7 +146,7 @@ struct SidebarView: View {
                 }
             }
         }
-        .onChangeCompat(of: isVisible) { visible in
+        .onChange(of: isVisible) { _, visible in
             if !visible { releaseAllServers() }
         }
         .onDisappear { releaseAllServers() }

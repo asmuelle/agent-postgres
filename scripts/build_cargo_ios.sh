@@ -16,9 +16,9 @@ export PATH="$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 # (zstd, etc.). Without this they default to the SDK's newest OS while the Rust
 # device link defaults to an ancient one, and the version skew leaves runtime
 # builtins like `___chkstk_darwin` unresolved (ld: "symbol(s) not found for
-# architecture arm64"). 17.0 matches IPHONEOS_DEPLOYMENT_TARGET in project.yml —
+# architecture arm64"). 27.0 matches IPHONEOS_DEPLOYMENT_TARGET in project.yml —
 # keep this default in sync with `deploymentTarget` in project.yml when bumping.
-export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-27.0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Script lives at <repo>/scripts/build_cargo_ios.sh — Cargo.toml sits one level up.

@@ -76,8 +76,8 @@ struct PostgresQueryTabView: View {
         let sql: String
     }
 
-    /// Drives the on-device "Explain this error" sheet. Inert on OSes below
-    /// macOS 26 — `aiAvailable` gates the entry point so the sheet never shows.
+    /// Drives the on-device "Explain this error" sheet. Inert when the model
+    /// is unavailable — `aiAvailable` gates the entry point so the sheet never shows.
     @StateObject var aiErrorStore = PgAIErrorExplainStore()
     /// Drives the on-device "Generate SQL from a description" sheet.
     @StateObject var nlToSQLStore = PgAINLToSQLStore()
@@ -105,7 +105,7 @@ struct PostgresQueryTabView: View {
             switch tab.kind {
             case .query:
                 content(for: tab)
-                    .onChangeCompat(of: tabId) { _ in
+                    .onChange(of: tabId) {
                         // The host reuses one view across tabs (swaps tabId), so
                         // reset per-tab grid affordances on switch.
                         resultFilter = ""

@@ -1,8 +1,6 @@
 import Foundation
 import OSLog
-#if canImport(FoundationModels)
 import FoundationModels
-#endif
 
 // =============================================================================
 // PgAIAssistant — builds on-device model sessions and runs the assistant's
@@ -15,13 +13,10 @@ import FoundationModels
 // `exceededContextWindowSize`). Single-shot generation with injected schema is
 // loop-proof and produced correct SQL in testing.
 //
-// Fully gated on the FoundationModels SDK. Callers reach it only after
-// `PgAIAvailabilityProbe.current().isAvailable` is true.
+// Callers reach it only after `PgAIAvailabilityProbe.current().isAvailable`
+// is true.
 // =============================================================================
 
-#if canImport(FoundationModels)
-
-@available(macOS 26.0, iOS 26.0, *)
 struct PgAIAssistant: PgAIAssisting {
     let connectionId: String
     let defaultSchema: String
@@ -153,5 +148,3 @@ struct PgAIAssistant: PgAIAssisting {
         return last
     }
 }
-
-#endif

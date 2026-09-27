@@ -1,5 +1,6 @@
 #!/bin/bash
-# Xcode build phase script — builds the Rust static library as a universal binary.
+# Xcode build phase script — builds the arm64 Rust static library (macOS 27+
+# runs only on Apple silicon, so there is no x86_64 slice).
 #
 # Add this as a "Run Script" build phase in Xcode:
 #   1. Select the PgAgentApp target → Build Phases → + → New Run Script Phase
@@ -47,33 +48,29 @@ echo "   Profile dir: $CARGO_PROFILE"
 
 cd "$RUST_PROJECT_DIR"
 
-# Build for both architectures. cargo build accepts an empty $CARGO_FLAG.
+# cargo build accepts an empty $CARGO_FLAG.
 cargo build -p pg-agent $CARGO_FLAG --target aarch64-apple-darwin
-cargo build -p pg-agent $CARGO_FLAG --target x86_64-apple-darwin
 
 ARM64_LIB="$RUST_TARGET_DIR/aarch64-apple-darwin/$CARGO_PROFILE/$LIB_NAME"
-X86_64_LIB="$RUST_TARGET_DIR/x86_64-apple-darwin/$CARGO_PROFILE/$LIB_NAME"
 
-# Sanity-check before lipo so we get a clear error rather than a cryptic one.
-for lib in "$ARM64_LIB" "$X86_64_LIB"; do
-    if [ ! -f "$lib" ]; then
-        echo "❌ Missing static lib: $lib"
-        echo "   (cargo build did not produce the expected artifact)"
-        exit 1
-    fi
-done
+# Sanity-check before copying so we get a clear error rather than a cryptic one.
+if [ ! -f "$ARM64_LIB" ]; then
+    echo "❌ Missing static lib: $ARM64_LIB"
+    echo "   (cargo build did not produce the expected artifact)"
+    exit 1
+fi
 
-# project.yml's LIBRARY_SEARCH_PATHS points at target/universal/release, so
-# write the lipo'd output there for both Debug and Release. Different cargo
-# profiles still build into different per-arch directories above, so this
-# overwrite is safe.
+# project.yml's LIBRARY_SEARCH_PATHS points at target/universal/release (the
+# name predates the arm64-only build), so copy the output there for both Debug
+# and Release. Different cargo profiles still build into different directories
+# above, so this overwrite is safe.
 UNIVERSAL_DIR="$RUST_TARGET_DIR/universal/release"
 mkdir -p "$UNIVERSAL_DIR"
 UNIVERSAL_LIB="$UNIVERSAL_DIR/$LIB_NAME"
 
-lipo -create "$ARM64_LIB" "$X86_64_LIB" -output "$UNIVERSAL_LIB"
+cp "$ARM64_LIB" "$UNIVERSAL_LIB"
 
-echo "✅ Universal static library: $UNIVERSAL_LIB"
+echo "✅ Static library: $UNIVERSAL_LIB"
 echo "   Size: $(du -h "$UNIVERSAL_LIB" | cut -f1)"
 echo "   Archs: $(lipo -info "$UNIVERSAL_LIB")"
 
@@ -85,15 +82,9 @@ echo "   Archs: $(lipo -info "$UNIVERSAL_LIB")"
 
 BINDINGS_DIR="$SCRIPT_DIR/../bindings"
 BINDINGS_SWIFT="$BINDINGS_DIR/pg_agent.swift"
-# Map uname -m → Rust target triple for the host machine, so bindings
-# regeneration works on both Apple Silicon and Intel.
-HOST_ARCH=$(uname -m)
-case "$HOST_ARCH" in
-    arm64) HOST_TARGET="aarch64-apple-darwin" ;;
-    x86_64) HOST_TARGET="x86_64-apple-darwin" ;;
-    *) echo "❌ Unknown host architecture: $HOST_ARCH"; exit 1 ;;
-esac
-HOST_DYLIB="$RUST_TARGET_DIR/$HOST_TARGET/$CARGO_PROFILE/libpg_agent.dylib"
+# uniffi-bindgen only reads the library's metadata (it never loads it), so the
+# arm64 dylib built above works regardless of the host architecture.
+HOST_DYLIB="$RUST_TARGET_DIR/aarch64-apple-darwin/$CARGO_PROFILE/libpg_agent.dylib"
 
 # Skip regen if the bindings file is already newer than every FFI source —
 # protects incremental builds from a needless rebuild of the bindgen tool.
