@@ -9,6 +9,7 @@ import PgAgentMacOS
 // button away instead of a third segment.
 // =============================================================================
 struct MobileQueryTab: View {
+    @EnvironmentObject private var queryStores: MobileQueryStores
     @State private var historyProfile: PostgresProfile?
 
     var body: some View {
@@ -16,7 +17,7 @@ struct MobileQueryTab: View {
             MobileDatabaseScope { profile in
                 MobileConnectionGate(profile: profile) { connectionId, schemaStore in
                     MobileQueryWorkspaceView(
-                        store: MobileQueryStores.store(for: profile.id),
+                        store: queryStores.store(for: profile.id),
                         connectionId: connectionId,
                         profileId: profile.id,
                         schemaStore: schemaStore
@@ -38,7 +39,7 @@ struct MobileQueryTab: View {
             NavigationStack {
                 MobileConsoleMetricsView(
                     profileId: profile.id,
-                    queryStore: MobileQueryStores.store(for: profile.id)
+                    queryStore: queryStores.store(for: profile.id)
                 )
                 .navigationTitle("History")
                 .navigationBarTitleDisplayMode(.inline)

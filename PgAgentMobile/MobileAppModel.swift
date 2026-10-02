@@ -1,3 +1,4 @@
+import Foundation
 import Observation
 
 // =============================================================================
@@ -25,6 +26,30 @@ enum MobileSheet: Hashable, Identifiable {
     var id: Self { self }
 }
 
+/// Where a tapped alert should land: the affected instance, plus enough
+/// context to open the most relevant tab of the instance detail —
+/// blocked/deadlock kinds go to the lock chain (with the root blocker
+/// highlighted when known), slow/busy kinds to the activity list, offline
+/// to the fleet overview.
+struct MobileAlertRoute: Equatable, Sendable {
+    let instanceId: String
+    let kind: FleetAlertKind?
+    /// Root blocker pid from the alert payload, when the hub captured one.
+    /// Nil is fine — the lock view falls back to highlighting the current
+    /// root blocker after a fresh fetch (highlight-by-refetch).
+    let blockerPid: Int32?
+}
+
+/// The value an extra iPad window is opened with (`openWindow(value:)`).
+/// The `id` makes every request a new window — SwiftUI would otherwise bring
+/// forward an existing window opened with an equal value, even one that has
+/// since moved to another database.
+struct MobileWindowTarget: Codable, Hashable, Sendable {
+    var id = UUID()
+    /// The database the window starts on (its Query tab); `nil` starts on Pulse.
+    var profileId: String?
+}
+
 @MainActor
 @Observable
 final class MobileAppModel {
@@ -50,6 +75,16 @@ final class MobileAppModel {
     func open(profileId: String, in tab: MobileAppTab = .query) {
         currentProfileId = profileId
         selectedTab = tab
+    }
+
+    /// A tapped alert this window claimed; Pulse pushes its detail and clears it.
+    var alertRoute: MobileAlertRoute?
+
+    /// Show a tapped alert: Pulse, in front of everything.
+    func showAlert(_ route: MobileAlertRoute) {
+        dismissSheet()
+        selectedTab = .pulse
+        alertRoute = route
     }
 
     /// Ask for a sheet. Ignored while another is showing, so ⌘N can't

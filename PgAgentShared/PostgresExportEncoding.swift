@@ -33,6 +33,28 @@ enum PostgresExportEncoding {
         fields.map(csvField).joined(separator: ",")
     }
 
+    /// A whole CSV document — header plus one line per row — for the visible
+    /// columns (hidden `__pg_*` helpers dropped).
+    static func csvDocument(columnNames: [String], rows: [[String?]]) -> String {
+        let plan = PostgresExportColumnPlan(resultColumnNames: columnNames)
+        return rows.reduce(into: plan.csvHeaderLine) { document, row in
+            document += plan.csvLine(row)
+        }
+    }
+
+    /// "public.orders.csv" for a browsed table, "Query 2.csv" for a query;
+    /// characters a file name can't hold become "-".
+    static func csvFileName(forTitle title: String) -> String {
+        let unsafe = Set("/\\:?%*|\"<>".unicodeScalars)
+        var cleaned = String.UnicodeScalarView()
+        for scalar in title.unicodeScalars {
+            let isUnsafe = unsafe.contains(scalar) || scalar.properties.generalCategory == .control
+            cleaned.append(isUnsafe ? "-" : scalar)
+        }
+        let trimmed = String(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed.isEmpty ? "Results" : trimmed) + ".csv"
+    }
+
     static func csvNeedsQuoting(_ value: String) -> Bool {
         let scalars = value.unicodeScalars
         if let first = scalars.first, isEdgeWhitespace(first) { return true }

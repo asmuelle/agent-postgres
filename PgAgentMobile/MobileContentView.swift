@@ -13,22 +13,42 @@ import PgAgentMacOS
 //
 // Owns the scene-level pieces every tab shares: the MobileAppModel (tab +
 // current database, persisted per scene), the single connection claim on the
-// current database, the sheets any screen can request, and alert routing.
+// current database, the window's query tabs and keyboard-shortcut relay, the
+// sheets any screen can request, alert routing, and incoming Handoff.
+//
+// One per window: on iPad each database can have its own window
+// (`openWindow(value: MobileWindowTarget(…))`), side by side in Split View or
+// Stage Manager.
 // =============================================================================
 struct MobileContentView: View {
+    /// Set when this window was opened as an extra window ("Open in New
+    /// Window", ⌥⌘N); with a database it starts on that database's Query tab.
+    var opening: MobileWindowTarget? = nil
+
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @EnvironmentObject private var entitlementsStore: MobileEntitlementsStore
     @EnvironmentObject private var alertRouter: MobileAlertRouter
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     /// Used for claim/release only — not observed, so schema loads don't
     /// re-evaluate the whole root.
     private let connectionManager = PostgresConnectionManager.shared
 
     @State private var app = MobileAppModel()
+    @StateObject private var queryStores = MobileQueryStores()
+    @StateObject private var shortcutRelay = MobileShortcutRelay()
     /// The tabs mount only after the scene state is restored, so a launch
     /// into Query never builds (and polls from) Pulse first.
     @State private var hasRestored = false
+    /// A Handoff that arrived before the scene state was restored; applied
+    /// right after, so the restore can't put the window back elsewhere.
+    @State private var pendingHandoff: PgQueryHandoff?
     @SceneStorage("selectedTab") private var storedTab: MobileAppTab = .pulse
     @SceneStorage("currentProfileId") private var storedProfileId: String = ""
+    /// The window's opening target was applied; from then on its own scene
+    /// storage decides (even "All Databases", stored as an empty id).
+    @SceneStorage("appliedOpeningTarget") private var appliedOpeningTarget = false
 
     var body: some View {
         Group {
@@ -39,6 +59,10 @@ struct MobileContentView: View {
             }
         }
         .environment(app)
+        .environmentObject(queryStores)
+        .environmentObject(shortcutRelay)
+        // Menu-bar shortcuts act on the window in front only.
+        .focusedSceneValue(\.mobileShortcutRelay, shortcutRelay)
         .sheet(item: sheetBinding) { sheet in
             sheetContent(sheet)
         }
@@ -49,7 +73,7 @@ struct MobileContentView: View {
             let available = Set(ids)
             app.reconcile(availableProfileIds: available)
             // Deleted connections take their open queries and results along.
-            MobileQueryStores.retain(only: available)
+            queryStores.retain(only: available)
         }
         // Hold the current database's connection once Query or Browse has
         // been used — across tab switches — and move the claim when the
@@ -67,14 +91,32 @@ struct MobileContentView: View {
                 try? await Task.sleep(for: .seconds(3600))
             }
         }
-        // Alert tapped while running; a cold launch is handled by the restore.
+        // A tapped alert goes to one window — the one in front — when it
+        // arrives, or when a window comes to the front with one waiting.
         .onChange(of: alertRouter.pendingRoute) { _, _ in
             routePendingAlert()
         }
-        .onReceive(MobileShortcutRelay.shared.actions) { action in
+        .onChange(of: scenePhase) { _, _ in
+            routePendingAlert()
+        }
+        // A query handed off from the user's Mac or other device: open it in
+        // a new tab on that connection — never run it.
+        .onContinueUserActivity(PgQueryHandoff.activityType) { activity in
+            guard let handoff = PgQueryHandoff(userInfo: activity.userInfo) else { return }
+            if hasRestored {
+                openHandoff(handoff)
+            } else {
+                pendingHandoff = handoff
+            }
+        }
+        .onReceive(shortcutRelay.actions) { action in
             switch action {
             case .newConnection:
                 app.present(.newConnection)
+            case .newWindow:
+                if supportsMultipleWindows {
+                    openWindow(value: MobileWindowTarget(profileId: app.currentProfileId))
+                }
             case .showTab(let tab):
                 app.selectedTab = tab
             default:
@@ -105,31 +147,48 @@ struct MobileContentView: View {
         )
     }
 
-    /// Restore tab + database before the tabs exist, then let a pending
-    /// alert (cold launch from a notification) win over the restored tab.
+    /// Restore tab + database before the tabs exist, then let a Handoff or
+    /// a pending alert (cold launch from a notification) win over it.
     private func restoreSceneState() {
         guard !hasRestored else { return }
-        if !storedProfileId.isEmpty {
-            app.currentProfileId = storedProfileId
+        if let opening, !appliedOpeningTarget {
+            // An extra window starts on its database's Query tab (or Pulse);
+            // after that its own scene storage takes over.
+            appliedOpeningTarget = true
+            if let profileId = opening.profileId {
+                app.open(profileId: profileId, in: .query)
+            }
+        } else {
+            if !storedProfileId.isEmpty {
+                app.currentProfileId = storedProfileId
+            }
+            app.selectedTab = storedTab
         }
-        app.selectedTab = storedTab
         app.reconcile(availableProfileIds: Set(profileStore.profiles.map(\.id)))
+        if let pendingHandoff {
+            self.pendingHandoff = nil
+            openHandoff(pendingHandoff)
+        }
         routePendingAlert()
         hasRestored = true
     }
 
-    /// Alert deep link (Mac-hub push or local background alert): show Pulse,
-    /// which pushes the alerted instance's detail.
+    private func openHandoff(_ handoff: PgQueryHandoff) {
+        guard profileStore.profile(withId: handoff.profileId) != nil else { return }
+        queryStores.store(for: handoff.profileId).openSqlTab(title: handoff.title, sql: handoff.sql)
+        app.open(profileId: handoff.profileId, in: .query)
+    }
+
+    /// Alert deep link (Mac-hub push or local background alert). The window
+    /// in front claims it — only one window jumps to Pulse — and its Pulse
+    /// pushes the alerted instance's detail.
     private func routePendingAlert() {
-        guard let route = alertRouter.pendingRoute else { return }
-        guard profileStore.profiles.contains(where: { $0.id == route.instanceId }) else {
-            // Profile deleted since the alert fired — drop the route so it
-            // can't fire against an unrelated future selection.
-            alertRouter.pendingRoute = nil
-            return
-        }
-        app.dismissSheet()
-        app.selectedTab = .pulse
+        guard scenePhase == .active, let route = alertRouter.pendingRoute else { return }
+        alertRouter.pendingRoute = nil
+        // Profile deleted since the alert fired: drop it, so it can't fire
+        // against an unrelated future selection.
+        guard profileStore.profiles.contains(where: { $0.id == route.instanceId }) else { return }
+        app.showAlert(route)
     }
 
     // MARK: - Sheets

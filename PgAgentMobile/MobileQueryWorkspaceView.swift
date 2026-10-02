@@ -11,6 +11,7 @@ struct MobileQueryWorkspaceView: View {
     let schemaStore: PgSchemaStore?
     
     @Environment(MobileAppModel.self) private var app
+    @EnvironmentObject private var shortcutRelay: MobileShortcutRelay
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var runTask: Task<Void, Never>?
@@ -25,6 +26,13 @@ struct MobileQueryWorkspaceView: View {
     /// Last (text, caret) completion ran for — selection and text changes
     /// both report, so each keystroke would otherwise compute twice.
     @State private var lastCompletionInput: CompletionInput?
+    /// The result row shown in the inspector, if any (a result-row index).
+    @State private var inspectedRow: Int?
+    /// Result-row indices in the order the grid shows them (it may sort
+    /// locally), so the inspector steps through rows as you see them.
+    @State private var gridOrder: [Int] = []
+    /// Set when the inspector steps to a row, so the grid scrolls it into view.
+    @State private var revealedRow: Int?
 
     /// Collapsed editor (about four lines) once rows are on screen.
     @ScaledMetric(relativeTo: .callout) private var collapsedEditorHeight: CGFloat = 96
@@ -126,7 +134,27 @@ struct MobileQueryWorkspaceView: View {
             }
         }
         .background(MidnightColors.canvas)
-        .onReceive(MobileShortcutRelay.shared.actions, perform: handleShortcut)
+        .onReceive(shortcutRelay.actions, perform: handleShortcut)
+        .inspector(isPresented: inspectorPresented) {
+            rowInspector
+                .inspectorColumnWidth(min: 280, ideal: 340, max: 520)
+        }
+        // A different tab or a new result: the inspected row is gone.
+        .onChange(of: store.activeTabId) { _, _ in clearInspectedRow() }
+        .onChange(of: store.activeTab?.resultGeneration) { _, _ in clearInspectedRow() }
+        // Handoff: the query in front continues on the user's Mac or other
+        // iPad/iPhone (connection + SQL only — never results).
+        .userActivity(
+            PgQueryHandoff.activityType,
+            isActive: app.selectedTab == .query && currentHandoff != nil
+        ) { activity in
+            guard let handoff = currentHandoff else { return }
+            activity.title = handoff.title
+            activity.isEligibleForHandoff = true
+            activity.isEligibleForSearch = false
+            activity.isEligibleForPublicIndexing = false
+            activity.userInfo = handoff.userInfo
+        }
         .task(id: profileId) {
             aiAvailable = PgAIAvailabilityProbe.current().isAvailable
             await primeCompletionCatalog()
@@ -261,6 +289,62 @@ struct MobileQueryWorkspaceView: View {
         }
     }
 
+    // MARK: - Inspector, CSV, Handoff
+
+    private var inspectorPresented: Binding<Bool> {
+        Binding(
+            get: { inspectedRow != nil && store.activeTab?.lastResult != nil },
+            set: { if !$0 { inspectedRow = nil } }
+        )
+    }
+
+    @ViewBuilder
+    private var rowInspector: some View {
+        if let result = store.activeTab?.lastResult,
+           let index = inspectedRow, index < result.rows.count {
+            let order = gridOrder.count == result.rows.count ? gridOrder : Array(result.rows.indices)
+            let position = order.firstIndex(of: index) ?? index
+            MobileRowInspectorView(
+                columns: result.columns,
+                row: result.rows[index],
+                rowNumber: position + 1,
+                rowCount: result.rows.count,
+                onStep: { offset in
+                    let target = order[min(max(position + offset, 0), order.count - 1)]
+                    inspectedRow = target
+                    revealedRow = target
+                },
+                onClose: { inspectedRow = nil }
+            )
+        }
+    }
+
+    private func clearInspectedRow() {
+        inspectedRow = nil
+        revealedRow = nil
+    }
+
+    private func resultCSV(tab: PostgresQueryTab, result: FfiPgExecutionResult) -> MobileResultCSV {
+        MobileResultCSV(
+            fileName: PostgresExportEncoding.csvFileName(forTitle: tab.title),
+            columns: result.columns,
+            rows: result.rows
+        )
+    }
+
+    /// What the share sheet calls the file — saying so when it holds only
+    /// the rows loaded so far (one page of a larger result).
+    private func csvShareTitle(_ csv: MobileResultCSV, tab: PostgresQueryTab) -> String {
+        guard tab.hasMore || tab.browse != nil else { return csv.fileName }
+        return "\(csv.fileName) · \(csv.rows.count) loaded rows"
+    }
+
+    /// What Handoff advertises: the active SQL tab, if it holds any SQL.
+    private var currentHandoff: PgQueryHandoff? {
+        guard let tab = store.activeTab, tab.isSQLTab else { return nil }
+        return PgQueryHandoff(profileId: profileId, sql: tab.sql, title: tab.title)
+    }
+
     // MARK: - Ask
 
     /// The schema Ask grounds its SQL in: the one Browse opens on.
@@ -317,7 +401,7 @@ struct MobileQueryWorkspaceView: View {
             store.activateTab(atIndex: index)
         case .selectLastTab:
             store.activateLastTab()
-        case .newConnection, .showTab:
+        case .newConnection, .newWindow, .showTab:
             break // handled by MobileContentView
         }
     }
@@ -388,12 +472,22 @@ struct MobileQueryWorkspaceView: View {
                 Group {
                     if let result = tab.lastResult {
                         Text("\(result.rows.count) \(result.rows.count == 1 ? "row" : "rows") · \(Self.formatElapsed(elapsed))")
+                            // Drag the rows out as a CSV file (Files, Mail…).
+                            .draggable(resultCSV(tab: tab, result: result))
                     } else {
                         Text("Done · \(Self.formatElapsed(elapsed))")
                     }
                 }
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+                if let result = tab.lastResult, !result.rows.isEmpty {
+                    let csv = resultCSV(tab: tab, result: result)
+                    ShareLink(item: csv, preview: SharePreview(csvShareTitle(csv, tab: tab))) {
+                        Label("Share Loaded Rows as CSV", systemImage: "square.and.arrow.up")
+                            .labelStyle(.iconOnly)
+                    }
+                    .help("Share the loaded rows as CSV")
+                }
             case .failed:
                 Text("Failed")
                     .foregroundStyle(.red)
@@ -480,7 +574,11 @@ struct MobileQueryWorkspaceView: View {
                             : nil,
                         onCycleSort: tab.browse != nil
                             ? { column in cycleBrowseSort(column: column, tab: tab) }
-                            : nil
+                            : nil,
+                        selectedRow: inspectedRow,
+                        revealedRow: revealedRow,
+                        onSelectRow: { inspectedRow = $0 },
+                        onDisplayOrderChange: { gridOrder = $0 }
                     )
                 } else {
                     Text("Done. No rows returned.")
@@ -523,17 +621,7 @@ struct MobileQueryWorkspaceView: View {
     
     private func closeTab(_ tab: PostgresQueryTab) {
         if let connId = connectionId {
-            let sessionId = tab.id.uuidString
-            let cursorId = tab.lastResult?.cursorId
-            Task {
-                if case .running = tab.execState {
-                    _ = await BridgeManager.shared.pgCancel(connectionId: connId, sessionId: sessionId)
-                }
-                if let cursorId {
-                    _ = await BridgeManager.shared.pgCloseQuery(connectionId: connId, sessionId: sessionId, cursorId: cursorId)
-                }
-                _ = await BridgeManager.shared.pgReleaseSession(connectionId: connId, sessionId: sessionId)
-            }
+            MobileQueryStores.endServerState(of: tab, connectionId: connId)
         }
         store.closeTab(id: tab.id)
         if store.tabs.isEmpty {

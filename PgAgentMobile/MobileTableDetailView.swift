@@ -16,6 +16,7 @@ struct MobileTableDetailView: View {
     let schema: String
 
     @Environment(MobileAppModel.self) private var app
+    @EnvironmentObject private var queryStores: MobileQueryStores
 
     private var key: String {
         PgCompositeKey.table(database: profile.database, schema: schema, table: node.name)
@@ -89,6 +90,8 @@ struct MobileTableDetailView: View {
                     NavigationLink(value: column) {
                         columnRow(column)
                     }
+                    // Drop into a query editor in another window.
+                    .draggable(pgQuoteIdentIfNeeded(column.name))
                 }
             case .failed(let message)?:
                 Text(message).foregroundStyle(.secondary)
@@ -132,7 +135,7 @@ struct MobileTableDetailView: View {
 
     /// Open a browse tab for this relation in Query, already running.
     private func openData() {
-        MobileQueryStores.store(for: profile.id).openRelationTab(
+        queryStores.store(for: profile.id).openRelationTab(
             schema: schema,
             name: node.name,
             autoRun: true,

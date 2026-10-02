@@ -47,6 +47,8 @@ struct MobileDatabaseScope<Content: View>: View {
 /// Title-menu contents: every connection, the current one checked.
 struct MobileDatabaseMenuItems: View {
     @Environment(MobileAppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     @EnvironmentObject private var profileStore: PostgresProfileStore
 
     var body: some View {
@@ -67,6 +69,13 @@ struct MobileDatabaseMenuItems: View {
             app.selectedTab = .pulse
         } label: {
             Label("All Databases", systemImage: "square.grid.2x2")
+        }
+        if supportsMultipleWindows, let current = app.currentProfileId {
+            Button {
+                openWindow(value: MobileWindowTarget(profileId: current))
+            } label: {
+                Label("Open in New Window", systemImage: "macwindow.badge.plus")
+            }
         }
     }
 }

@@ -398,6 +398,7 @@ targets:
       # Pure navigation / presentation logic behind the Pulse, Query and
       # Browse tabs.
       - path: PgAgentMobile/MobileAppModel.swift
+      - path: PgAgentMobile/MobileAppLock.swift
       - path: PgAgentMobile/PulseStatus.swift
       - path: PgAgentMobile/BrowseSchemaChoice.swift
       # Fleet monitor engine moved to PgAgentShared (reused by the macOS

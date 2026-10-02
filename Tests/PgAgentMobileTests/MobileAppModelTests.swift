@@ -91,4 +91,24 @@ final class MobileAppModelTests: XCTestCase {
         model.present(.newConnection)
         XCTAssertEqual(model.presentedSheet, .editConnection(profileId: "a"))
     }
+
+    /// A tapped alert is shown in one window: Pulse, with the alert waiting
+    /// for Pulse to push its detail.
+    func testShowAlertSwitchesToPulseAndHoldsTheRoute() {
+        let model = MobileAppModel()
+        model.open(profileId: "a", in: .query)
+        model.present(.sshKeys)
+        let route = MobileAlertRoute(instanceId: "a", kind: .longRunning, blockerPid: nil)
+
+        model.showAlert(route)
+
+        XCTAssertEqual(model.selectedTab, .pulse)
+        XCTAssertNil(model.presentedSheet)
+        XCTAssertEqual(model.alertRoute, route)
+    }
+
+    /// Each "Open in New Window" is a new window, even for the same database.
+    func testWindowTargetsForTheSameDatabaseAreDistinct() {
+        XCTAssertNotEqual(MobileWindowTarget(profileId: "a"), MobileWindowTarget(profileId: "a"))
+    }
 }

@@ -1,17 +1,20 @@
 import SwiftUI
 import LocalAuthentication
 
+/// One window's privacy: a cover while the window isn't in front (so the
+/// app switcher never shows data), and the app-wide lock (`MobileAppLock`)
+/// with its Face ID / passcode unlock.
 struct MobilePrivacyGateView<Content: View>: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var covered = false
-    @State private var locked = false
     @State private var authenticating = false
-    @State private var lastBackgroundDate: Date?
     @State private var unlockError: String?
 
-    private let lockAfterBackground: TimeInterval = 2 * 60
+    private let lock = MobileAppLock.shared
     private let content: Content
+
+    private var locked: Bool { lock.isLocked }
 
     init(@ViewBuilder content: () -> Content) {
         self.content = content()
@@ -97,29 +100,10 @@ struct MobilePrivacyGateView<Content: View>: View {
         }
     }
 
+    /// Covers this window while it isn't in front. Locking is app-wide and
+    /// driven by PgAgentMobileApp, not by any one window.
     private func handleScenePhase(_ newPhase: ScenePhase) {
-        switch newPhase {
-        case .active:
-            let shouldLock = lastBackgroundDate.map {
-                Date().timeIntervalSince($0) >= lockAfterBackground
-            } ?? false
-
-            covered = false
-            if shouldLock {
-                locked = true
-            }
-            lastBackgroundDate = nil
-
-        case .inactive:
-            covered = true
-
-        case .background:
-            covered = true
-            lastBackgroundDate = Date()
-
-        @unknown default:
-            covered = true
-        }
+        covered = newPhase != .active
     }
 
     private func unlock() async {
@@ -132,7 +116,7 @@ struct MobilePrivacyGateView<Content: View>: View {
 
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
             // Graceful fallback if biometrics / passcode is not configured or supported
-            locked = false
+            lock.unlock()
             covered = false
             return
         }
@@ -143,7 +127,7 @@ struct MobilePrivacyGateView<Content: View>: View {
                 localizedReason: "Unlock pgAgent."
             )
             if success {
-                locked = false
+                lock.unlock()
                 covered = false
             } else {
                 unlockError = "Authentication failed."

@@ -16,9 +16,10 @@ import PgAgentMacOS
 // =============================================================================
 struct MobilePulseView: View {
     @Environment(MobileAppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @EnvironmentObject private var entitlementsStore: MobileEntitlementsStore
-    @ObservedObject private var alertRouter = MobileAlertRouter.shared
     @StateObject private var store = FleetHealthStore.withWidgetPublishing()
     @State private var path: [PulseRoute] = []
     @State private var pendingDelete: PostgresProfile?
@@ -57,14 +58,13 @@ struct MobilePulseView: View {
                 Text("Its saved password, query history and saved queries are removed from this device.")
             }
         }
-        // Tapped-alert deep link (Mac-hub push or local background alert):
-        // land on the alerted instance, on the tab matching the alert kind.
-        // `initial: true` consumes a route set before this view existed.
-        .onChange(of: alertRouter.pendingRoute, initial: true) { _, route in
-            guard let route,
-                  profileStore.profiles.contains(where: { $0.id == route.instanceId })
-            else { return } // MobileContentView validates and clears stale routes
-            alertRouter.pendingRoute = nil
+        // Tapped-alert deep link (Mac-hub push or local background alert)
+        // this window claimed (MobileContentView): land on the alerted
+        // instance, on the tab matching the alert kind. `initial: true`
+        // consumes a route set before this view existed.
+        .onChange(of: app.alertRoute, initial: true) { _, route in
+            guard let route else { return }
+            app.alertRoute = nil
             guard route.kind != .unreachable else {
                 path = [] // the tile already shows why it's unreachable
                 return
@@ -134,6 +134,13 @@ struct MobilePulseView: View {
                 app.open(profileId: profile.id, in: .browse)
             } label: {
                 Label("Browse", systemImage: "square.stack.3d.up")
+            }
+            if supportsMultipleWindows {
+                Button {
+                    openWindow(value: MobileWindowTarget(profileId: profile.id))
+                } label: {
+                    Label("Open in New Window", systemImage: "macwindow.badge.plus")
+                }
             }
         }
         Section {

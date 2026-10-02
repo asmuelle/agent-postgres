@@ -202,6 +202,9 @@ private struct BrowseSidebar: View {
                         NavigationLink(value: item(for: node, schema: bundle.schema)) {
                             objectRow(node, category: group.category)
                         }
+                        // Drop the qualified name into a query editor in
+                        // another window (iPad Split View / Stage Manager).
+                        .draggable(pgQuoteIdentIfNeeded(bundle.schema) + "." + pgQuoteIdentIfNeeded(node.name))
                     }
                 }
             }
