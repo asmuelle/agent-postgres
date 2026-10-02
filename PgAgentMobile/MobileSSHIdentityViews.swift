@@ -11,7 +11,7 @@ import UIKit
 // the whole point: make one key, point many connections at it.
 // =============================================================================
 
-private let identityAccent = Color(red: 0.15, green: 0.75, blue: 0.85)
+private let identityAccent = MidnightColors.accentCyan
 
 // MARK: - List
 
@@ -158,7 +158,7 @@ struct MobileSSHIdentityListView: View {
             } label: {
                 Text("Create Identity")
                     .font(MidnightMobileDesign.FontToken.label)
-                    .foregroundStyle(.black)
+                    .foregroundStyle(MidnightColors.onAccent)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 11)
                     .background(identityAccent, in: Capsule())

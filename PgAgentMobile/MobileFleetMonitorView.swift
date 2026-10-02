@@ -110,7 +110,6 @@ struct MobileFleetMonitorView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     private var emptyState: some View {
@@ -170,7 +169,7 @@ private struct InstanceHealthCard: View {
                         .foregroundStyle(.primary)
                     PostgresEnvironmentBadge(profile: profile, compact: true)
                 }
-                Text("\(profile.host):\(profile.port)/\(profile.database)")
+                Text(profile.hostSummary)
                     .font(MidnightMobileDesign.FontToken.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

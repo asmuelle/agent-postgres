@@ -16,22 +16,13 @@ struct MobileConsoleMetricsView: View {
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Execution History")
-                        .font(MidnightMobileDesign.FontToken.label)
-                        .foregroundStyle(MidnightColors.accentCyan)
-                        .padding(.horizontal)
-                        .padding(.top)
-                    
+                    // The segmented control above already says "History".
                     if logs.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "list.bullet.rectangle")
-                                .font(.system(size: 32))
-                                .foregroundStyle(.secondary)
-                            Text("No executed queries logged")
-                                .font(MidnightMobileDesign.FontToken.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
+                        ContentUnavailableView(
+                            "No Queries Yet",
+                            systemImage: "clock.arrow.circlepath",
+                            description: Text("Queries you run on this connection appear here.")
+                        )
                         .padding(.vertical, 40)
                     } else {
                         LazyVStack(spacing: 12) {

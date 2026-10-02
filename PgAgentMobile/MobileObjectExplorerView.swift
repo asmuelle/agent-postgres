@@ -3,16 +3,15 @@ import SwiftUI
 import PgAgentMacOS
 #endif
 
-/// Unified pgAdmin-style Object Explorer tree for iPadOS/iOS.
-/// Features a single root "Servers" disclosure group listing all connection profiles.
-/// Server nodes lazily connect and load Databases, Login/Group Roles, and Tablespaces.
+/// Database sidebar for iPadOS: every saved connection at the top level (no
+/// "Servers" root), each lazily connecting on expand to show its Databases,
+/// Login/Group Roles and Tablespaces. Search and the add/import actions come
+/// from the system search field and the shared `MobileLibraryToolbar`.
 struct MobileObjectExplorerView: View {
     @Binding var selectedProfileId: String?
     @Binding var selectedNodeId: String?
     @Binding var selectedNode: PgSchemaNode?
-    var onAddProfile: () -> Void
     var onEditProfile: (PostgresProfile) -> Void
-    var onShowCSVImport: () -> Void
     var onOpenNodeTab: (PostgresProfile, PgSchemaNode, [String: String]) -> Void
 
     @EnvironmentObject private var profileStore: PostgresProfileStore
@@ -20,8 +19,7 @@ struct MobileObjectExplorerView: View {
     @ObservedObject private var statusStore = PostgresConnectionStatusStore.shared
 
     @State private var search = ""
-    @State private var serversExpanded = true
-    
+
     // Tree Expansion States
     @State private var expandedServers: Set<String> = [] // profile.id
     /// One lease per expanded server, released exactly once on collapse.
@@ -39,23 +37,15 @@ struct MobileObjectExplorerView: View {
     @State private var expandedMetaSections: Set<String> = [] // tableKey:title
 
     var body: some View {
-        ZStack {
-            MidnightColors.primaryBackground.ignoresSafeArea()
-            
-            VStack(spacing: 0) {
-                // Header & Search
-                headerView
-                searchBar
-                
-                // Unified Tree
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        serversDisclosureGroup
-                    }
-                    .padding(.vertical, 8)
-                }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                profileRows
             }
+            .padding(.vertical, 8)
         }
+        .searchable(text: $search, placement: .sidebar, prompt: "Search")
+        .textInputAutocapitalization(.never)
+        .autocorrectionDisabled()
         .onChange(of: selectedNodeId) { _, newValue in
             if let id = newValue {
                 if let found = findNodeAcrossStores(id: id) {
@@ -76,104 +66,19 @@ struct MobileObjectExplorerView: View {
         }
     }
 
-    // MARK: - Header & Search
-
-    private var headerView: some View {
-        // The title is supplied by the split view's `.navigationTitle`, so the
-        // header only carries its action buttons — no duplicate label here.
-        HStack {
-            Spacer()
-
-            HStack(spacing: 12) {
-                Button(action: onShowCSVImport) {
-                    Image(systemName: "square.and.arrow.down")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(MidnightColors.accentCyan)
-                }
-                .buttonStyle(.plain)
-                
-                Button(action: onAddProfile) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(MidnightColors.accentCyan)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal)
-        .padding(.top, 12)
-        .padding(.bottom, 6)
-    }
-
-    private var searchBar: some View {
-        HStack {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search profiles...", text: $search)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(MidnightMobileDesign.FontToken.subheadline)
-            if !search.isEmpty {
-                Button(action: { search = "" }) {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.black.opacity(0.2))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(MidnightColors.borderGray, lineWidth: 1))
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-    }
-
-    // MARK: - Servers Root
+    // MARK: - Connections
 
     @ViewBuilder
-    private var serversDisclosureGroup: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    serversExpanded.toggle()
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "chevron.right")
-                        .font(.caption2)
-                        .rotationEffect(.degrees(serversExpanded ? 90 : 0))
-                        .foregroundStyle(.secondary)
-                    
-                    Image(systemName: "server.rack")
-                        .foregroundStyle(MidnightColors.accentCyan)
-                    
-                    Text("Servers")
-                        .font(MidnightMobileDesign.FontToken.label)
-                        .foregroundStyle(.primary)
-                    Spacer()
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
+    private var profileRows: some View {
+        let matches = filteredProfiles()
+        if matches.isEmpty && !search.isEmpty {
+            ContentUnavailableView.search(text: search)
+                .padding(.top, 40)
+        } else {
+            ForEach(matches) { profile in
+                serverNodeRow(profile: profile)
             }
-            .buttonStyle(.plain)
-            
-            if serversExpanded {
-                VStack(alignment: .leading, spacing: 2) {
-                    let matches = filteredProfiles()
-                    if matches.isEmpty {
-                        Text("No matches")
-                            .font(MidnightMobileDesign.FontToken.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.leading, 32)
-                            .padding(.vertical, 4)
-                    } else {
-                        ForEach(matches) { profile in
-                            serverNodeRow(profile: profile)
-                        }
-                    }
-                }
-                .padding(.leading, 8)
-            }
+            .padding(.horizontal, 8)
         }
     }
 
@@ -238,23 +143,14 @@ struct MobileObjectExplorerView: View {
 
                 Divider()
 
-                Button("Edit...") {
+                Button("Edit…") {
                     onEditProfile(profile)
                 }
 
                 Button("Duplicate") {
-                    let dup = PostgresProfile(
-                        name: "\(profile.name) Copy",
-                        host: profile.host,
-                        port: profile.port,
-                        database: profile.database,
-                        user: profile.user,
-                        auth: profile.auth,
-                        tls: profile.tls,
-                        folderPath: profile.folderPath,
-                        notes: profile.notes
-                    )
-                    profileStore.saveOrUpdate(dup)
+                    let copy = profile.duplicated()
+                    profileStore.saveOrUpdate(copy)
+                    onEditProfile(copy)
                 }
 
                 Button("Delete", role: .destructive) {
@@ -270,7 +166,7 @@ struct MobileObjectExplorerView: View {
                     if connectionManager.isConnecting[profile.id] == true {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
-                            Text("Connecting...")
+                            Text("Connecting…")
                                 .font(MidnightMobileDesign.FontToken.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -388,7 +284,7 @@ struct MobileObjectExplorerView: View {
                             )
                     }
                 }
-                Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
+                Text(profile.endpointSummary)
                     .font(MidnightMobileDesign.FontToken.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -402,7 +298,7 @@ struct MobileObjectExplorerView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
-        .background(isSelected ? Color.white.opacity(0.04) : Color.clear)
+        .background(isSelected ? MidnightColors.subtleFill : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -527,7 +423,7 @@ struct MobileObjectExplorerView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 6)
-                .background(isSelected ? Color.white.opacity(0.04) : Color.clear)
+                .background(isSelected ? MidnightColors.subtleFill : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
             }
@@ -628,7 +524,7 @@ struct MobileObjectExplorerView: View {
                                     }
                                     .padding(.horizontal)
                                     .padding(.vertical, 4)
-                                    .background(isSelected ? Color.white.opacity(0.04) : Color.clear)
+                                    .background(isSelected ? MidnightColors.subtleFill : Color.clear)
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                                 }
                                 .buttonStyle(.plain)
@@ -753,14 +649,14 @@ struct MobileObjectExplorerView: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
-                            .background(Color.white.opacity(0.08))
+                            .background(MidnightColors.subtleFill)
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer()
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 6)
-                .background(isSelected ? Color.white.opacity(0.04) : Color.clear)
+                .background(isSelected ? MidnightColors.subtleFill : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
             }
@@ -888,7 +784,7 @@ struct MobileObjectExplorerView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 4)
-                .background(isSelected ? Color.white.opacity(0.04) : Color.clear)
+                .background(isSelected ? MidnightColors.subtleFill : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .contentShape(Rectangle())
             }
@@ -919,7 +815,7 @@ struct MobileObjectExplorerView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 4)
-                .background(isSelected ? Color.white.opacity(0.04) : Color.clear)
+                .background(isSelected ? MidnightColors.subtleFill : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .contentShape(Rectangle())
             }
@@ -948,7 +844,7 @@ struct MobileObjectExplorerView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 4)
-                .background(isSelected ? Color.white.opacity(0.04) : Color.clear)
+                .background(isSelected ? MidnightColors.subtleFill : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .contentShape(Rectangle())
             }
@@ -1034,7 +930,7 @@ struct MobileObjectExplorerView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 6)
-                .background(isSelected ? Color.white.opacity(0.04) : Color.clear)
+                .background(isSelected ? MidnightColors.subtleFill : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .contentShape(Rectangle())
             }
@@ -1108,7 +1004,7 @@ struct MobileObjectExplorerView: View {
                         }
                         .padding(.horizontal, 4)
                         .padding(.vertical, 2)
-                        .background(isColSelected ? Color.white.opacity(0.04) : Color.clear)
+                        .background(isColSelected ? MidnightColors.subtleFill : Color.clear)
                         .clipShape(RoundedRectangle(cornerRadius: 3))
                         .contentShape(Rectangle())
                     }
@@ -1148,7 +1044,7 @@ struct MobileObjectExplorerView: View {
                                 }
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
-                                .background(isKeySelected ? Color.white.opacity(0.04) : Color.clear)
+                                .background(isKeySelected ? MidnightColors.subtleFill : Color.clear)
                                 .clipShape(RoundedRectangle(cornerRadius: 3))
                                 .contentShape(Rectangle())
                             }
@@ -1176,7 +1072,7 @@ struct MobileObjectExplorerView: View {
                                 }
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
-                                .background(isConstSelected ? Color.white.opacity(0.04) : Color.clear)
+                                .background(isConstSelected ? MidnightColors.subtleFill : Color.clear)
                                 .clipShape(RoundedRectangle(cornerRadius: 3))
                                 .contentShape(Rectangle())
                             }
@@ -1204,7 +1100,7 @@ struct MobileObjectExplorerView: View {
                                 }
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
-                                .background(isTrigSelected ? Color.white.opacity(0.04) : Color.clear)
+                                .background(isTrigSelected ? MidnightColors.subtleFill : Color.clear)
                                 .clipShape(RoundedRectangle(cornerRadius: 3))
                                 .contentShape(Rectangle())
                             }
@@ -1361,7 +1257,7 @@ struct MobileObjectExplorerView: View {
                                     }
                                     .padding(.horizontal)
                                     .padding(.vertical, 4)
-                                    .background(isRoleSelected ? Color.white.opacity(0.04) : Color.clear)
+                                    .background(isRoleSelected ? MidnightColors.subtleFill : Color.clear)
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                                 }
                                 .buttonStyle(.plain)
@@ -1456,7 +1352,7 @@ struct MobileObjectExplorerView: View {
                                     }
                                     .padding(.horizontal)
                                     .padding(.vertical, 4)
-                                    .background(isTspaceSelected ? Color.white.opacity(0.04) : Color.clear)
+                                    .background(isTspaceSelected ? MidnightColors.subtleFill : Color.clear)
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                                 }
                                 .buttonStyle(.plain)

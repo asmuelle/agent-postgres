@@ -111,7 +111,7 @@ struct PostgresMobileConnectionEditView: View {
                                         .font(MidnightMobileDesign.FontToken.label)
                                     Spacer()
                                 }
-                                .foregroundStyle(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
+                                .foregroundStyle(MidnightColors.accentCyan) // Cyan accent
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -207,7 +207,7 @@ struct PostgresMobileConnectionEditView: View {
                                     }
                                 }
                                 .pickerStyle(.menu)
-                                .tint(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
+                                .tint(MidnightColors.accentCyan) // Cyan accent
                             }
 
                             Divider().background(MidnightMobileDesign.ColorToken.separator)
@@ -221,7 +221,7 @@ struct PostgresMobileConnectionEditView: View {
                                         .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
                                 }
                             }
-                            .tint(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
+                            .tint(MidnightColors.accentCyan) // Cyan accent
                         }
                         .padding()
                         .midnightMobileCard()
@@ -251,7 +251,7 @@ struct PostgresMobileConnectionEditView: View {
                                         .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
                                 }
                             }
-                            .tint(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
+                            .tint(MidnightColors.accentCyan) // Cyan accent
 
                             if savePasswordToKeychain {
                                 Divider().background(MidnightMobileDesign.ColorToken.separator)
@@ -265,7 +265,7 @@ struct PostgresMobileConnectionEditView: View {
                                             .foregroundStyle(MidnightMobileDesign.ColorToken.secondaryText)
                                     }
                                 }
-                                .tint(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
+                                .tint(MidnightColors.accentCyan) // Cyan accent
                             }
                         }
                         .padding()
@@ -291,7 +291,7 @@ struct PostgresMobileConnectionEditView: View {
                                     }
                                 }
                                 .pickerStyle(.menu)
-                                .tint(Color(red: 0.15, green: 0.75, blue: 0.85)) // Cyan accent
+                                .tint(MidnightColors.accentCyan) // Cyan accent
                             }
 
                             Divider().background(MidnightMobileDesign.ColorToken.separator)
@@ -373,7 +373,7 @@ struct PostgresMobileConnectionEditView: View {
         }
     }
 
-    private var accent: Color { Color(red: 0.15, green: 0.75, blue: 0.85) }
+    private var accent: Color { MidnightColors.accentCyan }
 
     // MARK: - SSH Tunnel
 

@@ -26,7 +26,7 @@ struct MobileResultsGridCellView: View {
             .background(
                 isStaged
                     ? MidnightColors.accentCyan.opacity(0.18)
-                    : (rIdx % 2 == 0 ? Color.black.opacity(0.1) : Color.white.opacity(0.02))
+                    : (rIdx % 2 == 0 ? MidnightColors.recessedFill : MidnightColors.subtleFill)
             )
             .border(MidnightColors.borderGray, width: 0.5)
     }
@@ -174,7 +174,7 @@ struct MobileResultsGridView: View {
                 browsePagerFooter(browse: browse, onGoToPage: onGoToPage)
             }
         }
-        .background(MidnightColors.primaryBackground)
+        .background(MidnightColors.canvas)
     }
 
     private var headerRow: some View {
@@ -209,7 +209,7 @@ struct MobileResultsGridView: View {
                     .frame(width: 140, alignment: .leading)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
-                    .background(MidnightColors.cardBackground)
+                    .background(MidnightColors.recessedFill)
                     .border(MidnightColors.borderGray, width: 0.5)
                 }
                 .buttonStyle(.plain)
@@ -269,7 +269,7 @@ struct MobileResultsGridView: View {
         .foregroundStyle(MidnightColors.accentCyan)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color.black.opacity(0.3))
+        .background(MidnightColors.recessedFill)
     }
 }
 

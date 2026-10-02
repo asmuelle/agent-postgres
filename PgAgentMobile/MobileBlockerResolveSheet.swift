@@ -63,7 +63,6 @@ struct MobileBlockerResolveSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
         .presentationDetents([.medium, .large])
     }
 

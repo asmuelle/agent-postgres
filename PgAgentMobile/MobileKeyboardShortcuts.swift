@@ -14,6 +14,8 @@ import SwiftUI
 /// Bindings mirror the Mac editor (`PostgresQueryTabView+EditorBar`,
 /// `PostgresWorkspaceView`) so muscle memory transfers between devices.
 enum MobileShortcutAction: Equatable {
+    /// ⌘N — add a connection.
+    case newConnection
     /// ⌘↩ — run the active tab's SQL.
     case runQuery
     /// ⌘. — cancel the running statement.
@@ -52,6 +54,11 @@ struct MobileKeyboardCommands: Commands {
     private let relay = MobileShortcutRelay.shared
 
     var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Connection…") { relay.send(.newConnection) }
+                .keyboardShortcut("n", modifiers: .command)
+        }
+
         CommandMenu("Query") {
             Button("Run Query") { relay.send(.runQuery) }
                 .keyboardShortcut(.return, modifiers: .command)
@@ -79,7 +86,7 @@ struct MobileKeyboardCommands: Commands {
         }
 
         CommandGroup(after: .sidebar) {
-            Button("Toggle Object Explorer") { relay.send(.toggleSidebar) }
+            Button("Toggle Sidebar") { relay.send(.toggleSidebar) }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
         }
     }

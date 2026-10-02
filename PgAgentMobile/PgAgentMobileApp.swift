@@ -14,6 +14,7 @@ struct PgAgentMobileApp: App {
             MobilePrivacyGateView {
                 MobileContentView()
             }
+            .tint(MidnightColors.accentCyan)
             .environmentObject(entitlementsStore)
             .environmentObject(profileStore)
             .environmentObject(alertRouter)

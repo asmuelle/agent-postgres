@@ -67,7 +67,7 @@ struct MobileInstanceDetailView: View {
                 if profile.effectiveEnvironment != .unspecified || profile.isReadOnly {
                     HStack(spacing: 8) {
                         PostgresEnvironmentBadge(profile: profile)
-                        Text("\(profile.host):\(profile.port)/\(profile.database)")
+                        Text(profile.hostSummary)
                             .font(MidnightMobileDesign.FontToken.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

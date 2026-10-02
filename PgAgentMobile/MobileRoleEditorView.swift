@@ -77,7 +77,7 @@ struct MobileRoleEditorView: View {
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .padding(10)
-                            .background(Color.white.opacity(0.05))
+                            .background(MidnightColors.subtleFill)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                 }
@@ -107,7 +107,7 @@ struct MobileRoleEditorView: View {
                             .textFieldStyle(.plain)
                             .keyboardType(.numbersAndPunctuation)
                             .padding(10)
-                            .background(Color.white.opacity(0.05))
+                            .background(MidnightColors.subtleFill)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                         VStack(alignment: .leading, spacing: 6) {
@@ -118,7 +118,7 @@ struct MobileRoleEditorView: View {
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
                                 .padding(10)
-                                .background(Color.white.opacity(0.05))
+                                .background(MidnightColors.subtleFill)
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                     }
@@ -133,7 +133,7 @@ struct MobileRoleEditorView: View {
                         .textFieldStyle(.plain)
                         .lineLimit(2...4)
                         .padding(10)
-                        .background(Color.white.opacity(0.05))
+                        .background(MidnightColors.subtleFill)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
 
@@ -153,7 +153,7 @@ struct MobileRoleEditorView: View {
                             .font(.system(.caption2, design: .monospaced))
                             .padding(12)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.black.opacity(0.3))
+                            .background(MidnightColors.recessedFill)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                 }
@@ -244,7 +244,7 @@ struct MobileRoleEditorView: View {
                 } label: {
                     HStack {
                         if store.isApplying {
-                            ProgressView().tint(.black)
+                            ProgressView().tint(MidnightColors.onAccent)
                         } else {
                             Text("Execute Changes").font(.headline)
                         }
@@ -255,7 +255,7 @@ struct MobileRoleEditorView: View {
                         !store.isDirty || connectionId == nil
                             ? Color.gray.opacity(0.2) : MidnightColors.accentCyan
                     )
-                    .foregroundStyle(.black)
+                    .foregroundStyle(store.isDirty && connectionId != nil ? MidnightColors.onAccent : .secondary)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 .buttonStyle(.plain)
@@ -276,7 +276,7 @@ struct MobileRoleEditorView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.02))
+        .background(MidnightColors.subtleFill)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .padding(.horizontal)
     }

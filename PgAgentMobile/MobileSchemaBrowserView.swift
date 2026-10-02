@@ -627,7 +627,7 @@ struct MobileSchemaBrowserView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
-                .background(Color.white.opacity(0.02))
+                .background(MidnightColors.subtleFill)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .padding(.horizontal)
             }

@@ -12,7 +12,6 @@ struct MobileQueryWorkspaceView: View {
     
     @State private var runTask: Task<Void, Never>?
     @State private var executionDuration: TimeInterval = 0
-    @State private var showSQLToolbar = true
 
     private var profile: PostgresProfile? {
         PostgresProfileStore.shared.profile(withId: profileId)
@@ -76,25 +75,19 @@ struct MobileQueryWorkspaceView: View {
                             get: { tab.sql },
                             set: { store.setSQL($0, forTab: activeId) }
                         ))
-                        .font(.system(size: 15, design: .monospaced))
+                        .font(.subheadline.monospaced())
                         .padding(8)
-                        .background(Color.black.opacity(0.2))
                         .keyboardType(.asciiCapable)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-
-                        // SQL quick assistants toolbar
-                        if showSQLToolbar {
-                            sqlQuickBar(tabId: activeId, currentSQL: tab.sql)
-                        }
                     }
                     .frame(maxHeight: 280)
 
                     Divider().background(MidnightColors.borderGray)
 
-                    // Status + execute/cancel bar (also carries the
-                    // row-count metrics so the button never overlaps
-                    // the SQL editor or the snippet toolbar).
+                    // Status + Run/Cancel bar (also carries the row
+                    // count and timing, so the button never overlaps
+                    // the SQL editor).
                     resultsStatusBar(tab: tab)
 
                     Divider().background(MidnightColors.borderGray)
@@ -106,7 +99,7 @@ struct MobileQueryWorkspaceView: View {
                 emptyTabArea
             }
         }
-        .background(MidnightColors.primaryBackground)
+        .background(MidnightColors.canvas)
         .onReceive(MobileShortcutRelay.shared.actions, perform: handleShortcut)
     }
 
@@ -137,7 +130,7 @@ struct MobileQueryWorkspaceView: View {
             store.activateTab(atIndex: index)
         case .selectLastTab:
             store.activateLastTab()
-        case .toggleSidebar:
+        case .toggleSidebar, .newConnection:
             break // handled by MobileContentView
         }
     }
@@ -164,7 +157,7 @@ struct MobileQueryWorkspaceView: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
-                        .background(isActive ? MidnightColors.accentCyan.opacity(0.12) : Color.white.opacity(0.04))
+                        .background(isActive ? MidnightColors.accentCyan.opacity(0.12) : MidnightColors.subtleFill)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(isActive ? MidnightColors.accentCyan : MidnightColors.borderGray, lineWidth: 1))
                         .onTapGesture {
@@ -185,48 +178,14 @@ struct MobileQueryWorkspaceView: View {
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(MidnightColors.accentCyan)
                     .frame(width: 36, height: 36)
-                    .background(Color.white.opacity(0.04))
+                    .background(MidnightColors.subtleFill)
                     .clipShape(Circle())
                     .padding(.trailing, 8)
             }
             .buttonStyle(.plain)
             .help("New query tab (⌘T)")
         }
-        .background(Color.black.opacity(0.3))
-    }
-    
-    @ViewBuilder
-    private func sqlQuickBar(tabId: UUID, currentSQL: String) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                sqlHelperButton("SELECT *", tabId: tabId, current: currentSQL)
-                sqlHelperButton("FROM", tabId: tabId, current: currentSQL)
-                sqlHelperButton("WHERE", tabId: tabId, current: currentSQL)
-                sqlHelperButton("LIMIT 100", tabId: tabId, current: currentSQL)
-                sqlHelperButton("ORDER BY", tabId: tabId, current: currentSQL)
-                sqlHelperButton("COUNT(*)", tabId: tabId, current: currentSQL)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-        }
-        .background(Color.black.opacity(0.4))
-    }
-    
-    @ViewBuilder
-    private func sqlHelperButton(_ keyword: String, tabId: UUID, current: String) -> some View {
-        Button {
-            let space = current.isEmpty || current.hasSuffix(" ") || current.hasSuffix("\n") ? "" : " "
-            store.setSQL(current + space + keyword + " ", forTab: tabId)
-        } label: {
-            Text(keyword)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(MidnightColors.cardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(MidnightColors.borderGray, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
+        .background(MidnightColors.recessedFill)
     }
     
     @ViewBuilder
@@ -234,27 +193,25 @@ struct MobileQueryWorkspaceView: View {
         HStack(spacing: 12) {
             switch tab.execState {
             case .idle:
-                Label("Ready to execute", systemImage: "tablecells")
-                    .foregroundStyle(.secondary)
+                EmptyView()
             case .running:
-                Label("Running query...", systemImage: "hourglass")
-                    .foregroundStyle(MidnightColors.accentCyan)
+                Text("Running…")
+                    .foregroundStyle(.secondary)
             case .completed(let elapsed, _):
-                if let result = tab.lastResult {
-                    Label("\(result.rows.count) rows fetched", systemImage: "tablecells")
-                        .foregroundStyle(MidnightColors.accentCyan)
-                    Text(String(format: "%.0f ms", elapsed * 1000))
-                        .monospacedDigit()
-                        .foregroundStyle(MidnightColors.accentCyan)
-                } else {
-                    Label("Command executed", systemImage: "checkmark.circle")
-                        .foregroundStyle(MidnightColors.accentCyan)
+                Group {
+                    if let result = tab.lastResult {
+                        Text("\(result.rows.count) rows · \(Self.formatElapsed(elapsed))")
+                    } else {
+                        Text("Done · \(Self.formatElapsed(elapsed))")
+                    }
                 }
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
             case .failed:
-                Label("Query failed", systemImage: "exclamationmark.triangle")
+                Text("Failed")
                     .foregroundStyle(.red)
             case .cancelled:
-                Label("Cancelled", systemImage: "stop.circle")
+                Text("Cancelled")
                     .foregroundStyle(.secondary)
             }
 
@@ -262,64 +219,53 @@ struct MobileQueryWorkspaceView: View {
 
             switch tab.execState {
             case .running:
-                Button {
+                Button(role: .cancel) {
                     cancelSQL(tab: tab)
                 } label: {
                     Label("Cancel", systemImage: "stop.fill")
-                        .foregroundStyle(.red)
-                        .font(MidnightMobileDesign.FontToken.captionStrong)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(Color.red.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.bordered)
+                .tint(.red)
                 .help("Cancel query (⌘.)")
             default:
                 Button {
                     executeSQL(tab: tab)
                 } label: {
-                    Label("Execute", systemImage: "play.fill")
-                        .foregroundStyle(.black)
-                        .font(MidnightMobileDesign.FontToken.captionStrong)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 6)
-                        .background(MidnightColors.accentCyan)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                    Label("Run", systemImage: "play.fill")
+                        .foregroundStyle(MidnightColors.onAccent)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
                 .help("Run query (⌘↩)")
                 .disabled(tab.sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .font(MidnightMobileDesign.FontToken.captionStrong)
+        .buttonBorderShape(.capsule)
+        .controlSize(.small)
         .padding(.horizontal)
         .padding(.vertical, 6)
-        .background(Color.black.opacity(0.3))
+        .background(MidnightColors.recessedFill)
+    }
+
+    /// "84 ms" under a second, "2.4 s" (locale decimal) above.
+    private static func formatElapsed(_ seconds: TimeInterval) -> String {
+        seconds < 1
+            ? "\(Int((seconds * 1000).rounded())) ms"
+            : seconds.formatted(.number.precision(.fractionLength(1))) + " s"
     }
 
     @ViewBuilder
     private func resultsDisplayPane(tab: PostgresQueryTab) -> some View {
         ZStack {
-            MidnightColors.primaryBackground.ignoresSafeArea()
-            
+            MidnightColors.canvas.ignoresSafeArea()
+
             switch tab.execState {
             case .idle:
-                VStack(spacing: 8) {
-                    Image(systemName: "square.stack.3d.up")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
-                    Text("Ready to execute query")
-                        .font(MidnightMobileDesign.FontToken.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text("Results appear here.")
+                    .font(MidnightMobileDesign.FontToken.subheadline)
+                    .foregroundStyle(.tertiary)
             case .running:
-                VStack(spacing: 16) {
-                    ProgressView().tint(MidnightColors.accentCyan)
-                    Text("Fetching query rows...")
-                        .font(MidnightMobileDesign.FontToken.caption)
-                        .foregroundStyle(.secondary)
-                }
+                ProgressView()
             case .completed:
                 if let result = tab.lastResult {
                     MobileResultsGridView(
@@ -340,19 +286,20 @@ struct MobileQueryWorkspaceView: View {
                             : nil
                     )
                 } else {
-                    Text("Command executed successfully. No rows returned.")
+                    Text("Done. No rows returned.")
                         .font(MidnightMobileDesign.FontToken.caption)
                         .foregroundStyle(.secondary)
                 }
             case .failed(let msg, _):
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("ERROR")
-                            .font(.system(size: 11, weight: .bold))
+                        Label("Error", systemImage: "exclamationmark.triangle.fill")
+                            .font(MidnightMobileDesign.FontToken.captionStrong)
                             .foregroundStyle(.red)
                         Text(msg)
-                            .font(.system(size: 13, design: .monospaced))
+                            .font(.callout.monospaced())
                             .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                     }
                     .padding()
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -362,7 +309,7 @@ struct MobileQueryWorkspaceView: View {
                     .padding()
                 }
             case .cancelled:
-                Text("Execution cancelled.")
+                Text("Cancelled.")
                     .font(MidnightMobileDesign.FontToken.caption)
                     .foregroundStyle(.secondary)
             }
@@ -370,11 +317,11 @@ struct MobileQueryWorkspaceView: View {
     }
     
     private var emptyTabArea: some View {
-        VStack {
-            Text("No open tabs. Tap + to draft a query.")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ContentUnavailableView(
+            "No Open Queries",
+            systemImage: "text.cursor",
+            description: Text("Tap + to start one.")
+        )
     }
     
     private func closeTab(_ tab: PostgresQueryTab) {

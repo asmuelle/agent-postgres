@@ -77,7 +77,7 @@ struct MobileRoutineEditorView: View {
             Divider().background(MidnightColors.borderGray)
             content
         }
-        .background(MidnightColors.primaryBackground)
+        .background(MidnightColors.canvas)
         .task(id: "\(connectionId ?? "-")|\(schema).\(name)(\(signature))") {
             await reload()
         }
@@ -125,12 +125,12 @@ struct MobileRoutineEditorView: View {
                 Task { await apply() }
             } label: {
                 if isApplying {
-                    ProgressView().tint(.black)
+                    ProgressView().tint(MidnightColors.onAccent)
                         .padding(.horizontal, 12)
                 } else {
                     Label("Apply", systemImage: "checkmark.circle")
                         .font(MidnightMobileDesign.FontToken.captionStrong)
-                        .foregroundStyle(canApply ? .black : .secondary)
+                        .foregroundStyle(canApply ? MidnightColors.onAccent : .secondary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(canApply ? MidnightColors.accentCyan : Color.gray.opacity(0.2))
@@ -151,7 +151,7 @@ struct MobileRoutineEditorView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color.black.opacity(0.3))
+        .background(MidnightColors.recessedFill)
     }
 
     // MARK: - Content
@@ -237,7 +237,7 @@ struct MobileRoutineEditorView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color.black.opacity(0.35))
+        .background(MidnightColors.recessedFill)
         .overlay(alignment: .top) {
             Rectangle().fill(MidnightColors.borderGray).frame(height: 1)
         }

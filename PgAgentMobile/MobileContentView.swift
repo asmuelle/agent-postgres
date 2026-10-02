@@ -4,23 +4,6 @@ import StoreKit
 import PgAgentMacOS
 #endif
 
-// MARK: - App Color Palette
-enum MidnightColors {
-    static let primaryBackground = Color(red: 0.05, green: 0.05, blue: 0.08)
-    static let cardBackground = Color(red: 0.10, green: 0.10, blue: 0.14)
-    static let accentCyan = Color(red: 0.15, green: 0.75, blue: 0.85)
-    static let accentPurple = Color(red: 0.55, green: 0.35, blue: 0.85)
-    static let borderGray = Color(red: 0.20, green: 0.20, blue: 0.26)
-    
-    static func glowGradient() -> LinearGradient {
-        LinearGradient(
-            colors: [accentCyan.opacity(0.15), accentPurple.opacity(0.15)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-}
-
 @MainActor
 fileprivate final class MobileStoreCache {
     // Connection + schema state now lives in PostgresConnectionManager.shared
@@ -65,7 +48,6 @@ struct MobileContentView: View {
                 regularLayout
             }
         }
-        .preferredColorScheme(.dark)
         .sheet(isPresented: $creatingProfile) {
             PostgresMobileConnectionEditView(profile: nil) { newProfile in
                 profileStore.saveOrUpdate(newProfile)
@@ -120,9 +102,15 @@ struct MobileContentView: View {
             showingFleetMonitor = true
         }
         .onReceive(MobileShortcutRelay.shared.actions) { action in
-            guard action == .toggleSidebar, horizontalSizeClass != .compact else { return }
-            withAnimation {
-                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+            switch action {
+            case .newConnection:
+                handleAddProfile()
+            case .toggleSidebar where horizontalSizeClass != .compact:
+                withAnimation {
+                    columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+                }
+            default:
+                break
             }
         }
         // Properties sheet removed to present all node details directly in the main query workspace pane.
@@ -135,9 +123,7 @@ struct MobileContentView: View {
                 selectedProfileId: $selectedProfileId,
                 selectedNodeId: $selectedNodeId,
                 selectedNode: $selectedNode,
-                onAddProfile: handleAddProfile,
                 onEditProfile: { p in editingProfile = p },
-                onShowCSVImport: { showingCSVImport = true },
                 onOpenNodeTab: { profile, node, details in
                     let qStore = queryStore(forProfileId: profile.id)
                     let kind = details["kind"] ?? ""
@@ -169,68 +155,44 @@ struct MobileContentView: View {
                     }
                 }
             )
-            .navigationTitle("Object Explorer")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button { showingFleetMonitor = true } label: {
-                        Label("Fleet Monitor", systemImage: "waveform.path.ecg")
-                    }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button { showingProviderImport = true } label: {
-                        Label("Add from Provider", systemImage: "cloud")
-                    }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button { showingSSHIdentities = true } label: {
-                        Label("SSH Identities", systemImage: "key.horizontal")
-                    }
-                }
-            }
+            .navigationTitle("Databases")
+            // The sidebar column is too narrow for the title plus three
+            // toolbar items ("Datab…"); keep the title for accessibility and
+            // window naming, but don't draw it — the rows speak for themselves.
+            .toolbar(removing: .title)
+            .toolbar { MobileLibraryToolbar(actions: libraryActions, isPro: entitlementsStore.isPro) }
         } detail: {
             if let profileId = selectedProfileId,
                let profile = profileStore.profiles.first(where: { $0.id == profileId }) {
-                
+
                 // Tabbed SQL Query Workspace & Results
                 MobileProfileWorkspaceView(
                     profile: profile,
                     queryStore: queryStore(forProfileId: profileId),
                     forceRegularMode: true
                 )
+            } else if profileStore.profiles.isEmpty {
+                MobileNoConnectionsView(actions: libraryActions)
             } else {
-                VStack(spacing: 16) {
-                    Image(systemName: "cylinder.split.1x2.fill")
-                        .font(.system(size: 64))
-                        .foregroundStyle(MidnightColors.borderGray)
-                    Text("Select a Database Server")
-                        .font(MidnightMobileDesign.FontToken.headline)
-                        .foregroundStyle(.primary)
-                    Text("Select or expand a server in the Object Explorer sidebar to begin.")
-                        .font(MidnightMobileDesign.FontToken.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 40)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(MidnightColors.primaryBackground)
+                ContentUnavailableView(
+                    "Choose a Database",
+                    systemImage: "cylinder.split.1x2",
+                    description: Text("Pick a connection in the sidebar.")
+                )
             }
         }
     }
-    
+
     // MARK: - iOS Compact NavigationStack Layout
     private var compactLayout: some View {
         NavigationStack {
             MobileConnectionListView(
                 selectedProfileId: $selectedProfileId,
-                onAddProfile: handleAddProfile,
-                onEditProfile: { p in editingProfile = p },
-                onShowCSVImport: { showingCSVImport = true },
-                onShowProviderImport: { showingProviderImport = true },
-                onShowProUpgrade: { showingProUpgrade = true },
-                onShowMonitor: { showingFleetMonitor = true },
-                onShowSSHIdentities: { showingSSHIdentities = true }
+                actions: libraryActions,
+                onEditProfile: { p in editingProfile = p }
             )
-            .navigationTitle("pgAgent")
+            .navigationTitle("Databases")
+            .toolbar { MobileLibraryToolbar(actions: libraryActions, isPro: entitlementsStore.isPro) }
             .navigationDestination(item: $selectedProfileId) { profileId in
                 if let profile = profileStore.profiles.first(where: { $0.id == profileId }) {
                     MobileProfileWorkspaceView(
@@ -244,6 +206,17 @@ struct MobileContentView: View {
     }
     
     // MARK: - Helpers
+    private var libraryActions: MobileLibraryActions {
+        MobileLibraryActions(
+            showMonitor: { showingFleetMonitor = true },
+            addConnection: handleAddProfile,
+            importFromProvider: { showingProviderImport = true },
+            importCSV: { showingCSVImport = true },
+            showSSHKeys: { showingSSHIdentities = true },
+            showPro: { showingProUpgrade = true }
+        )
+    }
+
     private func handleAddProfile() {
         if entitlementsStore.canCreateConnection(currentCount: profileStore.profiles.count) {
             creatingProfile = true

@@ -24,10 +24,6 @@ final class MobileEntitlementsStore: ObservableObject {
         [Self.proLifetimeProductId]
     }
 
-    var limitSummary: String {
-        isPro ? "Pro active" : "Free plan — \(Self.freeSavedHostLimit) connections, core query editor"
-    }
-
     /// Single source of truth for what Pro unlocks. Gate on database workflow
     /// outcomes, not on saved-connection capacity.
     func isUnlocked(_ feature: ProFeature) -> Bool {
