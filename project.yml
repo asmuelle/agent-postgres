@@ -271,6 +271,11 @@ targets:
       # of the App Group / ActivityKit boundary.
       - path: PgAgentMobile/PgOperationActivityAttributes.swift
       - path: PgAgentMobile/PgFleetWidgetSnapshot.swift
+      - path: PgAgentMobile/PgFleetWidgetSnapshotStore.swift
+      # The control's action: an OpenIntent the system runs in the app, so
+      # it must exist on both sides (with the navigator it calls).
+      - path: PgAgentMobile/OpenPgAgentIntent.swift
+      - path: PgAgentMobile/MobileSystemNavigator.swift
     entitlements:
       path: PgAgentMobileWidgets/PgAgentMobileWidgets.entitlements
       properties:
@@ -399,6 +404,11 @@ targets:
       # Browse tabs.
       - path: PgAgentMobile/MobileAppModel.swift
       - path: PgAgentMobile/MobileAppLock.swift
+      # Where Siri / Spotlight / controls / widget links land, what Siri
+      # says, and what the Control Center control shows.
+      - path: PgAgentMobile/MobileSystemNavigator.swift
+      - path: PgAgentMobile/PulseSummary.swift
+      - path: PgAgentMobile/PgFleetWidgetSnapshot.swift
       - path: PgAgentMobile/PulseStatus.swift
       - path: PgAgentMobile/BrowseSchemaChoice.swift
       # Fleet monitor engine moved to PgAgentShared (reused by the macOS

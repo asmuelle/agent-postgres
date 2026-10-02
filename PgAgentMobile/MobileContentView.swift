@@ -14,7 +14,8 @@ import PgAgentMacOS
 // Owns the scene-level pieces every tab shares: the MobileAppModel (tab +
 // current database, persisted per scene), the single connection claim on the
 // current database, the window's query tabs and keyboard-shortcut relay, the
-// sheets any screen can request, alert routing, and incoming Handoff.
+// sheets any screen can request, alert routing, incoming Handoff, and where
+// Siri, Spotlight, the Control Center control and pgAgent:// links send it.
 //
 // One per window: on iPad each database can have its own window
 // (`openWindow(value: MobileWindowTarget(…))`), side by side in Split View or
@@ -34,6 +35,7 @@ struct MobileContentView: View {
     /// Used for claim/release only — not observed, so schema loads don't
     /// re-evaluate the whole root.
     private let connectionManager = PostgresConnectionManager.shared
+    private let navigator = MobileSystemNavigator.shared
 
     @State private var app = MobileAppModel()
     @StateObject private var queryStores = MobileQueryStores()
@@ -98,6 +100,18 @@ struct MobileContentView: View {
         }
         .onChange(of: scenePhase) { _, _ in
             routePendingAlert()
+            openSystemDestination()
+        }
+        // Siri / Shortcuts / Spotlight / Control Center ask for a place in
+        // the app; widgets link to it (pgAgent://fleet). The window in front
+        // goes there.
+        .onChange(of: navigator.pending) { _, _ in
+            openSystemDestination()
+        }
+        .onOpenURL { url in
+            if let destination = MobileSystemDestination(url: url) {
+                navigator.request(destination)
+            }
         }
         // A query handed off from the user's Mac or other device: open it in
         // a new tab on that connection — never run it.
@@ -171,6 +185,32 @@ struct MobileContentView: View {
         }
         routePendingAlert()
         hasRestored = true
+        openSystemDestination()
+    }
+
+    /// Takes a pending system request (Siri, Spotlight, a control, a widget
+    /// link) if this window is in front and restored, and goes there.
+    private func openSystemDestination() {
+        guard hasRestored, scenePhase == .active, let destination = navigator.take() else { return }
+        app.dismissSheet()
+        switch destination {
+        case .pulse:
+            app.selectedTab = .pulse
+        case .query(let profileId):
+            show(.query, profileId: profileId)
+        case .browse(let profileId):
+            show(.browse, profileId: profileId)
+        }
+    }
+
+    /// `tab` on `profileId`, or on the current database when there's none
+    /// (or it was deleted).
+    private func show(_ tab: MobileAppTab, profileId: String?) {
+        if let profileId, profileStore.profile(withId: profileId) != nil {
+            app.open(profileId: profileId, in: tab)
+        } else {
+            app.selectedTab = tab
+        }
     }
 
     private func openHandoff(_ handoff: PgQueryHandoff) {

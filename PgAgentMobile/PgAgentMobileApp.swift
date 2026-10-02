@@ -43,6 +43,11 @@ struct PgAgentMobileApp: App {
             default: break
             }
         }
+        // Spotlight and the Siri phrases follow your connections (names
+        // only — see DatabaseEntity). Once per change, not per window.
+        .onChange(of: profileStore.profiles.map(DatabaseEntity.init), initial: true) { _, databases in
+            MobileSpotlightIndexer.reindex(databases)
+        }
         // Hardware-keyboard shortcuts (⌘↩ run, ⌘T/⌘W tabs, ⌘⇧E sidebar…);
         // see MobileKeyboardShortcuts.swift.
         .commands { MobileKeyboardCommands() }

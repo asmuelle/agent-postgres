@@ -241,11 +241,6 @@ private struct PulseTile: View {
     }
 
     private var toneColor: Color {
-        switch status.tone {
-        case .good: return .green
-        case .warning: return .orange
-        case .critical: return .red
-        case .muted: return .secondary
-        }
+        status.tone.color
     }
 }

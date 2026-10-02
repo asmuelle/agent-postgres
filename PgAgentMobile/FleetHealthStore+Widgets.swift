@@ -20,9 +20,10 @@ extension FleetHealthStore {
         return store
     }
 
-    /// Hand the fresh fleet picture to the lock-screen accessory widgets: one
-    /// compact JSON snapshot in the App Group container, then a timeline
-    /// reload. Best-effort — widget plumbing must never fail a refresh.
+    /// Hand the fresh fleet picture to the lock-screen accessory widgets and
+    /// the Control Center control: one compact JSON snapshot in the App Group
+    /// container, then a reload. Best-effort — widget plumbing must never
+    /// fail a refresh.
     private func publishWidgetSnapshot(profiles: [PostgresProfile]) {
         let instances = profiles.map { profile -> PgFleetWidgetInstance in
             let health = self.health(for: profile.id)
@@ -38,6 +39,7 @@ extension FleetHealthStore {
         let snapshot = PgFleetWidgetSnapshot(generatedAt: Date(), instances: instances)
         try? PgFleetWidgetSnapshotStore().save(snapshot)
         WidgetCenter.shared.reloadTimelines(ofKind: PgFleetWidgetConfiguration.accessoryWidgetKind)
+        ControlCenter.shared.reloadControls(ofKind: PgFleetWidgetConfiguration.controlKind)
     }
 }
 
