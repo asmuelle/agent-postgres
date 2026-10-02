@@ -95,7 +95,7 @@ struct MobileActivityAISheet: View {
                         store.dismiss()
                         onTerminateBackend(rootPid)
                     } label: {
-                        Label("Terminate root blocker · PID \(rootPid)", systemImage: "xmark.octagon.fill")
+                        Label("Terminate root blocker · PID \(rootPid)" as String, systemImage: "xmark.octagon.fill")
                             .font(MidnightMobileDesign.FontToken.captionStrong)
                             .frame(maxWidth: .infinity)
                     }
@@ -122,7 +122,7 @@ struct MobileActivityAISheet: View {
                 store.dismiss()
                 onCancelBackend(pid)
             } label: {
-                Label("Cancel query · PID \(pid)", systemImage: "stop.circle")
+                Label("Cancel query · PID \(pid)" as String, systemImage: "stop.circle")
                     .font(MidnightMobileDesign.FontToken.captionStrong)
                     .frame(maxWidth: .infinity)
             }
@@ -134,7 +134,7 @@ struct MobileActivityAISheet: View {
                     store.dismiss()
                     onTerminateBackend(pid)
                 } label: {
-                    Label("Terminate · PID \(pid)", systemImage: "xmark.octagon.fill")
+                    Label("Terminate · PID \(pid)" as String, systemImage: "xmark.octagon.fill")
                         .font(MidnightMobileDesign.FontToken.captionStrong)
                         .frame(maxWidth: .infinity)
                 }

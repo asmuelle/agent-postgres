@@ -1,55 +1,56 @@
 import SwiftUI
 
 // =============================================================================
-// MobileLibraryToolbar — the one toolbar for the connection library, shared by
-// the iPhone connection list and the iPad sidebar. Two everyday actions stay
-// visible (Fleet Monitor, New Connection); the once-in-a-while ones (imports,
-// SSH keys, Pro) live behind a single "More" menu.
+// MobileLibraryToolbar — the Pulse toolbar: New Connection stays visible;
+// the once-in-a-while actions (imports, SSH keys, alert settings, Pro) live
+// behind a single "More" menu. Every action is a sheet request on the
+// MobileAppModel, presented by MobileContentView.
 // =============================================================================
 
-/// Library-level actions, owned by `MobileContentView` (which presents the
-/// sheets) and handed to whichever surface renders the library.
-struct MobileLibraryActions {
-    var showMonitor: () -> Void
-    var addConnection: () -> Void
-    var importFromProvider: () -> Void
-    var importCSV: () -> Void
-    var showSSHKeys: () -> Void
-    var showPro: () -> Void
-}
-
 struct MobileLibraryToolbar: ToolbarContent {
-    let actions: MobileLibraryActions
+    let app: MobileAppModel
     let isPro: Bool
 
     var body: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
-            Button(action: actions.showMonitor) {
-                Label("Fleet Monitor", systemImage: "waveform.path.ecg")
-            }
-        }
-        ToolbarItem(placement: .primaryAction) {
             // ⌘N lives in the menu bar (MobileKeyboardCommands) so it works
             // from any screen, not only while this toolbar is visible.
-            Button(action: actions.addConnection) {
+            Button {
+                app.present(.newConnection)
+            } label: {
                 Label("New Connection", systemImage: "plus")
             }
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
                 Section {
-                    Button(action: actions.importFromProvider) {
+                    Button {
+                        app.present(.importFromProvider)
+                    } label: {
                         Label("Add from Cloud Provider…", systemImage: "cloud")
                     }
-                    Button(action: actions.importCSV) {
+                    Button {
+                        app.present(.importCSV)
+                    } label: {
                         Label("Import CSV…", systemImage: "square.and.arrow.down")
                     }
                 }
-                Button(action: actions.showSSHKeys) {
-                    Label("SSH Keys…", systemImage: "key.horizontal")
+                Section {
+                    Button {
+                        app.present(.sshKeys)
+                    } label: {
+                        Label("SSH Keys…", systemImage: "key.horizontal")
+                    }
+                    Button {
+                        app.present(.alertSettings)
+                    } label: {
+                        Label("Alert Settings…", systemImage: "bell.badge")
+                    }
                 }
                 if !isPro {
-                    Button(action: actions.showPro) {
+                    Button {
+                        app.present(.pro)
+                    } label: {
                         Label("pgAgent Pro…", systemImage: "sparkles")
                     }
                 }
@@ -60,10 +61,10 @@ struct MobileLibraryToolbar: ToolbarContent {
     }
 }
 
-/// Shown wherever the library is empty: the first-run moment is the only time
-/// the import paths matter, so they get a button here instead of a toolbar slot.
+/// Shown wherever there are no connections yet: the first-run moment is the
+/// only time the import paths matter, so they get a button here.
 struct MobileNoConnectionsView: View {
-    let actions: MobileLibraryActions
+    @Environment(MobileAppModel.self) private var app
 
     var body: some View {
         ContentUnavailableView {
@@ -71,11 +72,15 @@ struct MobileNoConnectionsView: View {
         } description: {
             Text("Add a Postgres database to get started.")
         } actions: {
-            Button(action: actions.addConnection) {
+            Button {
+                app.present(.newConnection)
+            } label: {
                 Text("New Connection").foregroundStyle(MidnightColors.onAccent)
             }
             .buttonStyle(.borderedProminent)
-            Button("Add from Cloud Provider…", action: actions.importFromProvider)
+            Button("Add from Cloud Provider…") {
+                app.present(.importFromProvider)
+            }
         }
     }
 }

@@ -382,7 +382,7 @@ private struct SessionRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text("PID \(session.pid)")
+                Text(verbatim: "PID \(session.pid)")
                     .font(MidnightMobileDesign.FontToken.captionStrong)
                     .foregroundStyle(MidnightColors.accentCyan)
 

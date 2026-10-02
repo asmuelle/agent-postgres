@@ -10,6 +10,7 @@ struct MobileQueryWorkspaceView: View {
     let profileId: String
     let schemaStore: PgSchemaStore?
     
+    @Environment(MobileAppModel.self) private var app
     @State private var runTask: Task<Void, Never>?
     @State private var executionDuration: TimeInterval = 0
 
@@ -82,6 +83,17 @@ struct MobileQueryWorkspaceView: View {
                         .textInputAutocapitalization(.never)
                     }
                     .frame(maxHeight: 280)
+                    // Browse's "Open Data" opens a tab flagged to run at once;
+                    // the id re-fires when the flag flips on and
+                    // `consumeAutoRun` clears it, so re-renders can't
+                    // double-fire (mirrors the macOS tab view).
+                    .task(id: "\(activeId)-autorun-\(tab.pendingAutoRun)") {
+                        guard tab.pendingAutoRun,
+                              store.consumeAutoRun(forTab: activeId),
+                              let current = store.tabs.first(where: { $0.id == activeId })
+                        else { return }
+                        executeSQL(tab: current)
+                    }
 
                     Divider().background(MidnightColors.borderGray)
 
@@ -109,6 +121,9 @@ struct MobileQueryWorkspaceView: View {
     /// Run/cancel only apply to SQL tabs; property inspectors and routine
     /// editors have no statement to execute.
     private func handleShortcut(_ action: MobileShortcutAction) {
+        // The tab view keeps this workspace alive behind Pulse and Browse;
+        // ⌘↩ there must never run (or ⌘W close) a query nobody can see.
+        guard app.selectedTab == .query else { return }
         switch action {
         case .runQuery:
             guard let tab = store.activeTab, tab.isSQLTab else { return }
@@ -130,7 +145,7 @@ struct MobileQueryWorkspaceView: View {
             store.activateTab(atIndex: index)
         case .selectLastTab:
             store.activateLastTab()
-        case .toggleSidebar, .newConnection:
+        case .newConnection, .showTab:
             break // handled by MobileContentView
         }
     }
@@ -200,7 +215,7 @@ struct MobileQueryWorkspaceView: View {
             case .completed(let elapsed, _):
                 Group {
                     if let result = tab.lastResult {
-                        Text("\(result.rows.count) rows · \(Self.formatElapsed(elapsed))")
+                        Text("\(result.rows.count) \(result.rows.count == 1 ? "row" : "rows") · \(Self.formatElapsed(elapsed))")
                     } else {
                         Text("Done · \(Self.formatElapsed(elapsed))")
                     }

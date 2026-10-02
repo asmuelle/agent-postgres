@@ -44,9 +44,9 @@ struct MobileAlertRoute: Equatable, Sendable {
     let blockerPid: Int32?
 }
 
-/// Pending deep-link route. The root view observes this, presents the fleet
-/// monitor, and MobileFleetMonitorView consumes the route by pushing the
-/// instance detail on the right tab.
+/// Pending deep-link route. The root view observes this and selects the Pulse
+/// tab; MobilePulseView consumes the route by pushing the instance detail on
+/// the right tab.
 @MainActor
 final class MobileAlertRouter: ObservableObject {
     static let shared = MobileAlertRouter()

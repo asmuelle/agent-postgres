@@ -44,7 +44,7 @@ struct PostgresOperationsPanel: View {
                         if let percent = operation.percentComplete {
                             ProgressView(value: percent, total: 100)
                         }
-                        Text("PID \(operation.pid) · \(operation.phase)")
+                        Text(verbatim: "PID \(operation.pid) · \(operation.phase)")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     .padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 6))

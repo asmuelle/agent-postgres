@@ -32,8 +32,8 @@ enum MobileShortcutAction: Equatable {
     case selectTab(index: Int)
     /// ⌘9 — select the last tab.
     case selectLastTab
-    /// ⌘⇧E — show/hide the Object Explorer sidebar.
-    case toggleSidebar
+    /// ⌘⌥1…3 — show Pulse, Query or Browse.
+    case showTab(MobileAppTab)
 }
 
 /// Single-scene relay from menu commands to the workspace on screen.
@@ -86,8 +86,12 @@ struct MobileKeyboardCommands: Commands {
         }
 
         CommandGroup(after: .sidebar) {
-            Button("Toggle Sidebar") { relay.send(.toggleSidebar) }
-                .keyboardShortcut("e", modifiers: [.command, .shift])
+            Button("Pulse") { relay.send(.showTab(.pulse)) }
+                .keyboardShortcut("1", modifiers: [.command, .option])
+            Button("Query") { relay.send(.showTab(.query)) }
+                .keyboardShortcut("2", modifiers: [.command, .option])
+            Button("Browse") { relay.send(.showTab(.browse)) }
+                .keyboardShortcut("3", modifiers: [.command, .option])
         }
     }
 }

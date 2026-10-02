@@ -73,7 +73,7 @@ struct MobileBlockerResolveSheet: View {
             HStack(spacing: 8) {
                 Image(systemName: "lock.trianglebadge.exclamationmark.fill")
                     .foregroundStyle(.red)
-                Text("Blocker PID \(target.group.blockerPid)")
+                Text(verbatim: "Blocker PID \(target.group.blockerPid)")
                     .font(MidnightMobileDesign.FontToken.headline)
             }
             Text("Terminating this backend unblocks \(waiterCount) waiting session\(waiterCount == 1 ? "" : "s") on \(instanceName).")
@@ -115,7 +115,7 @@ struct MobileBlockerResolveSheet: View {
                 }
             } else {
                 Label(
-                    "Couldn't load this backend's session details — it may already be gone. The actions below still target PID \(target.group.blockerPid).",
+                    "Couldn't load this backend's session details — it may already be gone. The actions below still target PID \(target.group.blockerPid)." as String,
                     systemImage: "questionmark.circle"
                 )
                 .font(MidnightMobileDesign.FontToken.caption)
