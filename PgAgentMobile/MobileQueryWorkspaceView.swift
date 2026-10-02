@@ -11,8 +11,33 @@ struct MobileQueryWorkspaceView: View {
     let schemaStore: PgSchemaStore?
     
     @Environment(MobileAppModel.self) private var app
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var runTask: Task<Void, Never>?
     @State private var executionDuration: TimeInterval = 0
+    @State private var editorController = MobileSQLEditorController()
+    @State private var editorFocused = false
+    @State private var completions: [SQLCompletionItem] = []
+    @State private var aiAvailable = false
+    @State private var showingAsk = false
+    /// AI-written SQL that would change data, waiting for an explicit OK.
+    @State private var pendingAIWrite: PendingAIWrite?
+    /// Last (text, caret) completion ran for — selection and text changes
+    /// both report, so each keystroke would otherwise compute twice.
+    @State private var lastCompletionInput: CompletionInput?
+
+    /// Collapsed editor (about four lines) once rows are on screen.
+    @ScaledMetric(relativeTo: .callout) private var collapsedEditorHeight: CGFloat = 96
+    @ScaledMetric(relativeTo: .callout) private var minimumEditorHeight: CGFloat = 160
+    /// Room kept for the suggestion and status bars under the editor.
+    private static let reservedBelowEditor: CGFloat = 120
+    private static let smallestEditorHeight: CGFloat = 72
+    /// Share of the workspace the editor takes while you write.
+    private static let expandedEditorShare: CGFloat = 0.42
+    private static let maxSuggestions = 12
+    /// Schemas whose contents are loaded up front so completion knows the
+    /// tables before anyone opens Browse.
+    private static let primedSchemaLimit = 8
 
     private var profile: PostgresProfile? {
         PostgresProfileStore.shared.profile(withId: profileId)
@@ -70,42 +95,31 @@ struct MobileQueryWorkspaceView: View {
                         signature: signature
                     )
                 default:
-                    // Editor Panel
-                    VStack(spacing: 0) {
-                        TextEditor(text: Binding(
-                            get: { tab.sql },
-                            set: { store.setSQL($0, forTab: activeId) }
-                        ))
-                        .font(.subheadline.monospaced())
-                        .padding(8)
-                        .keyboardType(.asciiCapable)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    GeometryReader { proxy in
+                        VStack(spacing: 0) {
+                            sqlEditor(tab: tab, tabId: activeId)
+                                .frame(height: editorHeight(available: proxy.size.height, tab: tab))
+
+                            // While typing the bar keeps its height even when
+                            // empty, so Run and the results don't jump.
+                            if editorFocused {
+                                MobileCompletionBar(items: completions) { item in
+                                    editorController.insert(item)
+                                }
+                            }
+
+                            Divider().background(MidnightColors.borderGray)
+
+                            // Status + Run/Cancel bar (also carries the row
+                            // count and timing, so the button never overlaps
+                            // the SQL editor).
+                            resultsStatusBar(tab: tab)
+
+                            Divider().background(MidnightColors.borderGray)
+
+                            resultsDisplayPane(tab: tab)
+                        }
                     }
-                    .frame(maxHeight: 280)
-                    // Browse's "Open Data" opens a tab flagged to run at once;
-                    // the id re-fires when the flag flips on and
-                    // `consumeAutoRun` clears it, so re-renders can't
-                    // double-fire (mirrors the macOS tab view).
-                    .task(id: "\(activeId)-autorun-\(tab.pendingAutoRun)") {
-                        guard tab.pendingAutoRun,
-                              store.consumeAutoRun(forTab: activeId),
-                              let current = store.tabs.first(where: { $0.id == activeId })
-                        else { return }
-                        executeSQL(tab: current)
-                    }
-
-                    Divider().background(MidnightColors.borderGray)
-
-                    // Status + Run/Cancel bar (also carries the row
-                    // count and timing, so the button never overlaps
-                    // the SQL editor).
-                    resultsStatusBar(tab: tab)
-
-                    Divider().background(MidnightColors.borderGray)
-
-                    // Collapsible results display pane
-                    resultsDisplayPane(tab: tab)
                 }
             } else {
                 emptyTabArea
@@ -113,6 +127,164 @@ struct MobileQueryWorkspaceView: View {
         }
         .background(MidnightColors.canvas)
         .onReceive(MobileShortcutRelay.shared.actions, perform: handleShortcut)
+        .task(id: profileId) {
+            aiAvailable = PgAIAvailabilityProbe.current().isAvailable
+            await primeCompletionCatalog()
+        }
+        // Apple Intelligence can finish setting up while the app is open.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                aiAvailable = PgAIAvailabilityProbe.current().isAvailable
+            }
+        }
+        .alert(
+            "Run a statement that modifies data?",
+            isPresented: Binding(
+                get: { pendingAIWrite != nil },
+                set: { if !$0 { pendingAIWrite = nil } }
+            ),
+            presenting: pendingAIWrite
+        ) { pending in
+            Button("Run", role: .destructive) {
+                // The user takes ownership: drop the AI provenance so the
+                // same statement isn't challenged again, then run it.
+                store.mutate(id: pending.tabId) { $0.aiGeneratedSQL = nil }
+                if let tab = store.tabs.first(where: { $0.id == pending.tabId }) {
+                    executeSQL(tab: tab)
+                }
+                pendingAIWrite = nil
+            }
+            Button("Cancel", role: .cancel) { pendingAIWrite = nil }
+        } message: { pending in
+            Text("Ask wrote this statement and it changes data. Review it before running:\n\n\(String(pending.sql.prefix(400)))")
+        }
+        .sheet(isPresented: $showingAsk) {
+            if let connectionId {
+                MobileAskSQLView(
+                    connectionId: connectionId,
+                    defaultSchema: defaultSchema,
+                    onUse: useGeneratedSQL
+                )
+            }
+        }
+    }
+
+    // MARK: - Editor
+
+    private func sqlEditor(tab: PostgresQueryTab, tabId: UUID) -> some View {
+        MobileSQLCodeEditor(
+            text: Binding(
+                get: { tab.sql },
+                set: { store.setSQL($0, forTab: tabId) }
+            ),
+            errorCharOffset: tab.errorCharOffset,
+            controller: editorController,
+            onFocusChange: { focused in
+                withAnimation(reduceMotion ? nil : .snappy) { editorFocused = focused }
+                if !focused {
+                    completions = []
+                    lastCompletionInput = nil
+                }
+            },
+            onCaretChange: updateCompletions
+        )
+        // A fresh text view per query tab (caret and undo restart on switch).
+        .id(tabId)
+        // Browse's "Open Data" opens a tab flagged to run at once; the id
+        // re-fires when the flag flips on and `consumeAutoRun` clears it, so
+        // re-renders can't double-fire (mirrors the macOS tab view).
+        .task(id: "\(tabId)-autorun-\(tab.pendingAutoRun)") {
+            guard tab.pendingAutoRun,
+                  store.consumeAutoRun(forTab: tabId),
+                  let current = store.tabs.first(where: { $0.id == tabId })
+            else { return }
+            executeSQL(tab: current)
+        }
+    }
+
+    /// The editor is the hero while you write; once rows arrive and you stop
+    /// typing it steps back to a few lines and the grid takes the screen.
+    private func editorHeight(available: CGFloat, tab: PostgresQueryTab) -> CGFloat {
+        // Never so tall that Run and the suggestions fall under the keyboard
+        // (iPhone landscape, Split View).
+        let ceiling = max(Self.smallestEditorHeight, available - Self.reservedBelowEditor)
+        if tab.lastResult != nil && !editorFocused {
+            return min(collapsedEditorHeight, ceiling)
+        }
+        return min(max(minimumEditorHeight, available * Self.expandedEditorShare), ceiling)
+    }
+
+    private func updateCompletions(text: String, cursorUTF16: Int?) {
+        let input = CompletionInput(text: text, cursorUTF16: cursorUTF16)
+        guard input != lastCompletionInput else { return }
+        lastCompletionInput = input
+        guard editorFocused,
+              let cursorUTF16,
+              let schemaStore,
+              let database = profile?.database
+        else {
+            completions = []
+            return
+        }
+        let result = SQLCompletionEngine.complete(
+            sql: text,
+            cursorUTF16: cursorUTF16,
+            catalog: schemaStore.completionCatalog(database: database)
+        )
+        // Tables the statement uses but whose columns aren't loaded yet:
+        // fetch them so the next keystroke can complete columns.
+        for relation in result.relationsNeedingColumns {
+            schemaStore.requestColumnsIfIdle(database: database, schema: relation.schema, table: relation.name)
+        }
+        completions = SQLCompletionInsertion.shouldOffer(result.items, in: text, cursorUTF16: cursorUTF16)
+            ? Array(result.items.prefix(Self.maxSuggestions))
+            : []
+    }
+
+    /// Completion only knows what's loaded; load the database's schemas and
+    /// their tables up front instead of waiting for someone to open Browse.
+    private func primeCompletionCatalog() async {
+        guard let schemaStore, let database = profile?.database else { return }
+        if schemaStore.schemasState[database]?.isLoaded != true {
+            await schemaStore.loadSchemas(database: database)
+        }
+        guard case .loaded(let schemas) = schemaStore.schemasState[database] else { return }
+        for schema in schemas.prefix(Self.primedSchemaLimit) {
+            if Task.isCancelled { return }
+            let key = PgCompositeKey.schema(database: database, schema: schema.name)
+            switch schemaStore.schemaContentsState[key] {
+            case .loaded?, .loading?:
+                continue
+            case .idle?, .failed?, nil:
+                await schemaStore.loadSchemaContents(database: database, schema: schema.name)
+            }
+        }
+    }
+
+    // MARK: - Ask
+
+    /// The schema Ask grounds its SQL in: the one Browse opens on.
+    private var defaultSchema: String {
+        guard let database = profile?.database,
+              case .loaded(let schemas)? = schemaStore?.schemasState[database]
+        else { return "public" }
+        return BrowseSchemaChoice.initial(from: schemas.map(\.name)) ?? "public"
+    }
+
+    /// Put generated SQL where you'll read it before running: into an empty
+    /// query tab, otherwise a new one — never over your own work.
+    ///
+    /// The SQL is marked as AI-written, so Run asks first if it would change
+    /// data (PgReadOnlyGuard) — the model's instructions are not a boundary.
+    private func useGeneratedSQL(_ sql: String) {
+        let tabId: UUID
+        if let tab = store.activeTab, tab.isSQLTab,
+           tab.sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            tabId = tab.id
+        } else {
+            tabId = store.openSqlTab(title: "Ask", sql: sql)
+        }
+        store.setAIGeneratedSQL(sql, forTab: tabId)
     }
 
     // MARK: - Hardware keyboard
@@ -231,6 +403,16 @@ struct MobileQueryWorkspaceView: View {
             }
 
             Spacer()
+
+            if aiAvailable, connectionId != nil {
+                Button {
+                    showingAsk = true
+                } label: {
+                    Label("Ask", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
+                .help("Describe a query in plain English")
+            }
 
             switch tab.execState {
             case .running:
@@ -375,6 +557,18 @@ struct MobileQueryWorkspaceView: View {
         let trimmed = tab.sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        // Unmodified AI-written SQL that would change data needs an explicit
+        // OK — same rule as macOS. SQL you typed or edited runs as is.
+        if let aiSQL = tab.aiGeneratedSQL,
+           aiSQL.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed,
+           !PgReadOnlyGuard.isReadOnly(trimmed) {
+            pendingAIWrite = PendingAIWrite(tabId: tab.id, sql: trimmed)
+            return
+        }
+
+        // Put the keyboard away so the results get the screen.
+        editorController.resignFocus()
+
         // A browse tab whose editor no longer matches its generated
         // SELECT has been taken over by hand-written SQL — drop the
         // pager so the page/sort controls can't re-run stale browse
@@ -386,6 +580,7 @@ struct MobileQueryWorkspaceView: View {
 
         runTask?.cancel()
         let started = Date()
+        store.setErrorPosition(nil, forTab: tab.id)
         store.setExecState(.running(startedAt: started), forTab: tab.id)
 
         let tabId = tab.id
@@ -423,7 +618,16 @@ struct MobileQueryWorkspaceView: View {
                     rowsReturned: rowsReturned
                 )
             } catch {
+                // A newer run replaced this one — its outcome is not news.
+                guard !Task.isCancelled else { return }
                 let elapsed = Date().timeIntervalSince(started)
+                // Underline where the server says the statement went wrong —
+                // unless the text was edited meanwhile and no longer matches.
+                if let bridgeError = error as? PostgresBridgeError,
+                   store.tabs.first(where: { $0.id == tabId })?.sql
+                       .trimmingCharacters(in: .whitespacesAndNewlines) == trimmed {
+                    store.setErrorPosition(bridgeError.serverError?.position, forTab: tabId)
+                }
                 store.setExecState(.failed(message: error.localizedDescription, elapsed: elapsed), forTab: tabId)
             }
         }
@@ -497,3 +701,13 @@ struct MobileQueryWorkspaceView: View {
     }
 }
 
+/// Unmodified AI-written SQL that changes data, awaiting confirmation.
+private struct PendingAIWrite {
+    let tabId: UUID
+    let sql: String
+}
+
+private struct CompletionInput: Equatable {
+    let text: String
+    let cursorUTF16: Int?
+}

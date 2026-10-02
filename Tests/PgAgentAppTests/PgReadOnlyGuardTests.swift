@@ -129,4 +129,8 @@ final class PgReadOnlyGuardTests: XCTestCase {
             }
         }
     }
+
+    func testSelectIntoRejected() {
+        XCTAssertFalse(PgReadOnlyGuard.isReadOnly("SELECT * INTO audit_copy FROM orders"))
+    }
 }

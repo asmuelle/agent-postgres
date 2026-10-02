@@ -25,8 +25,8 @@ import Foundation
 //     dollar-quoted bodies, or comments are ignored — the lexer strips
 //     them first (nested block comments handled).
 //
-// The lexing helpers here are also used by the macOS-only `PgReadOnlyGuard`
-// (AI-issued SQL screening), which layers stricter single-statement rules
+// The lexing helpers here are also used by `PgReadOnlyGuard` (AI-issued SQL
+// screening on macOS and iOS), which layers stricter single-statement rules
 // on top. Keep the lexer changes in sync with that guard's expectations.
 // =============================================================================
 
@@ -44,6 +44,10 @@ enum PostgresStatementClassifier {
         "GRANT", "REVOKE", "VACUUM", "REINDEX", "CLUSTER", "REFRESH",
         "CALL", "DO", "COPY", "LOCK", "IMPORT", "COMMENT", "SECURITY",
         "ANALYZE",
+        // `SELECT … INTO new_table` creates a table. Every other top-level
+        // INTO (INSERT/MERGE/COPY) is already a write, and PL/pgSQL's
+        // `SELECT … INTO var` lives in a stripped dollar-quoted body.
+        "INTO",
     ]
 
     /// Built-in functions with observable side effects. User-defined

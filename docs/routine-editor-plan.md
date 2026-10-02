@@ -54,7 +54,7 @@ prompts and native speed; DBeaver's lesson to **always fetch live DDL** (never c
 | The CREATE-OR-REPLACE **submit loop** (build SQL → `pgExecute` → refresh `loadSchemaContents` → surface error) | `PostgresPropertyInspectorView.executeDDL` |
 | Exec-state machine + server **error-position → editor underline** | `PostgresQueryTabView` execute path + `PostgresServerError.position` |
 | Form + **live DDL preview** + execute | `PostgresObjectWizardView` |
-| Schema-grounded **on-device AI** (generate / explain-error), availability-gated | `PgAgentApp/AI/` (`PgAIAssistant`, `PgSchemaContextBuilder`) |
+| Schema-grounded **on-device AI** (generate / explain-error), availability-gated | `PgAgentShared/AI/` (`PgAIAssistant`, `PgSchemaContextBuilder`) + mac views in `PgAgentApp/AI/` |
 | Result grid, history, saved drafts | `PostgresResultsTable`, history/saved-query stores |
 
 Build gaps: per-argument metadata over FFI (`proargnames`/`proargmodes`/
