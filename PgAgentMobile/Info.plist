@@ -44,9 +44,15 @@
     <string>pgAgent needs local network access to discover and connect to your local Postgres databases and SSH servers.</string>
     <key>NSSupportsLiveActivities</key>
     <true/>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <true/>
+    </dict>
     <key>NSUserActivityTypes</key>
     <array>
         <string>com.mc-ssh.pgAgent.route</string>
+        <string>com.pgagent.query</string>
     </array>
     <key>UILaunchScreen</key>
     <dict/>

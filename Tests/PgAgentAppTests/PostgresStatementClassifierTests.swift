@@ -155,4 +155,14 @@ final class PostgresStatementClassifierTests: XCTestCase {
         // (the leading keyword SELECT decides), not an executable write.
         XCTAssertTrue(PostgresStatementClassifier.isReadOnly("SELECT $q$DELETE FROM t$q$::text"))
     }
+
+    /// `SELECT … INTO new_table` is CREATE TABLE AS in disguise.
+    func testSelectIntoBlocked() {
+        XCTAssertFalse(PostgresStatementClassifier.isReadOnly("SELECT * INTO audit_copy FROM orders"))
+        XCTAssertFalse(PostgresStatementClassifier.isReadOnly("select id into temp t from orders"))
+    }
+
+    func testIntoInsideLiteralIsData() {
+        XCTAssertTrue(PostgresStatementClassifier.isReadOnly("SELECT 'copy into here' AS note"))
+    }
 }

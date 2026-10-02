@@ -58,6 +58,8 @@ enum PgReadOnlyGuard {
         "MOVE", "CLOSE", "LISTEN", "NOTIFY", "UNLISTEN", "CHECKPOINT",
         "DISCARD", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE",
         "START", "END", "ATTACH", "DETACH",
+        // `SELECT … INTO new_table` creates a table.
+        "INTO",
         // Known side-effecting functions; arbitrary user-defined functions
         // are additionally contained by the server-side read-only setting.
         "NEXTVAL", "SETVAL", "SET_CONFIG", "PG_NOTIFY",

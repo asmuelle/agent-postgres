@@ -9,7 +9,7 @@ struct MobileProviderImportView: View {
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @StateObject private var model = ProviderImportModel()
 
-    private let accent = Color(red: 0.15, green: 0.75, blue: 0.85) // Cyan accent
+    private let accent = MidnightColors.accentCyan // Cyan accent
 
     var body: some View {
         NavigationStack {
@@ -40,7 +40,6 @@ struct MobileProviderImportView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     // MARK: - Token entry
@@ -71,12 +70,12 @@ struct MobileProviderImportView: View {
                 } label: {
                     HStack {
                         if model.isLoading {
-                            ProgressView().tint(.black)
+                            ProgressView().tint(MidnightColors.onAccent)
                         }
                         Text(model.isLoading ? "Fetching…" : "Fetch Databases")
                             .font(MidnightMobileDesign.FontToken.label)
                     }
-                    .foregroundStyle(.black)
+                    .foregroundStyle(MidnightColors.onAccent)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
                     .background(accent)

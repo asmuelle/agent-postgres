@@ -46,13 +46,13 @@ struct MobilePropertyInspectorView: View {
                                 .font(.system(size: 14, weight: .bold))
                                 .foregroundStyle(.secondary)
                                 .frame(width: 28, height: 28)
-                                .background(Color.white.opacity(0.08))
+                                .background(MidnightColors.subtleFill)
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
                     }
                     .padding()
-                    .background(Color.black.opacity(0.3))
+                    .background(MidnightColors.recessedFill)
                 }
 
                 Picker("", selection: $activeTab) {
@@ -101,7 +101,7 @@ struct MobilePropertyInspectorView: View {
                             }
                         }
                         .padding()
-                        .background(Color.white.opacity(0.02))
+                        .background(MidnightColors.subtleFill)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .padding(.horizontal)
 
@@ -116,7 +116,7 @@ struct MobilePropertyInspectorView: View {
                                 TextField("Name", text: $editName)
                                     .textFieldStyle(.plain)
                                     .padding(10)
-                                    .background(Color.white.opacity(0.05))
+                                    .background(MidnightColors.subtleFill)
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
 
@@ -127,7 +127,7 @@ struct MobilePropertyInspectorView: View {
                                         TextField("Type", text: $editType)
                                             .textFieldStyle(.plain)
                                             .padding(10)
-                                            .background(Color.white.opacity(0.05))
+                                            .background(MidnightColors.subtleFill)
                                             .clipShape(RoundedRectangle(cornerRadius: 8))
                                     } else {
                                         Text(editType)
@@ -147,7 +147,7 @@ struct MobilePropertyInspectorView: View {
                             }
                         }
                         .padding()
-                        .background(Color.white.opacity(0.02))
+                        .background(MidnightColors.subtleFill)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .padding(.horizontal)
 
@@ -171,11 +171,11 @@ struct MobilePropertyInspectorView: View {
                                 .font(.system(.caption2, design: .monospaced))
                                 .padding(12)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.black.opacity(0.3))
+                                .background(MidnightColors.recessedFill)
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                         .padding()
-                        .background(Color.white.opacity(0.02))
+                        .background(MidnightColors.subtleFill)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .padding(.horizontal)
 
@@ -204,7 +204,7 @@ struct MobilePropertyInspectorView: View {
                                 } label: {
                                     HStack {
                                         if isExecuting {
-                                            ProgressView().tint(.black)
+                                            ProgressView().tint(MidnightColors.onAccent)
                                         } else {
                                             Text("Execute Changes")
                                                 .font(.headline)
@@ -213,7 +213,7 @@ struct MobilePropertyInspectorView: View {
                                     .frame(maxWidth: .infinity)
                                     .padding()
                                     .background(canExecute ? MidnightColors.accentCyan : Color.gray.opacity(0.2))
-                                    .foregroundStyle(.black)
+                                    .foregroundStyle(canExecute ? MidnightColors.onAccent : .secondary)
                                     .clipShape(RoundedRectangle(cornerRadius: 12))
                                 }
                                 .disabled(!canExecute)
@@ -246,7 +246,7 @@ struct MobilePropertyInspectorView: View {
                                     .font(.system(.caption, design: .monospaced))
                                     .padding(16)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Color.black.opacity(0.2))
+                                    .background(MidnightColors.recessedFill)
                             }
                         }
                         .onAppear {

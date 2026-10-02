@@ -30,7 +30,7 @@ struct ConnectionCSVImportView: View {
                 TextEditor(text: $csvText)
                     .font(.system(size: 13, design: .monospaced))
                     .padding(8)
-                    .background(Color.black.opacity(0.2))
+                    .background(MidnightColors.recessedFill)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(MidnightColors.borderGray, lineWidth: 1))
                     .padding(.horizontal)

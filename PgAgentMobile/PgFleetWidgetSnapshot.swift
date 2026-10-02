@@ -5,8 +5,8 @@ import Foundation
 // app and the lock-screen accessory widgets. The app serializes one snapshot
 // into the App Group container (group.com.pgagent.pgagent) after every fleet
 // refresh (foreground pull-to-refresh and BGAppRefresh alike); the widget
-// timeline provider reads it back. Persistence rides on the existing
-// SharedJSONFileStore (Sources/PgAgentMacOS), which both targets compile.
+// timeline provider reads it back. Persistence: PgFleetWidgetSnapshotStore.
+// Pure Foundation, so it also compiles into the hostless PgAgentMobileTests.
 //
 // ⚠️ Dual-target file: compiled into BOTH PgAgentMobile (via the group source
 // entry) and PgAgentMobileWidgets (via an explicit per-file entry in
@@ -16,6 +16,8 @@ import Foundation
 enum PgFleetWidgetConfiguration {
     static let fileName = "pg-fleet-widget-snapshot.json"
     static let accessoryWidgetKind = "PgFleetAccessoryWidget"
+    /// The Control Center / Lock Screen / Action button control.
+    static let controlKind = "com.pgagent.mobile.control.database-health"
     /// Snapshots older than this render as stale (BGAppRefresh runs ~15 min).
     static let staleAfter: TimeInterval = 45 * 60
 }
@@ -88,22 +90,49 @@ struct PgFleetWidgetSnapshot: Codable, Equatable, Sendable {
     }
 }
 
-/// Thin wrapper over the shared App Group JSON store.
-final class PgFleetWidgetSnapshotStore: @unchecked Sendable {
-    private let store: SharedJSONFileStore<PgFleetWidgetSnapshot>
+/// What the "Database Health" control shows: one short line and a symbol.
+/// Says nothing it doesn't know. A control isn't refreshed on a schedule —
+/// only when the app reloads it — so every verdict carries the time it was
+/// made ("Healthy · 09:41"), and healthy uses a neutral symbol rather than
+/// a checkmark. No snapshot, or a stale one, is just "Databases".
+struct PgFleetControlStatus: Equatable, Sendable {
+    let title: String
+    let systemImage: String
 
-    init(directoryURL: URL? = nil) {
-        store = SharedJSONFileStore(
-            fileName: PgFleetWidgetConfiguration.fileName,
-            directoryURL: directoryURL
+    static let unknown = PgFleetControlStatus(title: "Databases", systemImage: "cylinder.split.1x2")
+
+    init(title: String, systemImage: String) {
+        self.title = title
+        self.systemImage = systemImage
+    }
+
+    init(snapshot: PgFleetWidgetSnapshot?, now: Date = Date()) {
+        guard let snapshot, !snapshot.isStale(now: now) else {
+            self = .unknown
+            return
+        }
+        guard !snapshot.instances.isEmpty else {
+            self.init(title: "No Databases", systemImage: "cylinder.split.1x2")
+            return
+        }
+        let asOf = snapshot.generatedAt.formatted(date: .omitted, time: .shortened)
+        let problems = snapshot.problemCount
+        guard problems > 0 else {
+            self.init(title: "Healthy · \(asOf)", systemImage: "waveform.path.ecg")
+            return
+        }
+        self.init(
+            title: (problems == 1 ? "1 Problem" : "\(problems) Problems") + " · \(asOf)",
+            systemImage: Self.symbol(for: snapshot.worstStatus)
         )
     }
 
-    func load() throws -> PgFleetWidgetSnapshot? {
-        try store.load()
-    }
-
-    func save(_ snapshot: PgFleetWidgetSnapshot) throws {
-        try store.save(snapshot)
+    private static func symbol(for status: PgFleetInstanceStatus) -> String {
+        switch status {
+        case .offline: return "bolt.horizontal.circle"
+        case .blocked: return "lock.trianglebadge.exclamationmark"
+        case .slow: return "tortoise"
+        case .busy, .healthy: return "checkmark.circle"
+        }
     }
 }

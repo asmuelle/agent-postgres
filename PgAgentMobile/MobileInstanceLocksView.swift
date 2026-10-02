@@ -391,7 +391,7 @@ private struct LockGroupCard: View {
             HStack(spacing: 8) {
                 Image(systemName: "lock.trianglebadge.exclamationmark.fill")
                     .foregroundStyle(.red)
-                Text("Blocker PID \(group.blockerPid)")
+                Text(verbatim: "Blocker PID \(group.blockerPid)")
                     .font(MidnightMobileDesign.FontToken.captionStrong)
                     .foregroundStyle(.primary)
                 if isHighlighted {
@@ -424,7 +424,7 @@ private struct LockGroupCard: View {
                         Image(systemName: "arrow.turn.down.right")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
-                        Text("PID \(waiter.pid)")
+                        Text(verbatim: "PID \(waiter.pid)")
                             .font(MidnightMobileDesign.FontToken.caption)
                             .foregroundStyle(.primary)
                         Text(waiter.mode)

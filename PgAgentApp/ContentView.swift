@@ -80,6 +80,19 @@ struct ContentView: View {
         .onOpenURL { url in
             applyDeepLink(PgAgentDeepLink(url: url))
         }
+        // A query handed off from the user's iPad/iPhone: select its
+        // connection and let that workspace open it (PostgresHandoffInbox).
+        .onContinueUserActivity(PgQueryHandoff.activityType) { activity in
+            guard let handoff = PgQueryHandoff(userInfo: activity.userInfo),
+                  postgresStore.profile(withId: handoff.profileId) != nil
+            else { return }
+            NSApp.activateFromUserAction()
+            if selectedPostgresProfileId != handoff.profileId {
+                selectedPostgresProfileId = handoff.profileId
+                selectedNode = nil
+            }
+            PostgresHandoffInbox.shared.post(handoff)
+        }
     }
 
     /// Maps the persisted `sidebarVisible` flag onto the split view.

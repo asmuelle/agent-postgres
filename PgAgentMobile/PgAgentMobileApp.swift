@@ -10,10 +10,14 @@ struct PgAgentMobileApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
-        WindowGroup {
+        // Extra iPad windows: `openWindow(value: MobileWindowTarget(…))`
+        // opens a new window, optionally on one database. The launch window
+        // has no value.
+        WindowGroup(for: MobileWindowTarget.self) { $target in
             MobilePrivacyGateView {
-                MobileContentView()
+                MobileContentView(opening: target)
             }
+            .tint(MidnightColors.accentCyan)
             .environmentObject(entitlementsStore)
             .environmentObject(profileStore)
             .environmentObject(alertRouter)
@@ -28,6 +32,21 @@ struct PgAgentMobileApp: App {
                     FleetBackgroundMonitor.shared.schedule()
                 }
             }
+        }
+        // The app lock follows the whole app, not one window: the scene
+        // phase read here is the app-wide one (background only once every
+        // window is), reported once per change.
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background: MobileAppLock.shared.appDidEnterBackground()
+            case .active: MobileAppLock.shared.appDidBecomeActive()
+            default: break
+            }
+        }
+        // Spotlight and the Siri phrases follow your connections (names
+        // only — see DatabaseEntity). Once per change, not per window.
+        .onChange(of: profileStore.profiles.map(DatabaseEntity.init), initial: true) { _, databases in
+            MobileSpotlightIndexer.reindex(databases)
         }
         // Hardware-keyboard shortcuts (⌘↩ run, ⌘T/⌘W tabs, ⌘⇧E sidebar…);
         // see MobileKeyboardShortcuts.swift.

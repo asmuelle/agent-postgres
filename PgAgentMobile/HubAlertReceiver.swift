@@ -30,23 +30,9 @@ extension Notification.Name {
     static let pgFleetHubAlertReceived = Notification.Name("pgFleetHubAlertReceived")
 }
 
-/// Where a tapped alert should land: the affected instance, plus enough
-/// context to open the most relevant tab of the instance detail —
-/// blocked/deadlock kinds go to the lock chain (with the root blocker
-/// highlighted when known), slow/busy kinds to the activity list, offline
-/// to the fleet overview.
-struct MobileAlertRoute: Equatable, Sendable {
-    let instanceId: String
-    let kind: FleetAlertKind?
-    /// Root blocker pid from the alert payload, when the hub captured one.
-    /// Nil is fine — the lock view falls back to highlighting the current
-    /// root blocker after a fresh fetch (highlight-by-refetch).
-    let blockerPid: Int32?
-}
-
-/// Pending deep-link route. The root view observes this, presents the fleet
-/// monitor, and MobileFleetMonitorView consumes the route by pushing the
-/// instance detail on the right tab.
+/// Pending deep-link route (`MobileAlertRoute`, in MobileAppModel.swift). The
+/// active window claims it (MobileContentView) and shows it on its Pulse tab;
+/// other windows leave it alone.
 @MainActor
 final class MobileAlertRouter: ObservableObject {
     static let shared = MobileAlertRouter()

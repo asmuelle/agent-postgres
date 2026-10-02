@@ -343,6 +343,7 @@ struct MidnightSSHMobileWidgetBundle: WidgetBundle {
         MidnightSSHMobileMonitoringWidget()
         MidnightSSHOperationLiveActivityWidget()
         PgFleetAccessoryWidget()
+        PgFleetControl()
         PgOperationLiveActivityWidget()
     }
 }

@@ -271,7 +271,7 @@ struct PostgresActivityMonitorView: View {
                             selectedSession = sess
                         } label: {
                             HStack(spacing: 10) {
-                                Text("\(sess.pid)")
+                                Text(verbatim: "\(sess.pid)")
                                     .font(.system(.body, design: .monospaced))
                                     .frame(width: 50, alignment: .leading)
                                 
@@ -362,13 +362,13 @@ struct PostgresActivityMonitorView: View {
                         ForEach(blockedLocks, id: \.pid) { lock in
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack(spacing: 4) {
-                                    Text("PID \(lock.pid)")
+                                    Text(verbatim: "PID \(lock.pid)")
                                         .bold()
                                         .font(.system(size: 11, design: .monospaced))
                                     Text("is BLOCKED by")
                                         .font(MidnightMacDesign.FontToken.caption)
                                         .foregroundStyle(.red)
-                                    Text("PID \(lock.blockedByPid ?? 0)")
+                                    Text(verbatim: "PID \(lock.blockedByPid ?? 0)")
                                         .bold()
                                         .font(.system(size: 11, design: .monospaced))
                                 }
@@ -703,7 +703,7 @@ private struct PostgresSessionActionConfirmationView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(pending.challenge.title).font(.headline)
-            Text("PID \(pending.session.pid) · \(pending.session.usename) · \(pending.session.datname)")
+            Text(verbatim: "PID \(pending.session.pid) · \(pending.session.usename) · \(pending.session.datname)")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
             Text(pending.session.query ?? "No query text available")

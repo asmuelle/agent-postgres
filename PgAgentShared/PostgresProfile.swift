@@ -595,6 +595,35 @@ final class PostgresProfileStore: ObservableObject {
 }
 
 // =============================================================================
+// Display + duplicate helpers
+// =============================================================================
+
+extension PostgresProfile {
+    /// `user@host:port/database` — the endpoint line under a connection's
+    /// name. Built with `String` interpolation so the port never picks up
+    /// locale digit grouping (`Text("…\(port)…")` renders 5432 as "5.432"
+    /// in German).
+    var endpointSummary: String { "\(user)@\(host):\(port)/\(database)" }
+
+    /// `host:port/database`, for surfaces that already show the user.
+    var hostSummary: String { "\(host):\(port)/\(database)" }
+
+    /// The copy behind "Duplicate": every setting carries over — environment,
+    /// read-only, TLS, tunnel, pool tuning — under a new id and name. The
+    /// password does not (the keychain is keyed by profile id), so callers
+    /// open the editor on the copy for it to be entered.
+    func duplicated(now: Date = Date()) -> PostgresProfile {
+        var copy = self
+        copy.id = UUID().uuidString
+        copy.name = "\(name) Copy"
+        copy.createdAt = now
+        copy.updatedAt = now
+        copy.lastConnected = nil
+        return copy
+    }
+}
+
+// =============================================================================
 // Profile → FFI mapping
 // =============================================================================
 

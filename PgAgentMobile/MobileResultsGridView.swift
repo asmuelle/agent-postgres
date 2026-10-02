@@ -9,6 +9,7 @@ struct MobileResultsGridCellView: View {
     let rIdx: Int
     let cIdx: Int
     let pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit]
+    var isSelected: Bool = false
 
     private var isStaged: Bool {
         let key = PostgresPendingEditKey(rowIndex: rIdx, columnIndex: cIdx)
@@ -24,9 +25,9 @@ struct MobileResultsGridCellView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background(
-                isStaged
-                    ? MidnightColors.accentCyan.opacity(0.18)
-                    : (rIdx % 2 == 0 ? Color.black.opacity(0.1) : Color.white.opacity(0.02))
+                isStaged || isSelected
+                    ? MidnightColors.accentCyan.opacity(isSelected ? 0.22 : 0.18)
+                    : (rIdx % 2 == 0 ? MidnightColors.recessedFill : MidnightColors.subtleFill)
             )
             .border(MidnightColors.borderGray, width: 0.5)
     }
@@ -41,13 +42,26 @@ struct MobileResultsGridRowView: View {
     /// (pending-edit keys stay stable).
     let visibleColumns: [Int]
     let pendingEdits: [PostgresPendingEditKey: PostgresPendingEdit]
+    var isSelected: Bool = false
+    var onSelect: ((Int) -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 0) {
             ForEach(visibleColumns, id: \.self) { cIdx in
-                MobileResultsGridCellView(cell: cIdx < row.cells.count ? row.cells[cIdx] : nil, rIdx: rIdx, cIdx: cIdx, pendingEdits: pendingEdits)
+                MobileResultsGridCellView(
+                    cell: cIdx < row.cells.count ? row.cells[cIdx] : nil,
+                    rIdx: rIdx,
+                    cIdx: cIdx,
+                    pendingEdits: pendingEdits,
+                    isSelected: isSelected
+                )
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect?(rIdx) }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(onSelect == nil ? [] : .isButton)
+        .accessibilityHint(onSelect == nil ? "" : "Shows the whole row")
     }
 }
 
@@ -68,6 +82,13 @@ struct MobileResultsGridView: View {
     var onGoToPage: ((Int) -> Void)? = nil
     /// Cycle the sort on a column by name (browse tabs only).
     var onCycleSort: ((String) -> Void)? = nil
+    /// The row shown in the inspector, highlighted; tapping a row selects it.
+    var selectedRow: Int? = nil
+    /// Scrolled into view when it changes (the inspector stepped to it).
+    var revealedRow: Int? = nil
+    var onSelectRow: ((Int) -> Void)? = nil
+    /// Reports the rows' display order (result-row indices) as it changes.
+    var onDisplayOrderChange: (([Int]) -> Void)? = nil
 
     /// Result-column index the grid is sorted by, or `nil` for none.
     /// Used only for generic SQL tabs; browse tabs sort server-side.
@@ -120,6 +141,7 @@ struct MobileResultsGridView: View {
     }
 
     var body: some View {
+        let order = displayOrder
         VStack(spacing: 0) {
             // Grid Canvas
             if rows.isEmpty {
@@ -138,29 +160,42 @@ struct MobileResultsGridView: View {
                 ScrollView(.horizontal, showsIndicators: true) {
                     VStack(alignment: .leading, spacing: 0) {
                         headerRow
-                        ScrollView(.vertical) {
-                            LazyVStack(alignment: .leading, spacing: 0) {
-                                ForEach(displayOrder, id: \.self) { rIdx in
-                                    MobileResultsGridRowView(rIdx: rIdx, row: rows[rIdx], visibleColumns: visibleColumns, pendingEdits: pendingEdits)
-                                }
-
-                                // Cursor "Load more" lives in-scroll for
-                                // generic SQL tabs; browse tabs page via
-                                // the footer pager below instead.
-                                if browse == nil, hasMore {
-                                    Button(action: onLoadMore) {
-                                        HStack {
-                                            Spacer()
-                                            Label("Load More Pages", systemImage: "arrow.down.circle")
-                                                .font(MidnightMobileDesign.FontToken.captionStrong)
-                                                .foregroundStyle(MidnightColors.accentCyan)
-                                                .padding()
-                                            Spacer()
-                                        }
+                        ScrollViewReader { proxy in
+                            ScrollView(.vertical) {
+                                LazyVStack(alignment: .leading, spacing: 0) {
+                                    ForEach(order, id: \.self) { rIdx in
+                                        MobileResultsGridRowView(
+                                            rIdx: rIdx,
+                                            row: rows[rIdx],
+                                            visibleColumns: visibleColumns,
+                                            pendingEdits: pendingEdits,
+                                            isSelected: rIdx == selectedRow,
+                                            onSelect: onSelectRow
+                                        )
                                     }
-                                    .buttonStyle(.plain)
-                                    .frame(height: 50)
+
+                                    // Cursor "Load more" lives in-scroll for
+                                    // generic SQL tabs; browse tabs page via
+                                    // the footer pager below instead.
+                                    if browse == nil, hasMore {
+                                        Button(action: onLoadMore) {
+                                            HStack {
+                                                Spacer()
+                                                Label("Load More Pages", systemImage: "arrow.down.circle")
+                                                    .font(MidnightMobileDesign.FontToken.captionStrong)
+                                                    .foregroundStyle(MidnightColors.accentCyan)
+                                                    .padding()
+                                                Spacer()
+                                            }
+                                        }
+                                        .buttonStyle(.plain)
+                                        .frame(height: 50)
+                                    }
                                 }
+                            }
+                            .onChange(of: revealedRow) { _, row in
+                                guard let row else { return }
+                                withAnimation { proxy.scrollTo(row) }
                             }
                         }
                     }
@@ -174,7 +209,10 @@ struct MobileResultsGridView: View {
                 browsePagerFooter(browse: browse, onGoToPage: onGoToPage)
             }
         }
-        .background(MidnightColors.primaryBackground)
+        .background(MidnightColors.canvas)
+        .onChange(of: order, initial: true) { _, order in
+            onDisplayOrderChange?(order)
+        }
     }
 
     private var headerRow: some View {
@@ -209,7 +247,7 @@ struct MobileResultsGridView: View {
                     .frame(width: 140, alignment: .leading)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
-                    .background(MidnightColors.cardBackground)
+                    .background(MidnightColors.recessedFill)
                     .border(MidnightColors.borderGray, width: 0.5)
                 }
                 .buttonStyle(.plain)
@@ -269,7 +307,7 @@ struct MobileResultsGridView: View {
         .foregroundStyle(MidnightColors.accentCyan)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color.black.opacity(0.3))
+        .background(MidnightColors.recessedFill)
     }
 }
 

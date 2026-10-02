@@ -429,7 +429,7 @@ struct SidebarView: View {
 
                     PostgresEnvironmentBadge(profile: profile, compact: true)
                 }
-                Text("\(profile.user)@\(profile.host):\(profile.port)/\(profile.database)")
+                Text(profile.endpointSummary)
                     .font(MidnightMacDesign.FontToken.metadataMono)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

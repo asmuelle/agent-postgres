@@ -87,7 +87,6 @@ struct MobileMonitorSettingsView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     private func labeledValue(_ label: String, _ value: String) -> some View {

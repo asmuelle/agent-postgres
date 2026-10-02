@@ -38,6 +38,7 @@
     <key>NSUserActivityTypes</key>
     <array>
         <string>com.pgagent.route</string>
+        <string>com.pgagent.query</string>
     </array>
     <key>MSSHEnforceEntitlements</key>
     <false/>

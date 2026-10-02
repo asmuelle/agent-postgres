@@ -1,270 +1,290 @@
 import SwiftUI
-import StoreKit
 #if canImport(PgAgentMacOS)
 import PgAgentMacOS
 #endif
 
-// MARK: - App Color Palette
-enum MidnightColors {
-    static let primaryBackground = Color(red: 0.05, green: 0.05, blue: 0.08)
-    static let cardBackground = Color(red: 0.10, green: 0.10, blue: 0.14)
-    static let accentCyan = Color(red: 0.15, green: 0.75, blue: 0.85)
-    static let accentPurple = Color(red: 0.55, green: 0.35, blue: 0.85)
-    static let borderGray = Color(red: 0.20, green: 0.20, blue: 0.26)
-    
-    static func glowGradient() -> LinearGradient {
-        LinearGradient(
-            colors: [accentCyan.opacity(0.15), accentPurple.opacity(0.15)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-}
-
-@MainActor
-fileprivate final class MobileStoreCache {
-    // Connection + schema state now lives in PostgresConnectionManager.shared
-    // (the single source of truth, shared with the sidebar and macOS). Only
-    // per-profile query-tab state — which is UI state, not a connection —
-    // persists here across view recreations.
-    static var queryStores: [String: PostgresQueryTabsStore] = [:]
-}
-
-// MARK: - Main Mobile Content View
+// =============================================================================
+// MobileContentView — the app's root: three tabs, one code path for iPhone
+// (tab bar) and iPad (top tab bar / sidebar, via .sidebarAdaptable).
+//
+//   Pulse   — is every database OK? (home; also where connections are added)
+//   Query   — the SQL workspace for the current database
+//   Browse  — the current database's objects
+//
+// Owns the scene-level pieces every tab shares: the MobileAppModel (tab +
+// current database, persisted per scene), the single connection claim on the
+// current database, the window's query tabs and keyboard-shortcut relay, the
+// sheets any screen can request, alert routing, incoming Handoff, and where
+// Siri, Spotlight, the Control Center control and pgAgent:// links send it.
+//
+// One per window: on iPad each database can have its own window
+// (`openWindow(value: MobileWindowTarget(…))`), side by side in Split View or
+// Stage Manager.
+// =============================================================================
 struct MobileContentView: View {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// Set when this window was opened as an extra window ("Open in New
+    /// Window", ⌥⌘N); with a database it starts on that database's Query tab.
+    var opening: MobileWindowTarget? = nil
+
     @EnvironmentObject private var profileStore: PostgresProfileStore
     @EnvironmentObject private var entitlementsStore: MobileEntitlementsStore
     @EnvironmentObject private var alertRouter: MobileAlertRouter
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    /// The relay of the window that has focus — tells this window whether
+    /// it is the one in front when several are visible.
+    @FocusedValue(\.mobileShortcutRelay) private var focusedRelay
+    /// Used for claim/release only — not observed, so schema loads don't
+    /// re-evaluate the whole root.
+    private let connectionManager = PostgresConnectionManager.shared
+    private let navigator = MobileSystemNavigator.shared
 
-    // Top-Level Active State Shared Per Profile
-    @State private var selectedProfileId: String?
-    // Connection + schema state comes from the shared manager; observing it
-    // keeps the layout in sync as connections open/close from any surface.
-    @ObservedObject private var connectionManager = PostgresConnectionManager.shared
-
-    // Unified Object Explorer node selection bindings
-    @State private var selectedNodeId: String? = nil
-    @State private var selectedNode: PgSchemaNode? = nil
-    
-    @State private var editingProfile: PostgresProfile?
-    @State private var creatingProfile = false
-    @State private var showingProUpgrade = false
-    @State private var showingCSVImport = false
-    @State private var showingFleetMonitor = false
-    @State private var showingProviderImport = false
-    @State private var showingSSHIdentities = false
-    // iPad sidebar visibility, driven by ⌘⇧E (MobileKeyboardCommands).
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var app = MobileAppModel()
+    @StateObject private var queryStores = MobileQueryStores()
+    @StateObject private var shortcutRelay = MobileShortcutRelay()
+    /// The tabs mount only after the scene state is restored, so a launch
+    /// into Query never builds (and polls from) Pulse first.
+    @State private var hasRestored = false
+    /// A Handoff that arrived before the scene state was restored; applied
+    /// right after, so the restore can't put the window back elsewhere.
+    @State private var pendingHandoff: PgQueryHandoff?
+    @SceneStorage("selectedTab") private var storedTab: MobileAppTab = .pulse
+    @SceneStorage("currentProfileId") private var storedProfileId: String = ""
+    /// The window's opening target was applied; from then on its own scene
+    /// storage decides (even "All Databases", stored as an empty id).
+    @SceneStorage("appliedOpeningTarget") private var appliedOpeningTarget = false
 
     var body: some View {
         Group {
-            if horizontalSizeClass == .compact {
-                compactLayout
+            if hasRestored {
+                tabs
             } else {
-                regularLayout
+                Color.clear
             }
         }
-        .preferredColorScheme(.dark)
-        .sheet(isPresented: $creatingProfile) {
-            PostgresMobileConnectionEditView(profile: nil) { newProfile in
-                profileStore.saveOrUpdate(newProfile)
-                creatingProfile = false
-                selectedProfileId = newProfile.id
+        .environment(app)
+        .environmentObject(queryStores)
+        .environmentObject(shortcutRelay)
+        // Menu-bar shortcuts act on the window in front only.
+        .focusedSceneValue(\.mobileShortcutRelay, shortcutRelay)
+        .sheet(item: sheetBinding) { sheet in
+            sheetContent(sheet)
+        }
+        .onAppear(perform: restoreSceneState)
+        .onChange(of: app.selectedTab) { _, tab in storedTab = tab }
+        .onChange(of: app.currentProfileId) { _, id in storedProfileId = id ?? "" }
+        .onChange(of: profileStore.profiles.map(\.id)) { _, ids in
+            let available = Set(ids)
+            app.reconcile(availableProfileIds: available)
+            // Deleted connections take their open queries and results along.
+            queryStores.retain(only: available)
+        }
+        // Hold the current database's connection once Query or Browse has
+        // been used — across tab switches — and move the claim when the
+        // selection changes.
+        .task(id: app.connectedProfileId) {
+            guard let profileId = app.connectedProfileId,
+                  let profile = profileStore.profile(withId: profileId)
+            else { return }
+            // Claim before the first suspension so the release always pairs
+            // with it, even when the task is cancelled mid-connect.
+            let lease = connectionManager.claim(profile: profile)
+            defer { connectionManager.release(lease) }
+            await connectionManager.connectIfNeeded(profile: profile)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3600))
             }
         }
-        .sheet(item: $editingProfile) { profile in
-            PostgresMobileConnectionEditView(profile: profile) { updatedProfile in
-                profileStore.saveOrUpdate(updatedProfile)
-                editingProfile = nil
+        // A tapped alert goes to one window — the one in front — when it
+        // arrives, or when a window comes to the front with one waiting.
+        .onChange(of: alertRouter.pendingRoute) { _, _ in
+            routePendingAlert()
+        }
+        .onChange(of: scenePhase) { _, _ in
+            routePendingAlert()
+            openSystemDestination()
+        }
+        // Siri / Shortcuts / Spotlight / Control Center ask for a place in
+        // the app; widgets link to it (pgAgent://fleet). The window in front
+        // goes there.
+        .onChange(of: navigator.pending) { _, _ in
+            openSystemDestination()
+        }
+        .onOpenURL { url in
+            if let destination = MobileSystemDestination(url: url) {
+                navigator.request(destination)
             }
         }
-        .sheet(isPresented: $showingProUpgrade) {
-            MobileProUpgradeView(currentSavedHosts: profileStore.profiles.count)
-                .environmentObject(entitlementsStore)
+        // A query handed off from the user's Mac or other device: open it in
+        // a new tab on that connection — never run it.
+        .onContinueUserActivity(PgQueryHandoff.activityType) { activity in
+            guard let handoff = PgQueryHandoff(userInfo: activity.userInfo) else { return }
+            if hasRestored {
+                openHandoff(handoff)
+            } else {
+                pendingHandoff = handoff
+            }
         }
-        .sheet(isPresented: $showingCSVImport) {
-            ConnectionCSVImportView { importedProfiles in
-                for p in importedProfiles {
-                    profileStore.saveOrUpdate(p)
+        .onReceive(shortcutRelay.actions) { action in
+            switch action {
+            case .newConnection:
+                app.present(.newConnection)
+            case .newWindow:
+                if supportsMultipleWindows {
+                    openWindow(value: MobileWindowTarget(profileId: app.currentProfileId))
                 }
-                showingCSVImport = false
+            case .showTab(let tab):
+                app.selectedTab = tab
+            default:
+                break
             }
         }
-        .sheet(isPresented: $showingFleetMonitor) {
-            MobileFleetMonitorView()
-                .environmentObject(profileStore)
+    }
+
+    private var tabs: some View {
+        TabView(selection: $app.selectedTab) {
+            Tab("Pulse", systemImage: "waveform.path.ecg", value: MobileAppTab.pulse) {
+                MobilePulseView()
+            }
+            Tab("Query", systemImage: "terminal", value: MobileAppTab.query) {
+                MobileQueryTab()
+            }
+            Tab("Browse", systemImage: "square.stack.3d.up", value: MobileAppTab.browse) {
+                MobileBrowseView()
+            }
         }
-        .sheet(isPresented: $showingProviderImport) {
+        .tabViewStyle(.sidebarAdaptable)
+    }
+
+    private var sheetBinding: Binding<MobileSheet?> {
+        Binding(
+            get: { app.presentedSheet },
+            set: { if $0 == nil { app.dismissSheet() } }
+        )
+    }
+
+    /// Restore tab + database before the tabs exist, then let a Handoff or
+    /// a pending alert (cold launch from a notification) win over it.
+    private func restoreSceneState() {
+        guard !hasRestored else { return }
+        if let opening, !appliedOpeningTarget {
+            // An extra window starts on its database's Query tab (or Pulse);
+            // after that its own scene storage takes over.
+            appliedOpeningTarget = true
+            if let profileId = opening.profileId {
+                app.open(profileId: profileId, in: .query)
+            }
+        } else {
+            if !storedProfileId.isEmpty {
+                app.currentProfileId = storedProfileId
+            }
+            app.selectedTab = storedTab
+        }
+        app.reconcile(availableProfileIds: Set(profileStore.profiles.map(\.id)))
+        if let pendingHandoff {
+            self.pendingHandoff = nil
+            openHandoff(pendingHandoff)
+        }
+        routePendingAlert()
+        hasRestored = true
+        openSystemDestination()
+    }
+
+    /// Takes a pending system request (Siri, Spotlight, a control, a widget
+    /// link) if this window is in front and restored, and goes there.
+    private func openSystemDestination() {
+        guard hasRestored, isFrontWindow, let destination = navigator.take() else { return }
+        app.dismissSheetUnlessItHoldsInput()
+        switch destination {
+        case .pulse:
+            app.selectedTab = .pulse
+        case .query(let profileId):
+            show(.query, profileId: profileId)
+        case .browse(let profileId):
+            show(.browse, profileId: profileId)
+        }
+    }
+
+    /// Active, and the focused window when one has focus (several windows
+    /// are active side by side in Split View and Stage Manager).
+    private var isFrontWindow: Bool {
+        guard scenePhase == .active else { return false }
+        guard let focusedRelay else { return true }
+        return focusedRelay === shortcutRelay
+    }
+
+    /// `tab` on `profileId`, or on the current database when there's none
+    /// (or it was deleted).
+    private func show(_ tab: MobileAppTab, profileId: String?) {
+        if let profileId, profileStore.profile(withId: profileId) != nil {
+            app.open(profileId: profileId, in: tab)
+        } else {
+            app.selectedTab = tab
+        }
+    }
+
+    private func openHandoff(_ handoff: PgQueryHandoff) {
+        guard profileStore.profile(withId: handoff.profileId) != nil else { return }
+        queryStores.store(for: handoff.profileId).openSqlTab(title: handoff.title, sql: handoff.sql)
+        app.open(profileId: handoff.profileId, in: .query)
+    }
+
+    /// Alert deep link (Mac-hub push or local background alert). The window
+    /// in front claims it — only one window jumps to Pulse — and its Pulse
+    /// pushes the alerted instance's detail.
+    private func routePendingAlert() {
+        guard isFrontWindow, let route = alertRouter.pendingRoute else { return }
+        alertRouter.pendingRoute = nil
+        // Profile deleted since the alert fired: drop it, so it can't fire
+        // against an unrelated future selection.
+        guard profileStore.profiles.contains(where: { $0.id == route.instanceId }) else { return }
+        app.showAlert(route)
+    }
+
+    // MARK: - Sheets
+
+    @ViewBuilder
+    private func sheetContent(_ sheet: MobileSheet) -> some View {
+        switch sheet {
+        case .newConnection:
+            if entitlementsStore.canCreateConnection(currentCount: profileStore.profiles.count) {
+                PostgresMobileConnectionEditView(profile: nil) { newProfile in
+                    profileStore.saveOrUpdate(newProfile)
+                    app.dismissSheet()
+                    app.currentProfileId = newProfile.id
+                }
+            } else {
+                proUpgrade
+            }
+        case .editConnection(let profileId):
+            if let profile = profileStore.profile(withId: profileId) {
+                PostgresMobileConnectionEditView(profile: profile) { updated in
+                    profileStore.saveOrUpdate(updated)
+                    app.dismissSheet()
+                }
+            }
+        case .importCSV:
+            ConnectionCSVImportView { imported in
+                for profile in imported {
+                    profileStore.saveOrUpdate(profile)
+                }
+                app.dismissSheet()
+            }
+        case .importFromProvider:
             MobileProviderImportView()
                 .environmentObject(profileStore)
-        }
-        .sheet(isPresented: $showingSSHIdentities) {
+        case .sshKeys:
             MobileSSHIdentityListView()
-        }
-        // Alert-notification deep link: tapping a fleet alert (Mac-hub push or
-        // local BGAppRefresh notification) lands on the monitoring surface.
-        // This view only presents the fleet monitor; MobileFleetMonitorView
-        // consumes the route by pushing the instance detail on the tab that
-        // matches the alert kind (locks / activity / fleet overview).
-        // `initial: true` also consumes a route set before the view existed
-        // (cold launch from a notification).
-        .onChange(of: alertRouter.pendingRoute, initial: true) { _, route in
-            guard let route else { return }
-            guard profileStore.profiles.contains(where: { $0.id == route.instanceId }) else {
-                // Profile was deleted since the alert fired — drop the route
-                // so it can't fire against an unrelated future selection.
-                alertRouter.pendingRoute = nil
-                return
-            }
-            showingFleetMonitor = true
-        }
-        .onReceive(MobileShortcutRelay.shared.actions) { action in
-            guard action == .toggleSidebar, horizontalSizeClass != .compact else { return }
-            withAnimation {
-                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-            }
-        }
-        // Properties sheet removed to present all node details directly in the main query workspace pane.
-    }
-    
-    // MARK: - iPadOS Two-Pane Adaptive Split Layout
-    private var regularLayout: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            MobileObjectExplorerView(
-                selectedProfileId: $selectedProfileId,
-                selectedNodeId: $selectedNodeId,
-                selectedNode: $selectedNode,
-                onAddProfile: handleAddProfile,
-                onEditProfile: { p in editingProfile = p },
-                onShowCSVImport: { showingCSVImport = true },
-                onOpenNodeTab: { profile, node, details in
-                    let qStore = queryStore(forProfileId: profile.id)
-                    let kind = details["kind"] ?? ""
-                    let schema = details["schema"] ?? ""
-                    let name = details["name"] ?? ""
-                    
-                    switch kind {
-                    case "relation":
-                        // Kind-aware so views/foreign tables get a
-                        // ctid-free SELECT (no ctid on those).
-                        qStore.openRelationTab(
-                            schema: schema,
-                            name: name,
-                            relationKind: connectionManager.schemaStores[profile.id]?
-                                .relationDisplayKind(schema: schema, name: name)
-                        )
-                    case "routine":
-                        let signature = details["signature"] ?? ""
-                        qStore.openRoutineTab(schema: schema, name: name, signature: signature)
-                    case "sequence":
-                        qStore.openSequenceTab(schema: schema, name: name)
-                    case "objectType":
-                        let typeKind = details["typeKind"] ?? ""
-                        qStore.openObjectTypeTab(schema: schema, name: name, typeKind: typeKind)
-                    case "properties":
-                        qStore.openPropertyTab(node: node)
-                    default:
-                        break
-                    }
-                }
-            )
-            .navigationTitle("Object Explorer")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button { showingFleetMonitor = true } label: {
-                        Label("Fleet Monitor", systemImage: "waveform.path.ecg")
-                    }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button { showingProviderImport = true } label: {
-                        Label("Add from Provider", systemImage: "cloud")
-                    }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button { showingSSHIdentities = true } label: {
-                        Label("SSH Identities", systemImage: "key.horizontal")
-                    }
-                }
-            }
-        } detail: {
-            if let profileId = selectedProfileId,
-               let profile = profileStore.profiles.first(where: { $0.id == profileId }) {
-                
-                // Tabbed SQL Query Workspace & Results
-                MobileProfileWorkspaceView(
-                    profile: profile,
-                    queryStore: queryStore(forProfileId: profileId),
-                    forceRegularMode: true
-                )
-            } else {
-                VStack(spacing: 16) {
-                    Image(systemName: "cylinder.split.1x2.fill")
-                        .font(.system(size: 64))
-                        .foregroundStyle(MidnightColors.borderGray)
-                    Text("Select a Database Server")
-                        .font(MidnightMobileDesign.FontToken.headline)
-                        .foregroundStyle(.primary)
-                    Text("Select or expand a server in the Object Explorer sidebar to begin.")
-                        .font(MidnightMobileDesign.FontToken.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 40)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(MidnightColors.primaryBackground)
-            }
+        case .pro:
+            proUpgrade
+        case .alertSettings:
+            MobileMonitorSettingsView()
         }
     }
-    
-    // MARK: - iOS Compact NavigationStack Layout
-    private var compactLayout: some View {
-        NavigationStack {
-            MobileConnectionListView(
-                selectedProfileId: $selectedProfileId,
-                onAddProfile: handleAddProfile,
-                onEditProfile: { p in editingProfile = p },
-                onShowCSVImport: { showingCSVImport = true },
-                onShowProviderImport: { showingProviderImport = true },
-                onShowProUpgrade: { showingProUpgrade = true },
-                onShowMonitor: { showingFleetMonitor = true },
-                onShowSSHIdentities: { showingSSHIdentities = true }
-            )
-            .navigationTitle("pgAgent")
-            .navigationDestination(item: $selectedProfileId) { profileId in
-                if let profile = profileStore.profiles.first(where: { $0.id == profileId }) {
-                    MobileProfileWorkspaceView(
-                        profile: profile,
-                        queryStore: queryStore(forProfileId: profileId),
-                        forceRegularMode: false
-                    )
-                }
-            }
-        }
-    }
-    
-    // MARK: - Helpers
-    private func handleAddProfile() {
-        if entitlementsStore.canCreateConnection(currentCount: profileStore.profiles.count) {
-            creatingProfile = true
-        } else {
-            showingProUpgrade = true
-        }
-    }
-    
-    private func queryStore(forProfileId profileId: String) -> PostgresQueryTabsStore {
-        if let existing = MobileStoreCache.queryStores[profileId] {
-            return existing
-        }
-        let newStore = PostgresQueryTabsStore()
-        newStore.openBlankTab()
-        MobileStoreCache.queryStores[profileId] = newStore
-        return newStore
+
+    private var proUpgrade: some View {
+        MobileProUpgradeView(currentSavedHosts: profileStore.profiles.count)
+            .environmentObject(entitlementsStore)
     }
 }
-
-// MARK: - Profile ID Navigation extension
-extension String: @retroactive Identifiable {
-    public var id: String { self }
-}
-

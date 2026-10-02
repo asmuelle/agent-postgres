@@ -21,6 +21,7 @@ struct PostgresWorkspaceView: View {
     @Binding var schemaStore: PgSchemaStore?
 
     @StateObject private var queryStore = PostgresQueryTabsStore()
+    @ObservedObject private var handoffInbox = PostgresHandoffInbox.shared
     @State private var isPresentingWizard = false
     @State private var isPresentingBackupRestore = false
     @State private var wizardDefaultSchema = "public"
@@ -83,6 +84,26 @@ struct PostgresWorkspaceView: View {
             .onReceive(NotificationCenter.default.publisher(for: .openPostgresObjectTab)) { notification in
                 handleOpenTabNotification(notification)
             }
+            // A query handed off from the user's iPad/iPhone for this
+            // connection: open it as a tab (never run it). Checked after a
+            // render, so a handoff that also switched the connection is seen
+            // once this view shows that connection.
+            .onChange(of: handoffInbox.pending, initial: true) { _, _ in
+                openHandedOffQuery()
+            }
+            .onChange(of: profile.id) { _, _ in
+                openHandedOffQuery()
+            }
+            // Handoff: the active query continues on the user's iPad or
+            // iPhone (connection + SQL only — never results).
+            .userActivity(PgQueryHandoff.activityType, isActive: currentHandoff != nil) { activity in
+                guard let handoff = currentHandoff else { return }
+                activity.title = handoff.title
+                activity.isEligibleForHandoff = true
+                activity.isEligibleForSearch = false
+                activity.isEligibleForPublicIndexing = false
+                activity.userInfo = handoff.userInfo
+            }
             .task(id: profile.id) {
                 // Claim before the first suspension so the release always
                 // pairs with it, even when the task is cancelled mid-connect.
@@ -94,6 +115,17 @@ struct PostgresWorkspaceView: View {
                     try? await Task.sleep(for: .seconds(3600))
                 }
             }
+    }
+
+    private func openHandedOffQuery() {
+        guard let handoff = handoffInbox.take(for: profile.id) else { return }
+        queryStore.openSqlTab(title: handoff.title, sql: handoff.sql)
+    }
+
+    /// What Handoff advertises: the active SQL tab, if it holds any SQL.
+    private var currentHandoff: PgQueryHandoff? {
+        guard let tab = queryStore.activeTab, tab.isSQLTab else { return nil }
+        return PgQueryHandoff(profileId: profile.id, sql: tab.sql, title: tab.title)
     }
 
     private func handleOpenTabNotification(_ notification: Notification) {

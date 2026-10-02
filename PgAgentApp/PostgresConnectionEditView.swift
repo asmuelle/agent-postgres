@@ -185,7 +185,7 @@ struct PostgresConnectionEditView: View {
                                 Picker("SSH connection", selection: $tunnelSshProfileId) {
                                     Text("Select…").tag(String?.none)
                                     ForEach(sshTunnelCandidates, id: \.id) { p in
-                                        Text("\(p.name) (\(p.username)@\(p.host):\(p.port))")
+                                        Text(verbatim: "\(p.name) (\(p.username)@\(p.host):\(p.port))")
                                             .tag(Optional(p.id))
                                     }
                                 }
