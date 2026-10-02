@@ -2,9 +2,11 @@ import StoreKit
 import StoreKitTest
 import XCTest
 
-// `MobileEntitlementsStore.swift` is compiled directly into this logic-test
-// target (see project.yml), so the ids under test are the exact same source of
-// truth the app ships — no `@testable import` of the full iOS app required.
+// `MobileEntitlementsStore.swift` is compiled directly into this test target
+// (see project.yml), so the ids under test are the exact same source of truth
+// the app ships — no `@testable import` of the full iOS app required. The
+// target is hosted by the empty PgAgentStoreKitTestHost app: SKTestSession is
+// rejected by storekitd in a hostless xctest and every lookup returns nothing.
 
 /// Guards against the "empty paywall" failure mode: if any id in
 /// `MobileEntitlementsStore.configuredProductIds` is not actually a sellable

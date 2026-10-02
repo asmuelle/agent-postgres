@@ -381,8 +381,25 @@ targets:
         # @testable-imports PgAgentApp; needs the same module-map path.
         SWIFT_INCLUDE_PATHS: $(SRCROOT)/bindings
 
-  # StoreKit product-config guard. A pure iOS logic test (no app host, no Rust
-  # link) that resolves every id in MobileEntitlementsStore.configuredProductIds
+  # Minimal host for PgAgentMobileTests. StoreKit Testing needs an app process
+  # to attach Products.storekit to; a hostless xctest is rejected by storekitd
+  # and every product lookup comes back empty. No Rust, no app launch path.
+  PgAgentStoreKitTestHost:
+    type: application
+    platform: iOS
+    sources:
+      - path: Tests/PgAgentStoreKitTestHost
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile.storekit-test-host
+        PRODUCT_NAME: PgAgentStoreKitTestHost
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+
+  # StoreKit product-config guard. An iOS unit test hosted by the empty
+  # PgAgentStoreKitTestHost (no Rust link) that resolves every id in
+  # MobileEntitlementsStore.configuredProductIds
   # against Products.storekit. Fails the build if an id is unsellable — the
   # "empty paywall" failure mode. MobileEntitlementsStore.swift is compiled in
   # directly so the ids under test are the same source of truth the app ships.
@@ -419,13 +436,16 @@ targets:
       - path: PgAgentShared/FleetMonitorSettings.swift
       - path: PgAgentShared/PostgresSQLQuoting.swift
     dependencies:
+      - target: PgAgentStoreKitTestHost
       - sdk: StoreKitTest.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pgagent.mobile.tests
         PRODUCT_NAME: PgAgentMobileTests
         GENERATE_INFOPLIST_FILE: YES
-        TEST_HOST: ""
+        # Hosted only so storekitd accepts the SKTestSession; the tests compile
+        # their own copies of the sources above, so no BUNDLE_LOADER.
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/PgAgentStoreKitTestHost.app/PgAgentStoreKitTestHost
 
 # Aggregate scheme so one ⌘U runs every macOS test bundle (framework + app/FFI)
 # in a single pass. iOS tests stay separate — Xcode can't mix macOS and iOS
