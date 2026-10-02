@@ -48,4 +48,29 @@ final class MobileAppLockTests: XCTestCase {
 
         XCTAssertFalse(lock.isLocked)
     }
+
+    // MARK: - Engaged while away (Siri, Shortcuts)
+
+    /// A background intent runs with no window, so `isLocked` hasn't been
+    /// set yet; being away long enough already counts.
+    func testEngagedWhileAwayLongEnoughEvenBeforeComingBack() {
+        let lock = MobileAppLock(lockAfter: 120)
+        lock.appDidEnterBackground(at: start)
+
+        XCTAssertFalse(lock.isEngaged(at: start.addingTimeInterval(119)))
+        XCTAssertTrue(lock.isEngaged(at: start.addingTimeInterval(120)))
+    }
+
+    func testEngagedWhenLocked() {
+        let lock = MobileAppLock(lockAfter: 120)
+        lock.appDidEnterBackground(at: start)
+        lock.appDidBecomeActive(at: start.addingTimeInterval(300))
+
+        XCTAssertTrue(lock.isEngaged(at: start.addingTimeInterval(301)))
+    }
+
+    func testNotEngagedInUse() {
+        let lock = MobileAppLock(lockAfter: 120)
+        XCTAssertFalse(lock.isEngaged(at: start))
+    }
 }

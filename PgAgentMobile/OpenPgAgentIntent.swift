@@ -26,6 +26,9 @@ enum PgAgentDestination: String, AppEnum {
 struct OpenPgAgentIntent: OpenIntent {
     static let title: LocalizedStringResource = "Open pgAgent"
     static let description = IntentDescription("Opens Pulse, Query or Browse.")
+    /// Only ever in the app: `perform` hands the destination to the app's
+    /// navigator, and the extension's copy of it leads nowhere.
+    static let allowedExecutionTargets: IntentExecutionTargets = .main
 
     @Parameter(title: "Place", default: .pulse)
     var target: PgAgentDestination

@@ -32,6 +32,9 @@ struct MobileContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    /// The relay of the window that has focus — tells this window whether
+    /// it is the one in front when several are visible.
+    @FocusedValue(\.mobileShortcutRelay) private var focusedRelay
     /// Used for claim/release only — not observed, so schema loads don't
     /// re-evaluate the whole root.
     private let connectionManager = PostgresConnectionManager.shared
@@ -191,8 +194,8 @@ struct MobileContentView: View {
     /// Takes a pending system request (Siri, Spotlight, a control, a widget
     /// link) if this window is in front and restored, and goes there.
     private func openSystemDestination() {
-        guard hasRestored, scenePhase == .active, let destination = navigator.take() else { return }
-        app.dismissSheet()
+        guard hasRestored, isFrontWindow, let destination = navigator.take() else { return }
+        app.dismissSheetUnlessItHoldsInput()
         switch destination {
         case .pulse:
             app.selectedTab = .pulse
@@ -201,6 +204,14 @@ struct MobileContentView: View {
         case .browse(let profileId):
             show(.browse, profileId: profileId)
         }
+    }
+
+    /// Active, and the focused window when one has focus (several windows
+    /// are active side by side in Split View and Stage Manager).
+    private var isFrontWindow: Bool {
+        guard scenePhase == .active else { return false }
+        guard let focusedRelay else { return true }
+        return focusedRelay === shortcutRelay
     }
 
     /// `tab` on `profileId`, or on the current database when there's none
@@ -223,7 +234,7 @@ struct MobileContentView: View {
     /// in front claims it — only one window jumps to Pulse — and its Pulse
     /// pushes the alerted instance's detail.
     private func routePendingAlert() {
-        guard scenePhase == .active, let route = alertRouter.pendingRoute else { return }
+        guard isFrontWindow, let route = alertRouter.pendingRoute else { return }
         alertRouter.pendingRoute = nil
         // Profile deleted since the alert fired: drop it, so it can't fire
         // against an unrelated future selection.

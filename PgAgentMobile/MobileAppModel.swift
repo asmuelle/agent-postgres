@@ -24,6 +24,14 @@ enum MobileSheet: Hashable, Identifiable {
     case alertSettings
 
     var id: Self { self }
+
+    /// Forms with typing in them; nothing may close them but the user.
+    var holdsUserInput: Bool {
+        switch self {
+        case .newConnection, .editConnection, .importCSV, .importFromProvider: return true
+        case .sshKeys, .pro, .alertSettings: return false
+        }
+    }
 }
 
 /// Where a tapped alert should land: the affected instance, plus enough
@@ -80,9 +88,9 @@ final class MobileAppModel {
     /// A tapped alert this window claimed; Pulse pushes its detail and clears it.
     var alertRoute: MobileAlertRoute?
 
-    /// Show a tapped alert: Pulse, in front of everything.
+    /// Show a tapped alert: Pulse, in front of everything but a half-typed form.
     func showAlert(_ route: MobileAlertRoute) {
-        dismissSheet()
+        dismissSheetUnlessItHoldsInput()
         selectedTab = .pulse
         alertRoute = route
     }
@@ -95,6 +103,13 @@ final class MobileAppModel {
     }
 
     func dismissSheet() {
+        presentedSheet = nil
+    }
+
+    /// For navigation the user didn't start here (Siri, Spotlight, a
+    /// control): clear the way, but never throw away a half-typed form.
+    func dismissSheetUnlessItHoldsInput() {
+        guard presentedSheet?.holdsUserInput != true else { return }
         presentedSheet = nil
     }
 

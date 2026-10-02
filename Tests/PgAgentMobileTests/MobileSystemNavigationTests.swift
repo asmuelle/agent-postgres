@@ -51,4 +51,22 @@ final class MobileSystemNavigationTests: XCTestCase {
 
         XCTAssertEqual(navigator.take(), .query(profileId: "a"))
     }
+
+    /// A request nobody took in time (say, the unlock was cancelled) must
+    /// not fire later, when the user opens the app for something else.
+    func testAnOldRequestExpires() {
+        let navigator = MobileSystemNavigator()
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        navigator.request(.pulse, at: start)
+
+        XCTAssertNil(navigator.take(at: start.addingTimeInterval(MobileSystemNavigator.requestLifetime + 1)))
+    }
+
+    func testARecentRequestIsTaken() {
+        let navigator = MobileSystemNavigator()
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        navigator.request(.pulse, at: start)
+
+        XCTAssertEqual(navigator.take(at: start.addingTimeInterval(1)), .pulse)
+    }
 }

@@ -92,20 +92,38 @@ struct OpenDatabaseIntent: OpenIntent {
 
 /// Keeps Spotlight and the Siri phrases in step with your connections:
 /// re-indexed whenever one is added, renamed or deleted.
+///
+/// One pass at a time, in order — overlapping passes could put a deleted
+/// connection back. Each pass indexes the current set first, then removes
+/// only the ones that are gone, so Spotlight is never left empty.
+@MainActor
 enum MobileSpotlightIndexer {
     private static let logger = Logger(subsystem: "com.mc-ssh", category: "spotlight")
+    private static let indexedIdsKey = "spotlight.indexedDatabaseIds"
+    private static var lastPass: Task<Void, Never>?
 
-    @MainActor
     static func reindex(_ databases: [DatabaseEntity]) {
-        Task {
-            let index = CSSearchableIndex.default()
-            do {
-                try await index.deleteAppEntities(ofType: DatabaseEntity.self)
-                try await index.indexAppEntities(databases)
-            } catch {
-                logger.error("Spotlight indexing failed: \(error.localizedDescription, privacy: .public)")
-            }
+        let previousPass = lastPass
+        lastPass = Task {
+            await previousPass?.value
+            await index(databases)
         }
         PgAgentShortcuts.updateAppShortcutParameters()
+    }
+
+    private static func index(_ databases: [DatabaseEntity]) async {
+        let index = CSSearchableIndex.default()
+        let current = Set(databases.map(\.id))
+        let previous = Set(UserDefaults.standard.stringArray(forKey: indexedIdsKey) ?? [])
+        do {
+            try await index.indexAppEntities(databases)
+            let removed = previous.subtracting(current)
+            if !removed.isEmpty {
+                try await index.deleteAppEntities(identifiedBy: Array(removed), ofType: DatabaseEntity.self)
+            }
+            UserDefaults.standard.set(Array(current), forKey: indexedIdsKey)
+        } catch {
+            logger.error("Spotlight indexing failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

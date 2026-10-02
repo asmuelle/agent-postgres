@@ -27,20 +27,29 @@ final class PgFleetControlStatusTests: XCTestCase {
         XCTAssertEqual(PgFleetControlStatus(snapshot: snapshot([]), now: now).title, "No Databases")
     }
 
-    func testAllHealthyCountsBusyAsHealthy() {
-        let status = PgFleetControlStatus(snapshot: snapshot([.healthy, .busy]), now: now)
-        XCTAssertEqual(status.title, "All Healthy")
-        XCTAssertEqual(status.systemImage, "checkmark.circle")
+    /// A control isn't refreshed on a schedule, so it says when it looked —
+    /// "Healthy" alone could outlive the truth by hours.
+    private func asOf(_ snapshot: PgFleetWidgetSnapshot) -> String {
+        snapshot.generatedAt.formatted(date: .omitted, time: .shortened)
+    }
+
+    func testHealthySaysWhenItLooked() {
+        let fleet = snapshot([.healthy, .busy])
+        let status = PgFleetControlStatus(snapshot: fleet, now: now)
+        XCTAssertEqual(status.title, "Healthy · \(asOf(fleet))")
+        XCTAssertEqual(status.systemImage, "waveform.path.ecg")
     }
 
     func testCountsProblemsAndShowsTheWorst() {
-        let status = PgFleetControlStatus(snapshot: snapshot([.healthy, .slow, .offline]), now: now)
-        XCTAssertEqual(status.title, "2 Problems")
+        let fleet = snapshot([.healthy, .slow, .offline])
+        let status = PgFleetControlStatus(snapshot: fleet, now: now)
+        XCTAssertEqual(status.title, "2 Problems · \(asOf(fleet))")
         XCTAssertEqual(status.systemImage, "bolt.horizontal.circle")
     }
 
     func testOneProblem() {
-        XCTAssertEqual(PgFleetControlStatus(snapshot: snapshot([.blocked]), now: now).title, "1 Problem")
+        let fleet = snapshot([.blocked])
+        XCTAssertEqual(PgFleetControlStatus(snapshot: fleet, now: now).title, "1 Problem · \(asOf(fleet))")
     }
 
     /// An old snapshot says nothing about now — no false "All Healthy".

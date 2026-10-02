@@ -41,17 +41,26 @@ enum MobileSystemDestination: Equatable, Sendable {
 @Observable
 final class MobileSystemNavigator {
     static let shared = MobileSystemNavigator()
+    /// A request nobody took within this long is dropped — it mustn't fire
+    /// later, when the app is opened for something else.
+    static let requestLifetime: TimeInterval = 10
 
     /// The request no window has taken yet; a newer one replaces it.
     private(set) var pending: MobileSystemDestination?
+    @ObservationIgnored private var requestedAt: Date?
 
-    func request(_ destination: MobileSystemDestination) {
+    func request(_ destination: MobileSystemDestination, at date: Date = .now) {
         pending = destination
+        requestedAt = date
     }
 
-    /// The pending request, removing it.
-    func take() -> MobileSystemDestination? {
-        defer { pending = nil }
+    /// The pending request, removing it; `nil` once it has expired.
+    func take(at date: Date = .now) -> MobileSystemDestination? {
+        defer {
+            pending = nil
+            requestedAt = nil
+        }
+        guard let requestedAt, date.timeIntervalSince(requestedAt) <= Self.requestLifetime else { return nil }
         return pending
     }
 }

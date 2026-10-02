@@ -91,8 +91,10 @@ struct PgFleetWidgetSnapshot: Codable, Equatable, Sendable {
 }
 
 /// What the "Database Health" control shows: one short line and a symbol.
-/// Says nothing it doesn't know — no snapshot or a stale one is just
-/// "Databases", never a false "All Healthy".
+/// Says nothing it doesn't know. A control isn't refreshed on a schedule —
+/// only when the app reloads it — so every verdict carries the time it was
+/// made ("Healthy · 09:41"), and healthy uses a neutral symbol rather than
+/// a checkmark. No snapshot, or a stale one, is just "Databases".
 struct PgFleetControlStatus: Equatable, Sendable {
     let title: String
     let systemImage: String
@@ -113,13 +115,14 @@ struct PgFleetControlStatus: Equatable, Sendable {
             self.init(title: "No Databases", systemImage: "cylinder.split.1x2")
             return
         }
+        let asOf = snapshot.generatedAt.formatted(date: .omitted, time: .shortened)
         let problems = snapshot.problemCount
         guard problems > 0 else {
-            self.init(title: "All Healthy", systemImage: "checkmark.circle")
+            self.init(title: "Healthy · \(asOf)", systemImage: "waveform.path.ecg")
             return
         }
         self.init(
-            title: problems == 1 ? "1 Problem" : "\(problems) Problems",
+            title: (problems == 1 ? "1 Problem" : "\(problems) Problems") + " · \(asOf)",
             systemImage: Self.symbol(for: snapshot.worstStatus)
         )
     }

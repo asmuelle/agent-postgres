@@ -111,4 +111,18 @@ final class MobileAppModelTests: XCTestCase {
     func testWindowTargetsForTheSameDatabaseAreDistinct() {
         XCTAssertNotEqual(MobileWindowTarget(profileId: "a"), MobileWindowTarget(profileId: "a"))
     }
+
+    /// Siri, Spotlight or a control can move the window, but never throw
+    /// away a half-typed connection form.
+    func testSystemNavigationKeepsAFormButClosesOtherSheets() {
+        let model = MobileAppModel()
+        model.present(.newConnection)
+        model.dismissSheetUnlessItHoldsInput()
+        XCTAssertEqual(model.presentedSheet, .newConnection)
+
+        model.dismissSheet()
+        model.present(.pro)
+        model.dismissSheetUnlessItHoldsInput()
+        XCTAssertNil(model.presentedSheet)
+    }
 }

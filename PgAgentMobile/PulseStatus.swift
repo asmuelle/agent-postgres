@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 // =============================================================================
 // PulseStatus — the one-word answer to "is my database OK?" that leads every
@@ -18,6 +19,11 @@ struct PulseStatus: Equatable {
 
     /// - Parameter isProduction: an unreachable production database is an
     ///   incident (critical); any other unreachable database is just off.
+    /// A database that didn't answer before a deadline (Siri's check).
+    static let noAnswer = PulseStatus(
+        title: "No Answer", detail: nil, tone: .muted, systemImage: "clock.badge.questionmark"
+    )
+
     static func make(from health: FleetInstanceHealth, isProduction: Bool) -> PulseStatus {
         guard health.lastUpdated != nil else {
             return PulseStatus(title: "Checking…", detail: nil, tone: .muted, systemImage: "ellipsis.circle")
@@ -77,5 +83,16 @@ struct PulseStatus: Equatable {
             parts.append("\(Int(latency.rounded())) ms")
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+extension PulseStatus.Tone {
+    var color: Color {
+        switch self {
+        case .good: return .green
+        case .warning: return .orange
+        case .critical: return .red
+        case .muted: return .secondary
+        }
     }
 }

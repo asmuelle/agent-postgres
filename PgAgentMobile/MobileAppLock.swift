@@ -39,6 +39,15 @@ final class MobileAppLock {
         isLocked = true
     }
 
+    /// Whether the app counts as locked right now — also while it is still
+    /// away, before any window has come back to set `isLocked`. What Siri
+    /// and Shortcuts check: they run with no window at all.
+    func isEngaged(at date: Date = .now) -> Bool {
+        if isLocked { return true }
+        guard let backgroundedAt else { return false }
+        return date.timeIntervalSince(backgroundedAt) >= lockAfter
+    }
+
     /// Called after a successful Face ID / passcode check.
     func unlock() {
         isLocked = false

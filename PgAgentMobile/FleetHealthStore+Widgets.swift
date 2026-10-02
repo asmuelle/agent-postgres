@@ -39,8 +39,16 @@ extension FleetHealthStore {
         let snapshot = PgFleetWidgetSnapshot(generatedAt: Date(), instances: instances)
         try? PgFleetWidgetSnapshotStore().save(snapshot)
         WidgetCenter.shared.reloadTimelines(ofKind: PgFleetWidgetConfiguration.accessoryWidgetKind)
-        ControlCenter.shared.reloadControls(ofKind: PgFleetWidgetConfiguration.controlKind)
+        // Pulse refreshes every few seconds; wake the control's extension
+        // only when what it shows changes (at most once a minute).
+        let controlStatus = PgFleetControlStatus(snapshot: snapshot)
+        if controlStatus != Self.publishedControlStatus {
+            Self.publishedControlStatus = controlStatus
+            ControlCenter.shared.reloadControls(ofKind: PgFleetWidgetConfiguration.controlKind)
+        }
     }
+
+    private static var publishedControlStatus: PgFleetControlStatus?
 }
 
 private extension PgFleetInstanceStatus {
