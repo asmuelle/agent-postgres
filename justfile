@@ -411,21 +411,27 @@ run-on-iphone name="":
 # specific device (not `generic/platform=iOS`) so `-allowProvisioningUpdates`
 # can auto-register brand-new hardware — a generic build cannot, and fails with
 # "provisioning profile cannot be installed on this device" on a new device.
+# Since Xcode 27, `devicectl list devices` identifies physical devices by their
+# hardware UDID (8-16 hex, not a CoreDevice UUID) and also lists simulators, so
+# both ID shapes are accepted and `simulated` rows are skipped. `just` passes
+# `name=Foo` after the recipe literally, so a leading `name=` is stripped.
 run-on-device name="" kind="iPhone|iPad":
     @just _ensure-xcodeproj
     @just _ios-device-rust Debug
     @app="{{ios_dev_app}}"; \
     bundle="{{ios_bundle}}"; \
     name="{{name}}"; \
-    uuid='[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'; \
+    name="${name#name=}"; \
+    devid='[0-9A-Fa-f]{8}-([0-9A-Fa-f]{16}|[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})'; \
     devices="$(xcrun devicectl list devices)"; \
     if [ -n "$name" ]; then \
         rows="$(printf '%s\n' "$devices" | grep -F "$name" || true)"; \
     else \
         rows="$(printf '%s\n' "$devices" | grep -iE '{{kind}}' || true)"; \
     fi; \
+    rows="$(printf '%s\n' "$rows" | grep -v 'simulated' || true)"; \
     row="$(printf '%s\n' "$rows" | grep -v 'unavailable' | head -n1)"; \
-    device="$(printf '%s\n' "$row" | grep -oE "$uuid" | head -n1 || true)"; \
+    device="$(printf '%s\n' "$row" | grep -oE "$devid" | head -n1 || true)"; \
     if [ -z "$device" ]; then \
         if printf '%s\n' "$rows" | grep -q 'unavailable'; then \
             echo "Device is paired but unavailable. Unlock it, keep it plugged in (or on the same Wi-Fi), trust this Mac, then retry."; \
